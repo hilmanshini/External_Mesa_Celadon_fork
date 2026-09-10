@@ -13,15 +13,25 @@ modified and thus is unreliable).
 
 The CI runs a number of tests, from trivial build-testing to complex GPU rendering:
 
-- Build testing for a number of build systems, configurations and platforms
+- Build testing for a number of configurations and platforms
 - Sanity checks (``meson test``)
-- Some drivers (Softpipe, LLVMpipe, Freedreno and Panfrost) are also tested
-  using `VK-GL-CTS <https://github.com/KhronosGroup/VK-GL-CTS>`__
+- Most drivers are also tested using several test suites, such as the
+  `Vulkan/GL/GLES conformance test suite <https://github.com/KhronosGroup/VK-GL-CTS>`__,
+  `Piglit <https://gitlab.freedesktop.org/mesa/piglit>`__, and others.
 - Replay of application traces
 
 A typical run takes between 20 and 30 minutes, although it can go up very quickly
 if the GitLab runners are overwhelmed, which happens sometimes. When it does happen,
 not much can be done besides waiting it out, or cancel it.
+
+It is a good practice to check the ``Marge`` 
+`queue <https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests?assignee_username=marge-bot>`__ 
+to evaluate if it is the right moment to trigger some testing jobs. ``Marge`` 
+is configured to pick the MRs by assignment time, and this sort option is not 
+available in the Web UI. The `marge_queue <#marge-queue>`__ CLI tool 
+provides the list sorted by assignment time. The recommended way to manage the 
+trigger of those jobs is using our :abbr:`crnm (bin/ci/ci_run_n_monitor.sh)` 
+`cli tool <#running-specific-ci-jobs>`__.
 
 Due to limited resources, we currently do not run the CI automatically
 on every push; instead, we only run it automatically once the MR has
@@ -34,12 +44,16 @@ If the GitLab CI doesn't seem to be running on your fork (or MRs, as they run
 in the context of your fork), you should check the "Settings" of your fork.
 Under "CI / CD" → "General pipelines", make sure "Custom CI config path" is
 empty (or set to the default ``.gitlab-ci.yml``), and that the
-"Public pipelines" box is checked.
+"Project-based pipeline visibility" box is checked.
 
-If you're having issues with the GitLab CI, your best bet is to ask
+If a specific CI farm is failing for reasons unrelated to your changes, make an
+MR to disable the farm following the `farm management <#farm-management>`__
+instructions.
+
+If you're having other issues with the GitLab CI, your best bet is to ask
 about it on ``#freedesktop`` on OFTC and tag `Daniel Stone
 <https://gitlab.freedesktop.org/daniels>`__ (``daniels`` on IRC) or
-`Emma Anholt <https://gitlab.freedesktop.org/anholt>`__ (``anholt`` on
+`Eric Engestrom <https://gitlab.freedesktop.org/eric>`__ (``eric_engestrom`` on
 IRC).
 
 The three GitLab CI systems currently integrated are:
@@ -51,6 +65,34 @@ The three GitLab CI systems currently integrated are:
    bare-metal
    LAVA
    docker
+
+Farm management
+---------------
+
+.. note::
+   Never mix disabling/re-enabling a farm with any change that can affect a job
+   that runs in another farm!
+
+When the farm starts failing for any reason (power, network, out-of-space), it needs to be disabled by pushing separate MR with
+
+.. code-block:: sh
+
+   git mv .ci-farms{,-disabled}/$farm_name
+
+Find the GitLab handle of the farm's admin in ``.gitlab-ci/farm-rules.yml`` and
+ping them on the MR. MRs to disable farms do not need to go through review, and
+can be assigned to ``Marge`` directly.
+
+After farm restore functionality can be enabled by pushing a new merge request,
+which contains
+
+.. code-block:: sh
+
+   git mv .ci-farms{-disabled,}/$farm_name
+
+.. warning::
+   Pushing (``git push``) directly to ``main`` is forbidden; this change must
+   be sent as a :ref:`Merge Request <merging>`.
 
 Application traces replay
 -------------------------
@@ -81,7 +123,7 @@ non-redistributable traces can request permission to Daniel Stone <daniels@colla
 
 gitlab.freedesktop.org accounts that are to be granted access to these traces will be
 added to the OPA policy for the MinIO repository as per
-https://gitlab.freedesktop.org/freedesktop/helm-gitlab-config/-/commit/a3cd632743019f68ac8a829267deb262d9670958 .
+https://gitlab.freedesktop.org/freedesktop/helm-gitlab-infra/-/commit/a3cd632743019f68ac8a829267deb262d9670958 .
 
 So the jobs are created in personal repositories, the name of the user's account needs
 to be added to the rules attribute of the GitLab CI job that accesses the restricted
@@ -122,10 +164,10 @@ If you're having issues with the Intel CI, your best bet is to ask about
 it on ``#dri-devel`` on OFTC and tag `Nico Cortes
 <https://gitlab.freedesktop.org/ngcortes>`__ (``ngcortes`` on IRC).
 
-.. _CI-farm-expectations:
+.. _CI-job-user-expectations:
 
-CI farm expectations
---------------------
+CI job user expectations
+------------------------
 
 To make sure that testing of one vendor's drivers doesn't block
 unrelated work by other vendors, we require that a given driver's test
@@ -134,11 +176,23 @@ driver had CI and failed once a week, we would be seeing someone's
 code getting blocked on a spurious failure daily, which is an
 unacceptable cost to the project.
 
+To ensure that, driver maintainers with CI enabled should watch the Flakes panel
+of the `CI flakes dashboard
+<https://ci-stats-grafana.freedesktop.org/d/Ae_TLIwVk/mesa-ci-quality-false-positives?orgId=1>`__,
+particularly the "Flake jobs" pane, to inspect jobs in their driver where the
+automatic retry of a failing job produced a success a second time.
+Additionally, most CI reports test-level flakes to an IRC channel, and flakes
+reported as NEW are not expected and could cause spurious failures in jobs.
+Please track the NEW reports in jobs and add them as appropriate to the
+``-flakes.txt`` file for your driver.
+
 Additionally, the test farm needs to be able to provide a short enough
-turnaround time that we can get our MRs through marge-bot without the
-pipeline backing up.  As a result, we require that the test farm be
-able to handle a whole pipeline's worth of jobs in less than 15 minutes
-(to compare, the build stage is about 10 minutes).
+turnaround time that we can get our MRs through marge-bot without the pipeline
+backing up.  As a result, we require that the test farm be able to handle a
+whole pipeline's worth of jobs in less than 15 minutes (to compare, the build
+stage is about 10 minutes).  Given boot times and intermittent network delays,
+this generally means that the test runtime as reported by deqp-runner should be
+kept to 10 minutes.
 
 If a test farm is short the HW to provide these guarantees, consider dropping
 tests to reduce runtime.  dEQP job logs print the slowest tests at the end of
@@ -148,20 +202,24 @@ artifacts.  Or, you can add the following to your job to only run some fraction
 
 .. code-block:: yaml
 
-    variables:
+   variables:
       DEQP_FRACTION: 10
 
 to just run 1/10th of the test list.
 
+For Collabora's LAVA farm, the `device types
+<https://lava.collabora.dev/scheduler/device_types>`__ page can tell you how
+many boards of a specific tag are currently available by adding the "Idle" and
+"Busy" columns.  For bare-metal, a gitlab admin can look at the `runners
+<https://gitlab.freedesktop.org/admin/runners>`__ page.  A pipeline should
+probably not create more jobs for a board type than there are boards, unless you
+clearly have some short-runtime jobs.
+
 If a HW CI farm goes offline (network dies and all CI pipelines end up
 stalled) or its runners are consistently spuriously failing (disk
 full?), and the maintainer is not immediately available to fix the
-issue, please push through an MR disabling that farm's jobs by adding
-'.' to the front of the jobs names until the maintainer can bring
-things back up.  If this happens, the farm maintainer should provide a
-report to mesa-dev@lists.freedesktop.org after the fact explaining
-what happened and what the mitigation plan is for that failure next
-time.
+issue, please push through an MR disabling that farm's jobs according
+to the `Farm Management <#farm-management>`__ instructions.
 
 Personal runners
 ----------------
@@ -173,16 +231,18 @@ faster personal machine as a runner.  You can find the gitlab-runner
 package in Debian, or use GitLab's own builds.
 
 To do so, follow `GitLab's instructions
-<https://docs.gitlab.com/ee/ci/runners/runners_scope.html#create-a-specific-runner>`__ to
-register your personal GitLab runner in your Mesa fork.  Then, tell
+<https://docs.gitlab.com/ci/runners/runners_scope/#create-a-project-runner-with-a-runner-authentication-token>`__
+to register your personal GitLab runner in your Mesa fork.  Then, tell
 Mesa how many jobs it should serve (``concurrent=``) and how many
 cores those jobs should use (``FDO_CI_CONCURRENT=``) by editing these
-lines in ``/etc/gitlab-runner/config.toml``, for example::
+lines in ``/etc/gitlab-runner/config.toml``, for example:
 
-  concurrent = 2
+.. code-block:: toml
 
-  [[runners]]
-    environment = ["FDO_CI_CONCURRENT=16"]
+   concurrent = 2
+
+   [[runners]]
+     environment = ["FDO_CI_CONCURRENT=16"]
 
 
 Docker caching
@@ -225,7 +285,7 @@ don't personally have.  If you're experiencing this with the CI
 builds, you can use Docker to use their build environment locally.  Go
 to your job log, and at the top you'll see a line like::
 
-    Pulling docker image registry.freedesktop.org/anholt/mesa/debian/android_build:2020-09-11
+   Pulling docker image registry.freedesktop.org/anholt/mesa/debian/android_build:2020-09-11
 
 We'll use a volume mount to make our current Mesa tree be what the
 Docker container uses, so they'll share everything (their build will
@@ -235,19 +295,105 @@ command`` instead of ``run -it $IMAGE bash`` (which you may also find
 useful for debug).  Extract your build setup variables from
 .gitlab-ci.yml and run the CI meson build script:
 
-.. code-block:: console
+.. code-block:: sh
 
-    IMAGE=registry.freedesktop.org/anholt/mesa/debian/android_build:2020-09-11
-    sudo docker pull $IMAGE
-    sudo docker run --rm -v `pwd`:/mesa -w /mesa $IMAGE env PKG_CONFIG_PATH=/usr/local/lib/aarch64-linux-android/pkgconfig/:/android-ndk-r21d/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/pkgconfig/ GALLIUM_DRIVERS=freedreno UNWIND=disabled EXTRA_OPTION="-D android-stub=true -D llvm=disabled" DRI_LOADERS="-D glx=disabled -D gbm=disabled -D egl=enabled -D platforms=android" CROSS=aarch64-linux-android ./.gitlab-ci/meson-build.sh
+   IMAGE=registry.freedesktop.org/anholt/mesa/debian/android_build:2020-09-11
+   sudo docker pull $IMAGE
+   sudo docker run --rm -v `pwd`:/mesa -w /mesa $IMAGE env PKG_CONFIG_PATH=/usr/local/lib/aarch64-linux-android/pkgconfig/:/android-ndk-r21d/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/pkgconfig/ GALLIUM_DRIVERS=freedreno UNWIND=disabled EXTRA_OPTION="-D android-stub=true -D llvm=disabled" DRI_LOADERS="-D glx=disabled -D gbm=disabled -D egl=enabled -D platforms=android" CROSS=aarch64-linux-android ./.gitlab-ci/meson-build.sh
 
 All you have left over from the build is its output, and a _build
 directory.  You can hack on mesa and iterate testing the build with:
 
-.. code-block:: console
+.. code-block:: sh
 
-    sudo docker run --rm -v `pwd`:/mesa $IMAGE ninja -C /mesa/_build
+   sudo docker run --rm -v `pwd`:/mesa $IMAGE meson compile -C /mesa/_build
 
+Filtering the CI hardware jobs
+------------------------------
+
+By default, every CI hardware job affected by the changes you are
+pushing will be created in the CI pipeline(s) associated to your push.
+
+It is however possible to further filter the list of jobs by setting
+the ``hw_jobs`` `CI input <https://docs.gitlab.com/ci/inputs/>`_ at
+push time (using ``git push -o ci.input='hw_jobs=["tag1", ...]'``), or
+by creating a new MR pipeline by clicking ``Run pipeline with modified
+values``.
+
+To make this possible, every hardware job has been tagged with labels
+that, if none of them is set in ``hw_jobs``, the job will simply not be
+added to the CI pipeline. The list of labels associated to each job is
+usually composed of: ``all``, ``${mesa_driver_name}``, and
+``${kernel_driver_name}.ko``.
+
+You may view the list of available tags at the top of the
+``.gitlab-ci.yml`` file.
+
+Running specific CI jobs
+------------------------
+
+You can use ``bin/ci/ci_run_n_monitor.py`` to run specific CI jobs. It
+will automatically take care of running all the jobs yours depends on,
+and cancel the rest to avoid wasting resources.
+
+See ``bin/ci/ci_run_n_monitor.py --help`` for all the options.
+
+**Target jobs**
+
+The ``--target`` argument takes a regex that you can use to select the
+jobs names you want to run, e.g. ``--target 'zink.*'`` will run all the
+Zink jobs, leaving the other drivers' jobs free for others to use.
+
+Note that in fork pipelines, GitLab only adds the jobs for the files that have
+changed **since the last push**, so you might not get the jobs you expect.
+You can work around that by adding a dummy change in a file core to what you're
+working on and then making a new push with that change, and removing that change
+before you create the MR.
+
+**GitLab token**
+
+The ``--token`` argument is used to provide a GitLab token with rights to
+interact with the pipeline. Using the argument, one can provide the value or
+the name of the file having the value. If the argument is not provided, then
+it checks if the value of ``$XDG_CONFIG_HOME`` has a valid directory (if not,
+then uses ``$HOME/.config``), and there is a file called ``gitlab-token`` that
+contains a token. The token required to work with this tool needs ``api``
+scope permissions.
+
+.. note::
+    To create that token, refer to
+    `create-a-personal-access-token <https://docs.gitlab.com/user/profile/personal_access_tokens/#create-a-personal-access-token>`_
+    and select the ``api`` scope. The token will only be shown once after creation,
+    so make sure you store it securely.
+
+Reproducing CI jobs locally
+---------------------------
+
+If you need to debug a CI job failure, you can often reproduce it locally
+without needing the target hardware by using ``drm-shim``.
+
+.. toctree::
+   :maxdepth: 1
+
+   drm-shim
+
+Marge queue
+-----------
+
+You can use ``bin/ci/marge_queue.sh`` to check how long the Marge queue is. As
+mentioned, the merge flow is to assign MR to the ``Marge`` bot, to serialize
+the verification and merge. Looking at the
+`merge requests assigned to Marge <https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests?assignee_username=marge-bot>`__
+you can evaluate the size of the queue, since the ``marge_queue`` tool provides
+sorted and summarized information about those MR in queue.
+
+The tool requires a GitLab token as described in the
+`crnm <#running-specific-ci-jobs>`__ section. It outputs the current queue
+sorted by the ``assigned at`` to ``Marge``. It can also be used as an active
+wait for another action in a pipe, using the ``--wait`` until the queue is
+empty. The return code corresponds to the number of MRs in the queue, so when
+it returns ``0``, one can, for example, start the ``crnm`` tool on a certain
+pipeline.
 
 Conformance Tests
 -----------------
@@ -271,3 +417,26 @@ instructions on how to uprev Linux Kernel in the GitLab CI ecosystem.
   :maxdepth: 1
 
   kernel
+
+Structured tagging
+------------------
+
+Some build scripts can be tagged with a deterministic tag to allow for
+testing and validation of the build output. This section lists the
+documentation pages for the structured tagging feature.
+
+.. toctree::
+  :maxdepth: 1
+
+  structured-tagging
+
+Reusing CI scripts for other projects
+--------------------------------------
+
+The CI scripts in ``.gitlab-ci/`` can be reused for other projects, to
+facilitate reuse of the infrastructure, our scripts can be used as tools
+to create containers and run tests on the available farms.
+
+.. envvar:: EXTRA_LOCAL_PACKAGES
+
+   Define extra Debian packages to be installed in the container.

@@ -1,27 +1,7 @@
 /* -*- mesa-c++  -*-
- *
- * Copyright (c) 2020 Collabora LTD
- *
+ * Copyright 2020 Collabora LTD
  * Author: Gert Wollny <gert.wollny@collabora.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include "nir.h"
@@ -45,50 +25,50 @@ public:
    using VarSplit = pair<nir_variable *, nir_variable *>;
    using VarMap = map<unsigned, VarSplit>;
 
-   nir_ssa_def *split_double_load_deref(nir_intrinsic_instr *intr);
+   nir_def *split_double_load_deref(nir_intrinsic_instr *intr);
 
-   nir_ssa_def *split_double_store_deref(nir_intrinsic_instr *intr);
+   nir_def *split_double_store_deref(nir_intrinsic_instr *intr);
 
 private:
-   nir_ssa_def *split_load_deref_array(nir_intrinsic_instr *intr, nir_src& index);
+   nir_def *split_load_deref_array(nir_intrinsic_instr *intr, nir_src& index);
 
-   nir_ssa_def *split_load_deref_var(nir_intrinsic_instr *intr);
+   nir_def *split_load_deref_var(nir_intrinsic_instr *intr);
 
-   nir_ssa_def *split_store_deref_array(nir_intrinsic_instr *intr,
+   nir_def *split_store_deref_array(nir_intrinsic_instr *intr,
                                         nir_deref_instr *deref);
 
-   nir_ssa_def *split_store_deref_var(nir_intrinsic_instr *intr, nir_deref_instr *deref1);
+   nir_def *split_store_deref_var(nir_intrinsic_instr *intr, nir_deref_instr *deref1);
 
    VarSplit get_var_pair(nir_variable *old_var);
 
-   nir_ssa_def *
-   merge_64bit_loads(nir_ssa_def *load1, nir_ssa_def *load2, bool out_is_vec3);
+   nir_def *
+   merge_64bit_loads(nir_def *load1, nir_def *load2, bool out_is_vec3);
 
-   nir_ssa_def *split_double_load(nir_intrinsic_instr *load1);
+   nir_def *split_double_load(nir_intrinsic_instr *load1);
 
-   nir_ssa_def *split_store_output(nir_intrinsic_instr *store1);
+   nir_def *split_store_output(nir_intrinsic_instr *store1);
 
-   nir_ssa_def *split_double_load_uniform(nir_intrinsic_instr *intr);
+   nir_def *split_double_load_uniform(nir_intrinsic_instr *intr);
 
-   nir_ssa_def *split_double_load_ssbo(nir_intrinsic_instr *intr);
+   nir_def *split_double_load_ssbo(nir_intrinsic_instr *intr);
 
-   nir_ssa_def *split_double_load_ubo(nir_intrinsic_instr *intr);
+   nir_def *split_double_load_ubo(nir_intrinsic_instr *intr);
 
-   nir_ssa_def *
-   split_reduction(nir_ssa_def *src[2][2], nir_op op1, nir_op op2, nir_op reduction);
+   nir_def *
+   split_reduction(nir_def *src[2][2], nir_op op1, nir_op op2, nir_op reduction);
 
-   nir_ssa_def *
+   nir_def *
    split_reduction3(nir_alu_instr *alu, nir_op op1, nir_op op2, nir_op reduction);
 
-   nir_ssa_def *
+   nir_def *
    split_reduction4(nir_alu_instr *alu, nir_op op1, nir_op op2, nir_op reduction);
 
-   nir_ssa_def *split_bcsel(nir_alu_instr *alu);
+   nir_def *split_bcsel(nir_alu_instr *alu);
 
-   nir_ssa_def *split_load_const(nir_load_const_instr *lc);
+   nir_def *split_load_const(nir_load_const_instr *lc);
 
    bool filter(const nir_instr *instr) const override;
-   nir_ssa_def *lower(nir_instr *instr) override;
+   nir_def *lower(nir_instr *instr) override;
 
    VarMap m_varmap;
    vector<nir_variable *> m_old_vars;
@@ -97,7 +77,7 @@ private:
 
 class LowerLoad64Uniform : public NirLowerInstruction {
    bool filter(const nir_instr *instr) const override;
-   nir_ssa_def *lower(nir_instr *instr) override;
+   nir_def *lower(nir_instr *instr) override;
 };
 
 bool
@@ -112,30 +92,29 @@ LowerLoad64Uniform::filter(const nir_instr *instr) const
        intr->intrinsic != nir_intrinsic_load_ubo_vec4)
       return false;
 
-   return nir_dest_bit_size(intr->dest) == 64;
+   return intr->def.bit_size == 64;
 }
 
-nir_ssa_def *
+nir_def *
 LowerLoad64Uniform::lower(nir_instr *instr)
 {
    auto intr = nir_instr_as_intrinsic(instr);
-   int old_components = nir_dest_num_components(intr->dest);
+   int old_components = intr->def.num_components;
    assert(old_components <= 2);
-   assert(intr->dest.is_ssa);
-   intr->dest.ssa.num_components *= 2;
-   intr->dest.ssa.bit_size = 32;
+   intr->def.num_components *= 2;
+   intr->def.bit_size = 32;
    intr->num_components *= 2;
 
    if (intr->intrinsic == nir_intrinsic_load_ubo ||
        intr->intrinsic == nir_intrinsic_load_ubo_vec4)
       nir_intrinsic_set_component(intr, 2 * nir_intrinsic_component(intr));
 
-   nir_ssa_def *result_vec[2] = {nullptr, nullptr};
+   nir_def *result_vec[2] = {nullptr, nullptr};
 
    for (int i = 0; i < old_components; ++i) {
       result_vec[i] = nir_pack_64_2x32_split(b,
-                                             nir_channel(b, &intr->dest.ssa, 2 * i),
-                                             nir_channel(b, &intr->dest.ssa, 2 * i + 1));
+                                             nir_channel(b, &intr->def, 2 * i),
+                                             nir_channel(b, &intr->def, 2 * i + 1));
    }
    if (old_components == 1)
       return result_vec[0];
@@ -157,29 +136,31 @@ class LowerSplit64op : public NirLowerInstruction {
          auto alu = nir_instr_as_alu(instr);
          switch (alu->op) {
          case nir_op_bcsel:
-            return nir_dest_bit_size(alu->dest.dest) == 64;
-         case nir_op_f2b1:
+            return alu->def.bit_size == 64;
          case nir_op_f2i32:
          case nir_op_f2u32:
          case nir_op_f2i64:
          case nir_op_f2u64:
-         case nir_op_u2f64:
-         case nir_op_i2f64:
             return nir_src_bit_size(alu->src[0].src) == 64;
+         case nir_op_i2f64:
+         case nir_op_u2f64:
+            return nir_src_bit_size(alu->src[0].src) >= 32;
+         case nir_op_b2f64:
+            return true;
          default:
             return false;
          }
       }
       case nir_instr_type_phi: {
          auto phi = nir_instr_as_phi(instr);
-         return nir_dest_num_components(phi->dest) == 64;
+         return phi->def.num_components == 64;
       }
       default:
          return false;
       }
    }
 
-   nir_ssa_def *lower(nir_instr *instr) override
+   nir_def *lower(nir_instr *instr) override
    {
 
       switch (instr->type) {
@@ -190,40 +171,34 @@ class LowerSplit64op : public NirLowerInstruction {
          case nir_op_bcsel: {
             auto lo =
                nir_bcsel(b,
-                         nir_ssa_for_src(b, alu->src[0].src, 1),
+                         alu->src[0].src.ssa,
                          nir_unpack_64_2x32_split_x(b, nir_ssa_for_alu_src(b, alu, 1)),
                          nir_unpack_64_2x32_split_x(b, nir_ssa_for_alu_src(b, alu, 2)));
             auto hi =
                nir_bcsel(b,
-                         nir_ssa_for_src(b, alu->src[0].src, 1),
+                         alu->src[0].src.ssa,
                          nir_unpack_64_2x32_split_y(b, nir_ssa_for_alu_src(b, alu, 1)),
                          nir_unpack_64_2x32_split_y(b, nir_ssa_for_alu_src(b, alu, 2)));
             return nir_pack_64_2x32_split(b, lo, hi);
          }
-         case nir_op_f2b1: {
-            auto mask = nir_component_mask(nir_dest_num_components(alu->dest.dest));
-            return nir_fneu(b,
-                            nir_channels(b, nir_ssa_for_alu_src(b, alu, 0), mask),
-                            nir_imm_zero(b, nir_dest_num_components(alu->dest.dest), 64));
-         }
          case nir_op_f2i32: {
             auto src = nir_ssa_for_alu_src(b, alu, 0);
-            auto gt0 = nir_flt(b, nir_imm_double(b, 0.0), src);
+            auto gt0 = nir_fgt_imm(b, src, 0.0);
             auto abs_src = nir_fabs(b, src);
             auto value = nir_f2u32(b, abs_src);
             return nir_bcsel(b, gt0, value, nir_ineg(b, value));
          }
          case nir_op_f2u32: {
-            /* fp32 doesn't hold suffient bits to represent the full range of
+            /* fp32 doesn't hold sufficient bits to represent the full range of
              * u32, therefore we have to split the values, and because f2f32
              * rounds, we have to remove the fractional part in the hi bits
              * For values > UINT_MAX the result is undefined */
             auto src = nir_ssa_for_alu_src(b, alu, 0);
-            src = nir_fsub(b, src, nir_ffract(b, src));
-            auto gt0 = nir_flt(b, nir_imm_double(b, 0.0), src);
+            src = nir_fadd(b, src, nir_fneg(b, nir_ffract(b, src)));
+            auto gt0 = nir_fgt_imm(b, src, 0.0);
             auto highval = nir_fmul_imm(b, src, 1.0 / 65536.0);
             auto fract = nir_ffract(b, highval);
-            auto high = nir_f2u32(b, nir_f2f32(b, nir_fsub(b, highval, fract)));
+            auto high = nir_f2u32(b, nir_f2f32(b, nir_fadd(b, highval, nir_fneg(b, fract))));
             auto lowval = nir_fmul_imm(b, fract, 65536.0);
             auto low = nir_f2u32(b, nir_f2f32(b, lowval));
             return nir_bcsel(b,
@@ -233,44 +208,66 @@ class LowerSplit64op : public NirLowerInstruction {
          }        
          case nir_op_u2f64: {
             auto src = nir_ssa_for_alu_src(b, alu, 0);
-            auto low = nir_unpack_64_2x32_split_x(b, src);
-            auto high = nir_unpack_64_2x32_split_y(b, src);
-            auto flow = nir_u2f64(b, low);
-            auto fhigh = nir_u2f64(b, high);
-            return nir_fadd(b, nir_fmul_imm(b, fhigh, 65536.0 * 65536.0), flow);
+            if (src->bit_size == 64) {
+               return lower_i64_to_f64(src, nir_op_u2f64);
+            } else {
+               return lower_i32_to_f64(src, nir_op_u2f32);
+            }
          }
          case nir_op_i2f64: {
             auto src = nir_ssa_for_alu_src(b, alu, 0);
-            auto low = nir_unpack_64_2x32_split_x(b, src);
-            auto high = nir_unpack_64_2x32_split_y(b, src);
-            auto flow = nir_u2f64(b, low);
-            auto fhigh = nir_i2f64(b, high);
-            return nir_fadd(b, nir_fmul_imm(b, fhigh, 65536.0 * 65536.0), flow);
+            if (src->bit_size == 64) {
+               return lower_i64_to_f64(src, nir_op_i2f64);
+            } else {
+               return lower_i32_to_f64(src, nir_op_i2f32);
+            }
+         }
+         case nir_op_b2f64: {
+            auto src = nir_b2b32(b, nir_ssa_for_alu_src(b, alu, 0));
+            return nir_pack_64_2x32_split(b,
+                                          nir_imm_zero(b, 1, 32),
+                                          nir_iand(b, src, nir_imm_int(b, 0x3ff00000)));
          }
          default:
-            unreachable("trying to lower instruction that was not in filter");
+            UNREACHABLE("trying to lower instruction that was not in filter");
          }
       }
       case nir_instr_type_phi: {
          auto phi = nir_instr_as_phi(instr);
          auto phi_lo = nir_phi_instr_create(b->shader);
          auto phi_hi = nir_phi_instr_create(b->shader);
-         nir_ssa_dest_init(
-            &phi_lo->instr, &phi_lo->dest, phi->dest.ssa.num_components * 2, 32, "");
-         nir_ssa_dest_init(
-            &phi_hi->instr, &phi_hi->dest, phi->dest.ssa.num_components * 2, 32, "");
+         nir_def_init(
+            &phi_lo->instr, &phi_lo->def, phi->def.num_components * 2, 32);
+         nir_def_init(
+            &phi_hi->instr, &phi_hi->def, phi->def.num_components * 2, 32);
          nir_foreach_phi_src(s, phi)
          {
-            auto lo = nir_unpack_32_2x16_split_x(b, nir_ssa_for_src(b, s->src, 1));
-            auto hi = nir_unpack_32_2x16_split_x(b, nir_ssa_for_src(b, s->src, 1));
-            nir_phi_instr_add_src(phi_lo, s->pred, nir_src_for_ssa(lo));
-            nir_phi_instr_add_src(phi_hi, s->pred, nir_src_for_ssa(hi));
+            auto lo = nir_unpack_32_2x16_split_x(b, s->src.ssa);
+            auto hi = nir_unpack_32_2x16_split_x(b, s->src.ssa);
+            nir_phi_instr_add_src(phi_lo, s->pred, lo);
+            nir_phi_instr_add_src(phi_hi, s->pred, hi);
          }
-         return nir_pack_64_2x32_split(b, &phi_lo->dest.ssa, &phi_hi->dest.ssa);
+         return nir_pack_64_2x32_split(b, &phi_lo->def, &phi_hi->def);
       }
       default:
-         unreachable("Trying to lower instruction that was not in filter");
+         UNREACHABLE("Trying to lower instruction that was not in filter");
       }
+   }
+
+   nir_def *lower_i64_to_f64(nir_def *src, nir_op op)
+   {
+      auto flow = nir_i2f64(b, nir_unpack_64_2x32_split_x(b, src));
+      auto fhigh = nir_build_alu1(b, op, nir_unpack_64_2x32_split_y(b, src));
+      return nir_fadd(b, nir_fmul_imm(b, fhigh, 65536.0 * 65536.0), flow);
+   }
+
+   nir_def *lower_i32_to_f64(nir_def *src, nir_op op)
+   {
+      auto tmplo = nir_u2f32(b, nir_iand(b, src, nir_imm_int(b, 0x000000ff)));
+      auto tmphi =
+         nir_build_alu1(b, op, nir_iand(b, src, nir_imm_int(b, 0xffffff00)));
+      auto f64 = nir_f2f64(b, nir_vec2(b, tmplo, tmphi));
+      return nir_fadd(b, nir_channel(b, f64, 0), nir_channel(b, f64, 1));
    }
 };
 
@@ -293,9 +290,9 @@ LowerSplit64BitVar::filter(const nir_instr *instr) const
       case nir_intrinsic_load_input:
       case nir_intrinsic_load_ubo:
       case nir_intrinsic_load_ssbo:
-         if (nir_dest_bit_size(intr->dest) != 64)
+         if (intr->def.bit_size != 64)
             return false;
-         return nir_dest_num_components(intr->dest) >= 3;
+         return intr->def.num_components >= 3;
       case nir_intrinsic_store_output:
          if (nir_src_bit_size(intr->src[0]) != 64)
             return false;
@@ -312,9 +309,9 @@ LowerSplit64BitVar::filter(const nir_instr *instr) const
       auto alu = nir_instr_as_alu(instr);
       switch (alu->op) {
       case nir_op_bcsel:
-         if (nir_dest_num_components(alu->dest.dest) < 3)
+         if (alu->def.num_components < 3)
             return false;
-         return nir_dest_bit_size(alu->dest.dest) == 64;
+         return alu->def.bit_size == 64;
       case nir_op_bany_fnequal3:
       case nir_op_bany_fnequal4:
       case nir_op_ball_fequal3:
@@ -341,9 +338,9 @@ LowerSplit64BitVar::filter(const nir_instr *instr) const
    }
 }
 
-nir_ssa_def *
-LowerSplit64BitVar::merge_64bit_loads(nir_ssa_def *load1,
-                                      nir_ssa_def *load2,
+nir_def *
+LowerSplit64BitVar::merge_64bit_loads(nir_def *load1,
+                                      nir_def *load2,
                                       bool out_is_vec3)
 {
    if (out_is_vec3)
@@ -368,128 +365,128 @@ LowerSplit64BitVar::~LowerSplit64BitVar()
       nir_instr_remove(v);
 }
 
-nir_ssa_def *
+nir_def *
 LowerSplit64BitVar::split_double_store_deref(nir_intrinsic_instr *intr)
 {
-   auto deref = nir_instr_as_deref(intr->src[0].ssa->parent_instr);
+   auto deref = nir_def_as_deref(intr->src[0].ssa);
    if (deref->deref_type == nir_deref_type_var)
       return split_store_deref_var(intr, deref);
    else if (deref->deref_type == nir_deref_type_array)
       return split_store_deref_array(intr, deref);
    else {
-      unreachable("only splitting of stores to vars and arrays is supported");
+      UNREACHABLE("only splitting of stores to vars and arrays is supported");
    }
 }
 
-nir_ssa_def *
+nir_def *
 LowerSplit64BitVar::split_double_load_deref(nir_intrinsic_instr *intr)
 {
-   auto deref = nir_instr_as_deref(intr->src[0].ssa->parent_instr);
+   auto deref = nir_def_as_deref(intr->src[0].ssa);
    if (deref->deref_type == nir_deref_type_var)
       return split_load_deref_var(intr);
    else if (deref->deref_type == nir_deref_type_array)
       return split_load_deref_array(intr, deref->arr.index);
    else {
-      unreachable(0 && "only splitting of loads from vars and arrays is supported");
+      UNREACHABLE("only splitting of loads from vars and arrays is supported");
    }
    m_old_stores.push_back(&intr->instr);
 }
 
-nir_ssa_def *
+nir_def *
 LowerSplit64BitVar::split_load_deref_array(nir_intrinsic_instr *intr, nir_src& index)
 {
    auto old_var = nir_intrinsic_get_var(intr, 0);
-   unsigned old_components = old_var->type->without_array()->components();
+   unsigned old_components = glsl_get_components(glsl_without_array(old_var->type));
 
    assert(old_components > 2 && old_components <= 4);
 
    auto vars = get_var_pair(old_var);
 
    auto deref1 = nir_build_deref_var(b, vars.first);
-   auto deref_array1 = nir_build_deref_array(b, deref1, nir_ssa_for_src(b, index, 1));
+   auto deref_array1 = nir_build_deref_array(b, deref1, index.ssa);
    auto load1 =
-      nir_build_load_deref(b, 2, 64, &deref_array1->dest.ssa, (enum gl_access_qualifier)0);
+      nir_build_load_deref(b, 2, 64, &deref_array1->def, (enum gl_access_qualifier)0);
 
    auto deref2 = nir_build_deref_var(b, vars.second);
-   auto deref_array2 = nir_build_deref_array(b, deref2, nir_ssa_for_src(b, index, 1));
+   auto deref_array2 = nir_build_deref_array(b, deref2, index.ssa);
 
    auto load2 = nir_build_load_deref(
-      b, old_components - 2, 64, &deref_array2->dest.ssa, (enum gl_access_qualifier)0);
+      b, old_components - 2, 64, &deref_array2->def, (enum gl_access_qualifier)0);
 
    return merge_64bit_loads(load1, load2, old_components == 3);
 }
 
-nir_ssa_def *
+nir_def *
 LowerSplit64BitVar::split_store_deref_array(nir_intrinsic_instr *intr,
                                             nir_deref_instr *deref)
 {
    auto old_var = nir_intrinsic_get_var(intr, 0);
-   unsigned old_components = old_var->type->without_array()->components();
+   unsigned old_components = glsl_get_components(glsl_without_array(old_var->type));
 
    assert(old_components > 2 && old_components <= 4);
 
-   auto src_xy = nir_channels(b, intr->src[1].ssa, 3);
+   auto src_xy = nir_trim_vector(b, intr->src[1].ssa, 2);
 
    auto vars = get_var_pair(old_var);
 
    auto deref1 = nir_build_deref_var(b, vars.first);
    auto deref_array1 =
-      nir_build_deref_array(b, deref1, nir_ssa_for_src(b, deref->arr.index, 1));
+      nir_build_deref_array(b, deref1, deref->arr.index.ssa);
 
-   nir_build_store_deref(b, &deref_array1->dest.ssa, src_xy, 3);
+   nir_build_store_deref(b, &deref_array1->def, src_xy, 3);
 
    auto deref2 = nir_build_deref_var(b, vars.second);
    auto deref_array2 =
-      nir_build_deref_array(b, deref2, nir_ssa_for_src(b, deref->arr.index, 1));
+      nir_build_deref_array(b, deref2, deref->arr.index.ssa);
 
    if (old_components == 3)
       nir_build_store_deref(b,
-                            &deref_array2->dest.ssa,
+                            &deref_array2->def,
                             nir_channel(b, intr->src[1].ssa, 2),
                             1);
    else
       nir_build_store_deref(b,
-                            &deref_array2->dest.ssa,
+                            &deref_array2->def,
                             nir_channels(b, intr->src[1].ssa, 0xc),
                             3);
 
    return NIR_LOWER_INSTR_PROGRESS_REPLACE;
 }
 
-nir_ssa_def *
+nir_def *
 LowerSplit64BitVar::split_store_deref_var(nir_intrinsic_instr *intr,
                                           UNUSED nir_deref_instr *deref)
 {
    auto old_var = nir_intrinsic_get_var(intr, 0);
-   unsigned old_components = old_var->type->without_array()->components();
+   unsigned old_components = glsl_get_components(glsl_without_array(old_var->type));
 
    assert(old_components > 2 && old_components <= 4);
 
-   auto src_xy = nir_channels(b, intr->src[1].ssa, 3);
+   auto src_xy = nir_trim_vector(b, intr->src[1].ssa, 2);
 
    auto vars = get_var_pair(old_var);
 
    auto deref1 = nir_build_deref_var(b, vars.first);
-   nir_build_store_deref(b, &deref1->dest.ssa, src_xy, 3);
+   nir_build_store_deref(b, &deref1->def, src_xy, 3);
 
    auto deref2 = nir_build_deref_var(b, vars.second);
    if (old_components == 3)
-      nir_build_store_deref(b, &deref2->dest.ssa, nir_channel(b, intr->src[1].ssa, 2), 1);
+      nir_build_store_deref(b, &deref2->def, nir_channel(b, intr->src[1].ssa, 2), 1);
    else
       nir_build_store_deref(b,
-                            &deref2->dest.ssa,
+                            &deref2->def,
                             nir_channels(b, intr->src[1].ssa, 0xc),
                             3);
 
    return NIR_LOWER_INSTR_PROGRESS_REPLACE;
 }
 
-nir_ssa_def *
+nir_def *
 LowerSplit64BitVar::split_load_deref_var(nir_intrinsic_instr *intr)
 {
    auto old_var = nir_intrinsic_get_var(intr, 0);
    auto vars = get_var_pair(old_var);
-   unsigned old_components = old_var->type->components();
+   unsigned old_components = glsl_get_components(old_var->type);
 
    nir_deref_instr *deref1 = nir_build_deref_var(b, vars.first);
    auto *load1 = nir_load_deref(b, deref1);
@@ -507,18 +504,18 @@ LowerSplit64BitVar::get_var_pair(nir_variable *old_var)
 {
    auto split_vars = m_varmap.find(old_var->data.driver_location);
 
-   assert(old_var->type->without_array()->components() > 2);
+   assert(glsl_get_components(glsl_without_array(old_var->type)) > 2);
 
    if (split_vars == m_varmap.end()) {
       auto var1 = nir_variable_clone(old_var, b->shader);
       auto var2 = nir_variable_clone(old_var, b->shader);
 
       var1->type = glsl_dvec_type(2);
-      var2->type = glsl_dvec_type(old_var->type->without_array()->components() - 2);
+      var2->type = glsl_dvec_type(glsl_get_components(glsl_without_array(old_var->type)) - 2);
 
-      if (old_var->type->is_array()) {
-         var1->type = glsl_array_type(var1->type, old_var->type->array_size(), 0);
-         var2->type = glsl_array_type(var2->type, old_var->type->array_size(), 0);
+      if (glsl_type_is_array(old_var->type)) {
+         var1->type = glsl_array_type(var1->type, glsl_array_size(old_var->type), 0);
+         var2->type = glsl_array_type(var2->type, glsl_array_size(old_var->type), 0);
       }
 
       if (old_var->data.mode == nir_var_shader_in ||
@@ -537,27 +534,27 @@ LowerSplit64BitVar::get_var_pair(nir_variable *old_var)
    return m_varmap[old_var->data.driver_location];
 }
 
-nir_ssa_def *
+nir_def *
 LowerSplit64BitVar::split_double_load(nir_intrinsic_instr *load1)
 {
-   unsigned old_components = nir_dest_num_components(load1->dest);
+   unsigned old_components = load1->def.num_components;
    auto load2 = nir_instr_as_intrinsic(nir_instr_clone(b->shader, &load1->instr));
    nir_io_semantics sem = nir_intrinsic_io_semantics(load1);
 
-   load1->dest.ssa.num_components = 2;
+   load1->def.num_components = 2;
    sem.num_slots = 1;
    nir_intrinsic_set_io_semantics(load1, sem);
 
-   load2->dest.ssa.num_components = old_components - 2;
+   load2->def.num_components = old_components - 2;
    sem.location += 1;
    nir_intrinsic_set_io_semantics(load2, sem);
    nir_intrinsic_set_base(load2, nir_intrinsic_base(load1) + 1);
    nir_builder_instr_insert(b, &load2->instr);
 
-   return merge_64bit_loads(&load1->dest.ssa, &load2->dest.ssa, old_components == 3);
+   return merge_64bit_loads(&load1->def, &load2->def, old_components == 3);
 }
 
-nir_ssa_def *
+nir_def *
 LowerSplit64BitVar::split_store_output(nir_intrinsic_instr *store1)
 {
    auto src = store1->src[0];
@@ -565,13 +562,13 @@ LowerSplit64BitVar::split_store_output(nir_intrinsic_instr *store1)
    nir_io_semantics sem = nir_intrinsic_io_semantics(store1);
 
    auto store2 = nir_instr_as_intrinsic(nir_instr_clone(b->shader, &store1->instr));
-   auto src1 = nir_channels(b, src.ssa, 3);
+   auto src1 = nir_trim_vector(b, src.ssa, 2);
    auto src2 = nir_channels(b, src.ssa, old_components == 3 ? 4 : 0xc);
 
-   nir_instr_rewrite_src(&store1->instr, &src, nir_src_for_ssa(src1));
+   nir_src_rewrite(&src, src1);
    nir_intrinsic_set_write_mask(store1, 3);
 
-   nir_instr_rewrite_src(&store2->instr, &src, nir_src_for_ssa(src2));
+   nir_src_rewrite(&src, src2);
    nir_intrinsic_set_write_mask(store2, old_components == 3 ? 1 : 3);
 
    sem.num_slots = 1;
@@ -585,10 +582,10 @@ LowerSplit64BitVar::split_store_output(nir_intrinsic_instr *store1)
    return NIR_LOWER_INSTR_PROGRESS;
 }
 
-nir_ssa_def *
+nir_def *
 LowerSplit64BitVar::split_double_load_uniform(nir_intrinsic_instr *intr)
 {
-   unsigned second_components = nir_dest_num_components(intr->dest) - 2;
+   unsigned second_components = intr->def.num_components - 2;
    nir_intrinsic_instr *load2 =
       nir_intrinsic_instr_create(b->shader, nir_intrinsic_load_uniform);
    load2->src[0] = nir_src_for_ssa(nir_iadd_imm(b, intr->src[0].ssa, 1));
@@ -597,48 +594,47 @@ LowerSplit64BitVar::split_double_load_uniform(nir_intrinsic_instr *intr)
    nir_intrinsic_set_range(load2, nir_intrinsic_range(intr));
    load2->num_components = second_components;
 
-   nir_ssa_dest_init(&load2->instr, &load2->dest, second_components, 64, nullptr);
+   nir_def_init(&load2->instr, &load2->def, second_components, 64);
    nir_builder_instr_insert(b, &load2->instr);
 
-   intr->dest.ssa.num_components = intr->num_components = 2;
+   intr->def.num_components = intr->num_components = 2;
 
    if (second_components == 1)
       return nir_vec3(b,
-                      nir_channel(b, &intr->dest.ssa, 0),
-                      nir_channel(b, &intr->dest.ssa, 1),
-                      nir_channel(b, &load2->dest.ssa, 0));
+                      nir_channel(b, &intr->def, 0),
+                      nir_channel(b, &intr->def, 1),
+                      nir_channel(b, &load2->def, 0));
    else
       return nir_vec4(b,
-                      nir_channel(b, &intr->dest.ssa, 0),
-                      nir_channel(b, &intr->dest.ssa, 1),
-                      nir_channel(b, &load2->dest.ssa, 0),
-                      nir_channel(b, &load2->dest.ssa, 1));
+                      nir_channel(b, &intr->def, 0),
+                      nir_channel(b, &intr->def, 1),
+                      nir_channel(b, &load2->def, 0),
+                      nir_channel(b, &load2->def, 1));
 }
 
-nir_ssa_def *
+nir_def *
 LowerSplit64BitVar::split_double_load_ssbo(nir_intrinsic_instr *intr)
 {
-   unsigned second_components = nir_dest_num_components(intr->dest) - 2;
+   unsigned second_components = intr->def.num_components - 2;
    nir_intrinsic_instr *load2 =
       nir_instr_as_intrinsic(nir_instr_clone(b->shader, &intr->instr));
 
-   auto new_src0 = nir_src_for_ssa(nir_iadd_imm(b, intr->src[0].ssa, 1));
-   nir_instr_rewrite_src(&load2->instr, &load2->src[0], new_src0);
+   nir_src_rewrite(&load2->src[0], nir_iadd_imm(b, intr->src[0].ssa, 1));
    load2->num_components = second_components;
-   nir_ssa_dest_init(&load2->instr, &load2->dest, second_components, 64, nullptr);
+   nir_def_init(&load2->instr, &load2->def, second_components, 64);
 
    nir_intrinsic_set_dest_type(load2, nir_intrinsic_dest_type(intr));
    nir_builder_instr_insert(b, &load2->instr);
 
-   intr->dest.ssa.num_components = intr->num_components = 2;
+   intr->def.num_components = intr->num_components = 2;
 
-   return merge_64bit_loads(&intr->dest.ssa, &load2->dest.ssa, second_components == 1);
+   return merge_64bit_loads(&intr->def, &load2->def, second_components == 1);
 }
 
-nir_ssa_def *
+nir_def *
 LowerSplit64BitVar::split_double_load_ubo(nir_intrinsic_instr *intr)
 {
-   unsigned second_components = nir_dest_num_components(intr->dest) - 2;
+   unsigned second_components = intr->def.num_components - 2;
    nir_intrinsic_instr *load2 =
       nir_instr_as_intrinsic(nir_instr_clone(b->shader, &intr->instr));
    load2->src[0] = intr->src[0];
@@ -651,16 +647,16 @@ LowerSplit64BitVar::split_double_load_ubo(nir_intrinsic_instr *intr)
 
    load2->num_components = second_components;
 
-   nir_ssa_dest_init(&load2->instr, &load2->dest, second_components, 64, nullptr);
+   nir_def_init(&load2->instr, &load2->def, second_components, 64);
    nir_builder_instr_insert(b, &load2->instr);
 
-   intr->dest.ssa.num_components = intr->num_components = 2;
+   intr->def.num_components = intr->num_components = 2;
 
-   return merge_64bit_loads(&intr->dest.ssa, &load2->dest.ssa, second_components == 1);
+   return merge_64bit_loads(&intr->def, &load2->def, second_components == 1);
 }
 
-nir_ssa_def *
-LowerSplit64BitVar::split_reduction(nir_ssa_def *src[2][2],
+nir_def *
+LowerSplit64BitVar::split_reduction(nir_def *src[2][2],
                                     nir_op op1,
                                     nir_op op2,
                                     nir_op reduction)
@@ -670,64 +666,64 @@ LowerSplit64BitVar::split_reduction(nir_ssa_def *src[2][2],
    return nir_build_alu(b, reduction, cmp0, cmp1, nullptr, nullptr);
 }
 
-nir_ssa_def *
+nir_def *
 LowerSplit64BitVar::split_reduction3(nir_alu_instr *alu,
                                      nir_op op1,
                                      nir_op op2,
                                      nir_op reduction)
 {
-   nir_ssa_def *src[2][2];
+   nir_def *src[2][2];
 
-   src[0][0] = nir_channels(b, nir_ssa_for_src(b, alu->src[0].src, 2), 3);
-   src[0][1] = nir_channels(b, nir_ssa_for_src(b, alu->src[1].src, 2), 3);
+   src[0][0] = nir_trim_vector(b, alu->src[0].src.ssa, 2);
+   src[0][1] = nir_trim_vector(b, alu->src[1].src.ssa, 2);
 
-   src[1][0] = nir_channel(b, nir_ssa_for_src(b, alu->src[0].src, 3), 2);
-   src[1][1] = nir_channel(b, nir_ssa_for_src(b, alu->src[1].src, 3), 2);
+   src[1][0] = nir_channel(b, alu->src[0].src.ssa, 2);
+   src[1][1] = nir_channel(b, alu->src[1].src.ssa, 2);
 
    return split_reduction(src, op1, op2, reduction);
 }
 
-nir_ssa_def *
+nir_def *
 LowerSplit64BitVar::split_reduction4(nir_alu_instr *alu,
                                      nir_op op1,
                                      nir_op op2,
                                      nir_op reduction)
 {
-   nir_ssa_def *src[2][2];
+   nir_def *src[2][2];
 
-   src[0][0] = nir_channels(b, nir_ssa_for_src(b, alu->src[0].src, 2), 3);
-   src[0][1] = nir_channels(b, nir_ssa_for_src(b, alu->src[1].src, 2), 3);
+   src[0][0] = nir_trim_vector(b, alu->src[0].src.ssa, 2);
+   src[0][1] = nir_trim_vector(b, alu->src[1].src.ssa, 2);
 
-   src[1][0] = nir_channels(b, nir_ssa_for_src(b, alu->src[0].src, 4), 0xc);
-   src[1][1] = nir_channels(b, nir_ssa_for_src(b, alu->src[1].src, 4), 0xc);
+   src[1][0] = nir_channels(b, alu->src[0].src.ssa, 0xc);
+   src[1][1] = nir_channels(b, alu->src[1].src.ssa, 0xc);
 
    return split_reduction(src, op1, op2, reduction);
 }
 
-nir_ssa_def *
+nir_def *
 LowerSplit64BitVar::split_bcsel(nir_alu_instr *alu)
 {
-   static nir_ssa_def *dest[4];
-   for (unsigned i = 0; i < nir_dest_num_components(alu->dest.dest); ++i) {
+   static nir_def *dest[4];
+   for (unsigned i = 0; i < alu->def.num_components; ++i) {
       dest[i] = nir_bcsel(b,
                           nir_channel(b, alu->src[0].src.ssa, i),
                           nir_channel(b, alu->src[1].src.ssa, i),
                           nir_channel(b, alu->src[2].src.ssa, i));
    }
-   return nir_vec(b, dest, nir_dest_num_components(alu->dest.dest));
+   return nir_vec(b, dest, alu->def.num_components);
 }
 
-nir_ssa_def *
+nir_def *
 LowerSplit64BitVar::split_load_const(nir_load_const_instr *lc)
 {
-   nir_ssa_def *ir[4];
+   nir_def *ir[4];
    for (unsigned i = 0; i < lc->def.num_components; ++i)
       ir[i] = nir_imm_double(b, lc->value[i].f64);
 
    return nir_vec(b, ir, lc->def.num_components);
 }
 
-nir_ssa_def *
+nir_def *
 LowerSplit64BitVar::lower(nir_instr *instr)
 {
    switch (instr->type) {
@@ -814,16 +810,27 @@ r600_nir_split_64bit_io(nir_shader *sh)
 
 /* */
 class Lower64BitToVec2 : public NirLowerInstruction {
+public:
+   Lower64BitToVec2(bool support_fp64):
+       m_support_fp64(support_fp64)
+   {
+   }
 
 private:
    bool filter(const nir_instr *instr) const override;
-   nir_ssa_def *lower(nir_instr *instr) override;
+   nir_def *lower(nir_instr *instr) override;
 
-   nir_ssa_def *load_deref_64_to_vec2(nir_intrinsic_instr *intr);
-   nir_ssa_def *load_uniform_64_to_vec2(nir_intrinsic_instr *intr);
-   nir_ssa_def *load_ssbo_64_to_vec2(nir_intrinsic_instr *intr);
-   nir_ssa_def *load_64_to_vec2(nir_intrinsic_instr *intr);
-   nir_ssa_def *store_64_to_vec2(nir_intrinsic_instr *intr);
+   nir_def *load_uniform_64_to_vec2(nir_intrinsic_instr *intr);
+   nir_def *load_ssbo_64_to_vec2(nir_intrinsic_instr *intr);
+   nir_def *load_64_to_vec2(nir_intrinsic_instr *intr);
+
+   nir_def *store_ssbo_64_to_vec2(nir_intrinsic_instr *intr);
+
+   nir_def *make_64bit(nir_def *def, int ncomp64);
+
+   bool support_fp64_op(nir_op op) const;
+
+   bool m_support_fp64{false};
 };
 
 bool
@@ -838,35 +845,31 @@ Lower64BitToVec2::filter(const nir_instr *instr) const
       case nir_intrinsic_load_input:
       case nir_intrinsic_load_uniform:
       case nir_intrinsic_load_ubo:
+      case nir_intrinsic_load_global:
+      case nir_intrinsic_load_global_constant:
       case nir_intrinsic_load_ubo_vec4:
       case nir_intrinsic_load_ssbo:
-         return nir_dest_bit_size(intr->dest) == 64;
-      case nir_intrinsic_store_deref: {
-         if (nir_src_bit_size(intr->src[1]) == 64)
-            return true;
-         auto var = nir_intrinsic_get_var(intr, 0);
-         if (var->type->without_array()->bit_size() == 64)
-            return true;
-         return (var->type->without_array()->components() != intr->num_components);
-      }
+      case nir_intrinsic_load_reg:
+      case nir_intrinsic_load_reg_indirect:
+         return intr->def.bit_size == 64;
+      case nir_intrinsic_store_global:
+      case nir_intrinsic_store_ssbo:
+         return nir_src_bit_size(intr->src[0]) == 64;
       default:
          return false;
       }
    }
    case nir_instr_type_alu: {
       auto alu = nir_instr_as_alu(instr);
-      return nir_dest_bit_size(alu->dest.dest) == 64;
-   }
-   case nir_instr_type_phi: {
-      auto phi = nir_instr_as_phi(instr);
-      return nir_dest_bit_size(phi->dest) == 64;
+      return (!support_fp64_op(alu->op) && alu->def.bit_size == 64 &&
+              alu->src[0].src.ssa->bit_size == 64);
    }
    case nir_instr_type_load_const: {
       auto lc = nir_instr_as_load_const(instr);
       return lc->def.bit_size == 64;
    }
-   case nir_instr_type_ssa_undef: {
-      auto undef = nir_instr_as_ssa_undef(instr);
+   case nir_instr_type_undef: {
+      auto undef = nir_instr_as_undef(instr);
       return undef->def.bit_size == 64;
    }
    default:
@@ -874,25 +877,25 @@ Lower64BitToVec2::filter(const nir_instr *instr) const
    }
 }
 
-nir_ssa_def *
+nir_def *
 Lower64BitToVec2::lower(nir_instr *instr)
 {
    switch (instr->type) {
    case nir_instr_type_intrinsic: {
       auto intr = nir_instr_as_intrinsic(instr);
       switch (intr->intrinsic) {
-      case nir_intrinsic_load_deref:
-         return load_deref_64_to_vec2(intr);
       case nir_intrinsic_load_uniform:
          return load_uniform_64_to_vec2(intr);
       case nir_intrinsic_load_ssbo:
          return load_ssbo_64_to_vec2(intr);
       case nir_intrinsic_load_input:
+      case nir_intrinsic_load_global:
+      case nir_intrinsic_load_global_constant:
       case nir_intrinsic_load_ubo:
       case nir_intrinsic_load_ubo_vec4:
          return load_64_to_vec2(intr);
-      case nir_intrinsic_store_deref:
-         return store_64_to_vec2(intr);
+      case nir_intrinsic_store_ssbo:
+         return store_ssbo_64_to_vec2(intr);
       default:
 
          return nullptr;
@@ -900,33 +903,31 @@ Lower64BitToVec2::lower(nir_instr *instr)
    }
    case nir_instr_type_alu: {
       auto alu = nir_instr_as_alu(instr);
-      alu->dest.dest.ssa.bit_size = 32;
-      alu->dest.dest.ssa.num_components *= 2;
-      alu->dest.write_mask = (1 << alu->dest.dest.ssa.num_components) - 1;
-      switch (alu->op) {
-      case nir_op_pack_64_2x32_split:
-         alu->op = nir_op_vec2;
-         break;
-      case nir_op_pack_64_2x32:
-         alu->op = nir_op_mov;
-         break;
-      case nir_op_vec2:
-         return nir_vec4(b,
-                         nir_channel(b, alu->src[0].src.ssa, 0),
-                         nir_channel(b, alu->src[0].src.ssa, 1),
-                         nir_channel(b, alu->src[1].src.ssa, 0),
-                         nir_channel(b, alu->src[1].src.ssa, 1));
-      default:
-         return NULL;
+
+      nir_def *s[4] = {nullptr};
+      auto alu_info = nir_op_infos[alu->op];
+      for (unsigned i = 0; i < alu_info.num_inputs; ++i) {
+         const auto& src = alu->src[i].src.ssa;
+         const auto& swz = alu->src[i].swizzle;
+         if (alu->def.num_components == 1)
+            s[i] = nir_vec2(b,
+                            nir_unpack_64_2x32_split_x(b, nir_channel(b, src, swz[0])),
+                            nir_unpack_64_2x32_split_y(b, nir_channel(b, src, swz[0])));
+         else
+            s[i] = nir_vec4(b,
+                            nir_unpack_64_2x32_split_x(b, nir_channel(b, src, swz[0])),
+                            nir_unpack_64_2x32_split_y(b, nir_channel(b, src, swz[0])),
+                            nir_unpack_64_2x32_split_x(b, nir_channel(b, src, swz[1])),
+                            nir_unpack_64_2x32_split_y(b, nir_channel(b, src, swz[1])));
       }
-      return NIR_LOWER_INSTR_PROGRESS;
-   }
-   case nir_instr_type_phi: {
-      auto phi = nir_instr_as_phi(instr);
-      phi->dest.ssa.bit_size = 32;
-      phi->dest.ssa.num_components = 2;
-      return NIR_LOWER_INSTR_PROGRESS;
-   }
+      auto d = nir_build_alu(b, alu->op, s[0], s[1], s[2], s[3]);
+      if (alu->def.num_components == 1)
+         return nir_pack_64_2x32(b, d);
+      else
+         return nir_vec2(b,
+                         nir_pack_64_2x32(b, nir_channels(b, d, 3)),
+                         nir_pack_64_2x32(b, nir_channels(b, d, 0xC)));
+   } break;
    case nir_instr_type_load_const: {
       auto lc = nir_instr_as_load_const(instr);
       assert(lc->def.num_components <= 2);
@@ -937,10 +938,12 @@ Lower64BitToVec2::lower(nir_instr *instr)
          val[i * 2 + 1] = nir_const_value_for_uint(v >> 32, 32);
       }
 
-      return nir_build_imm(b, 2 * lc->def.num_components, 32, val);
+      return make_64bit(nir_build_imm(b, 2 * lc->def.num_components, 32, val),
+                        lc->def.num_components);
+      ;
    }
-   case nir_instr_type_ssa_undef: {
-      auto undef = nir_instr_as_ssa_undef(instr);
+   case nir_instr_type_undef: {
+      auto undef = nir_instr_as_undef(instr);
       undef->def.num_components *= 2;
       undef->def.bit_size = 32;
       return NIR_LOWER_INSTR_PROGRESS;
@@ -950,214 +953,111 @@ Lower64BitToVec2::lower(nir_instr *instr)
    }
 }
 
-nir_ssa_def *
-Lower64BitToVec2::load_deref_64_to_vec2(nir_intrinsic_instr *intr)
+nir_def *
+Lower64BitToVec2::store_ssbo_64_to_vec2(nir_intrinsic_instr *intr)
 {
-   auto deref = nir_instr_as_deref(intr->src[0].ssa->parent_instr);
-   auto var = nir_intrinsic_get_var(intr, 0);
-   unsigned components = var->type->without_array()->components();
-   if (var->type->without_array()->bit_size() == 64) {
-      components *= 2;
-      if (deref->deref_type == nir_deref_type_var) {
-         var->type = glsl_vec_type(components);
-      } else if (deref->deref_type == nir_deref_type_array) {
+   b->cursor = nir_before_instr(&intr->instr);
 
-         var->type =
-            glsl_array_type(glsl_vec_type(components), var->type->array_size(), 0);
+   auto src = intr->src[0].ssa;
 
-      } else {
-         nir_print_shader(b->shader, stderr);
-         assert(0 && "Only lowring of var and array derefs supported\n");
-      }
-   }
-   deref->type = var->type;
-   if (deref->deref_type == nir_deref_type_array) {
-      auto deref_array = nir_instr_as_deref(deref->parent.ssa->parent_instr);
-      deref_array->type = var->type;
-      deref->type = deref_array->type->without_array();
+   nir_def *s[4];
+   for (int i = 0; i < src->num_components; ++i) {
+      s[2 * i] = nir_unpack_64_2x32_split_x(b, nir_channel(b, src, i));
+      s[2 * i + 1] = nir_unpack_64_2x32_split_y(b, nir_channel(b, src, i));
    }
 
-   intr->num_components = components;
-   intr->dest.ssa.bit_size = 32;
-   intr->dest.ssa.num_components = components;
+   auto new_src = src->num_components == 1 ? nir_vec2(b, s[0], s[1])
+                                           : nir_vec4(b, s[0], s[1], s[2], s[3]);
+
+   //   intr->num_components *= 2;
+   nir_src_rewrite(&intr->src[0], new_src);
+
+   intr->num_components *= 2;
+   nir_intrinsic_set_write_mask(intr, src->num_components == 2 ? 0xf : 0x3);
+
    return NIR_LOWER_INSTR_PROGRESS;
 }
 
-nir_ssa_def *
-Lower64BitToVec2::store_64_to_vec2(nir_intrinsic_instr *intr)
-{
-   auto deref = nir_instr_as_deref(intr->src[0].ssa->parent_instr);
-   auto var = nir_intrinsic_get_var(intr, 0);
-
-   unsigned components = var->type->without_array()->components();
-   unsigned wrmask = nir_intrinsic_write_mask(intr);
-   if (var->type->without_array()->bit_size() == 64) {
-      components *= 2;
-      if (deref->deref_type == nir_deref_type_var) {
-         var->type = glsl_vec_type(components);
-      } else if (deref->deref_type == nir_deref_type_array) {
-         var->type =
-            glsl_array_type(glsl_vec_type(components), var->type->array_size(), 0);
-      } else {
-         nir_print_shader(b->shader, stderr);
-         assert(0 && "Only lowring of var and array derefs supported\n");
-      }
-   }
-   deref->type = var->type;
-   if (deref->deref_type == nir_deref_type_array) {
-      auto deref_array = nir_instr_as_deref(deref->parent.ssa->parent_instr);
-      deref_array->type = var->type;
-      deref->type = deref_array->type->without_array();
-   }
-   intr->num_components = components;
-   nir_intrinsic_set_write_mask(intr, wrmask == 1 ? 3 : 0xf);
-   return NIR_LOWER_INSTR_PROGRESS;
-}
-
-nir_ssa_def *
+nir_def *
 Lower64BitToVec2::load_uniform_64_to_vec2(nir_intrinsic_instr *intr)
 {
    intr->num_components *= 2;
-   intr->dest.ssa.bit_size = 32;
-   intr->dest.ssa.num_components *= 2;
+   intr->def.bit_size = 32;
+   intr->def.num_components *= 2;
    nir_intrinsic_set_dest_type(intr, nir_type_float32);
-   return NIR_LOWER_INSTR_PROGRESS;
+   return make_64bit(&intr->def, intr->num_components >> 1);
 }
 
-nir_ssa_def *
+nir_def *
 Lower64BitToVec2::load_64_to_vec2(nir_intrinsic_instr *intr)
 {
    intr->num_components *= 2;
-   intr->dest.ssa.bit_size = 32;
-   intr->dest.ssa.num_components *= 2;
-   nir_intrinsic_set_component(intr, nir_intrinsic_component(intr) * 2);
-   return NIR_LOWER_INSTR_PROGRESS;
+   intr->def.bit_size = 32;
+   intr->def.num_components *= 2;
+   if (nir_intrinsic_has_component(intr))
+      nir_intrinsic_set_component(intr, nir_intrinsic_component(intr) * 2);
+   return make_64bit(&intr->def, intr->num_components >> 1);
 }
 
-nir_ssa_def *
+nir_def *
+Lower64BitToVec2::make_64bit(nir_def *def, int ncomp64)
+{
+   assert(ncomp64 < 3);
+
+   nir_def *comp[2];
+
+   for (int i = 0; i < ncomp64; ++i) {
+      comp[i] = nir_pack_64_2x32(b, nir_channels(b, def, 3 << 2 * i));
+   }
+
+   return ncomp64 == 2 ? nir_vec2(b, comp[0], comp[1]) : comp[0];
+}
+
+nir_def *
 Lower64BitToVec2::load_ssbo_64_to_vec2(nir_intrinsic_instr *intr)
 {
    intr->num_components *= 2;
-   intr->dest.ssa.bit_size = 32;
-   intr->dest.ssa.num_components *= 2;
-   return NIR_LOWER_INSTR_PROGRESS;
-}
-
-static bool
-store_64bit_intr(nir_src *src, void *state)
-{
-   bool *s = (bool *)state;
-   *s = nir_src_bit_size(*src) == 64;
-   return !*s;
-}
-
-static bool
-double2vec2(nir_src *src, UNUSED void *state)
-{
-   if (nir_src_bit_size(*src) != 64)
-      return true;
-
-   assert(src->is_ssa);
-   src->ssa->bit_size = 32;
-   src->ssa->num_components *= 2;
-   return true;
+   intr->def.bit_size = 32;
+   intr->def.num_components *= 2;
+   return make_64bit(&intr->def, intr->num_components >> 1);
 }
 
 bool
-r600_nir_64_to_vec2(nir_shader *sh)
+Lower64BitToVec2::support_fp64_op(nir_op op) const
 {
-   vector<nir_instr *> intr64bit;
-   nir_foreach_function(function, sh)
-   {
-      if (function->impl) {
-         nir_builder b;
-         nir_builder_init(&b, function->impl);
-
-         nir_foreach_block(block, function->impl)
-         {
-            nir_foreach_instr_safe(instr, block)
-            {
-               switch (instr->type) {
-               case nir_instr_type_alu: {
-                  bool success = false;
-                  nir_foreach_src(instr, store_64bit_intr, &success);
-                  if (success)
-                     intr64bit.push_back(instr);
-                  break;
-               }
-               case nir_instr_type_intrinsic: {
-                  auto ir = nir_instr_as_intrinsic(instr);
-                  switch (ir->intrinsic) {
-                  case nir_intrinsic_store_output:
-                  case nir_intrinsic_store_ssbo: {
-                     bool success = false;
-                     nir_foreach_src(instr, store_64bit_intr, &success);
-                     if (success) {
-                        auto wm = nir_intrinsic_write_mask(ir);
-                        nir_intrinsic_set_write_mask(ir, (wm == 1) ? 3 : 0xf);
-                        ir->num_components *= 2;
-                     }
-                     break;
-                  }
-                  default:;
-                  }
-               }
-               default:;
-               }
-            }
-         }
-      }
+   switch (op) {
+   case nir_op_fneg:
+   case nir_op_fsat:
+   case nir_op_ffract:
+   case nir_op_feq32:
+   case nir_op_fge32:
+   case nir_op_flt32:
+   case nir_op_fneu32:
+   case nir_op_ffma:
+   case nir_op_fadd:
+   case nir_op_fmul:
+   case nir_op_fmax:
+   case nir_op_fmin:
+   case nir_op_f2f64:
+   case nir_op_f2f32:
+   case nir_op_fabs:
+   case nir_op_fsqrt:
+   case nir_op_frcp:
+   case nir_op_frsq:
+      return m_support_fp64;
+   case nir_op_vec2:
+   case nir_op_mov:
+      return true;
+   default:
+      return false;
+      ;
    }
+}
 
-   bool result = Lower64BitToVec2().run(sh);
-
-   if (result || !intr64bit.empty()) {
-
-      for (auto&& instr : intr64bit) {
-         if (instr->type == nir_instr_type_alu) {
-            auto alu = nir_instr_as_alu(instr);
-            auto alu_info = nir_op_infos[alu->op];
-            for (unsigned i = 0; i < alu_info.num_inputs; ++i) {
-               int swizzle[NIR_MAX_VEC_COMPONENTS] = {0};
-               for (unsigned k = 0; k < NIR_MAX_VEC_COMPONENTS / 2; k++) {
-                  if (!nir_alu_instr_channel_used(alu, i, k)) {
-                     continue;
-                  }
-
-                  switch (alu->op) {
-                  case nir_op_unpack_64_2x32_split_x:
-                     swizzle[2 * k] = alu->src[i].swizzle[k] * 2;
-                     alu->op = nir_op_mov;
-                     break;
-                  case nir_op_unpack_64_2x32_split_y:
-                     swizzle[2 * k] = alu->src[i].swizzle[k] * 2 + 1;
-                     alu->op = nir_op_mov;
-                     break;
-                  case nir_op_unpack_64_2x32:
-                     alu->op = nir_op_mov;
-                     break;
-                  case nir_op_bcsel:
-                     if (i == 0) {
-                        swizzle[2 * k] = swizzle[2 * k + 1] = alu->src[i].swizzle[k] * 2;
-                        break;
-                     }
-                     FALLTHROUGH;
-                  default:
-                     swizzle[2 * k] = alu->src[i].swizzle[k] * 2;
-                     swizzle[2 * k + 1] = alu->src[i].swizzle[k] * 2 + 1;
-                  }
-               }
-               for (unsigned k = 0; k < NIR_MAX_VEC_COMPONENTS; ++k) {
-                  alu->src[i].swizzle[k] = swizzle[k];
-               }
-            }
-         } else
-            nir_foreach_src(instr, double2vec2, nullptr);
-      }
-      result = true;
-   }
-
-   return result;
+bool
+r600_nir_64_to_vec2(nir_shader *sh, bool support_fp64)
+{
+   return Lower64BitToVec2(support_fp64).run(sh);
 }
 
 using std::map;
@@ -1186,29 +1086,27 @@ void
 StoreMerger::collect_stores()
 {
    unsigned vertex = 0;
-   nir_foreach_function(function, sh)
+   nir_foreach_function_impl(impl, sh)
    {
-      if (function->impl) {
-         nir_foreach_block(block, function->impl)
+      nir_foreach_block(block, impl)
+      {
+         nir_foreach_instr_safe(instr, block)
          {
-            nir_foreach_instr_safe(instr, block)
-            {
-               if (instr->type != nir_instr_type_intrinsic)
-                  continue;
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
 
-               auto ir = nir_instr_as_intrinsic(instr);
-               if (ir->intrinsic == nir_intrinsic_emit_vertex ||
-                   ir->intrinsic == nir_intrinsic_emit_vertex_with_counter) {
-                  ++vertex;
-                  continue;
-               }
-               if (ir->intrinsic != nir_intrinsic_store_output)
-                  continue;
-
-               unsigned index = nir_intrinsic_base(ir) + 64 * vertex +
-                                8 * 64 * nir_intrinsic_io_semantics(ir).gs_streams;
-               m_stores[index].push_back(ir);
+            auto ir = nir_instr_as_intrinsic(instr);
+            if (ir->intrinsic == nir_intrinsic_emit_vertex ||
+                ir->intrinsic == nir_intrinsic_emit_vertex_with_counter) {
+               ++vertex;
+               continue;
             }
+            if (ir->intrinsic != nir_intrinsic_store_output)
+               continue;
+
+            unsigned index = nir_intrinsic_base(ir) + 64 * vertex +
+                             8 * 64 * nir_intrinsic_io_semantics(ir).gs_streams;
+            m_stores[index].push_back(ir);
          }
       }
    }
@@ -1231,13 +1129,11 @@ StoreMerger::combine()
 void
 StoreMerger::combine_one_slot(vector<nir_intrinsic_instr *>& stores)
 {
-   nir_ssa_def *srcs[4] = {nullptr};
+   nir_def *srcs[4] = {nullptr};
 
-   nir_builder b;
-   nir_builder_init(&b, nir_shader_get_entrypoint(sh));
    auto last_store = *stores.rbegin();
 
-   b.cursor = nir_before_instr(&last_store->instr);
+   nir_builder b = nir_builder_at(nir_before_instr(&last_store->instr));
 
    unsigned comps = 0;
    unsigned writemask = 0;
@@ -1255,9 +1151,7 @@ StoreMerger::combine_one_slot(vector<nir_intrinsic_instr *>& stores)
 
    auto new_src = nir_vec(&b, srcs, comps);
 
-   nir_instr_rewrite_src(&last_store->instr,
-                         &last_store->src[0],
-                         nir_src_for_ssa(new_src));
+   nir_src_rewrite(&last_store->src[0], new_src);
    last_store->num_components = comps;
    nir_intrinsic_set_component(last_store, first_comp);
    nir_intrinsic_set_write_mask(last_store, writemask);
@@ -1272,206 +1166,6 @@ r600_merge_vec2_stores(nir_shader *shader)
    r600::StoreMerger merger(shader);
    merger.collect_stores();
    return merger.combine();
-}
-
-static bool
-r600_lower_64bit_intrinsic(nir_builder *b, nir_intrinsic_instr *instr)
-{
-   b->cursor = nir_after_instr(&instr->instr);
-
-   switch (instr->intrinsic) {
-   case nir_intrinsic_load_ubo:
-   case nir_intrinsic_load_ubo_vec4:
-   case nir_intrinsic_load_uniform:
-   case nir_intrinsic_load_ssbo:
-   case nir_intrinsic_load_input:
-   case nir_intrinsic_load_interpolated_input:
-   case nir_intrinsic_load_per_vertex_input:
-   case nir_intrinsic_store_output:
-   case nir_intrinsic_store_per_vertex_output:
-   case nir_intrinsic_store_ssbo:
-      break;
-   default:
-      return false;
-   }
-
-   if (instr->num_components <= 2)
-      return false;
-
-   bool has_dest = nir_intrinsic_infos[instr->intrinsic].has_dest;
-   if (has_dest) {
-      if (nir_dest_bit_size(instr->dest) != 64)
-         return false;
-   } else {
-      if (nir_src_bit_size(instr->src[0]) != 64)
-         return false;
-   }
-
-   nir_intrinsic_instr *first =
-      nir_instr_as_intrinsic(nir_instr_clone(b->shader, &instr->instr));
-   nir_intrinsic_instr *second =
-      nir_instr_as_intrinsic(nir_instr_clone(b->shader, &instr->instr));
-
-   switch (instr->intrinsic) {
-   case nir_intrinsic_load_ubo:
-   case nir_intrinsic_load_ubo_vec4:
-   case nir_intrinsic_load_uniform:
-   case nir_intrinsic_load_ssbo:
-   case nir_intrinsic_store_ssbo:
-      break;
-
-   default: {
-      nir_io_semantics semantics = nir_intrinsic_io_semantics(second);
-      semantics.location++;
-      semantics.num_slots--;
-      nir_intrinsic_set_io_semantics(second, semantics);
-
-      nir_intrinsic_set_base(second, nir_intrinsic_base(second) + 1);
-      break;
-   }
-   }
-
-   first->num_components = 2;
-   second->num_components -= 2;
-   if (has_dest) {
-      first->dest.ssa.num_components = 2;
-      second->dest.ssa.num_components -= 2;
-   }
-
-   nir_builder_instr_insert(b, &first->instr);
-   nir_builder_instr_insert(b, &second->instr);
-
-   if (has_dest) {
-      /* Merge the two loads' results back into a vector. */
-      nir_ssa_scalar channels[4] = {
-         nir_get_ssa_scalar(&first->dest.ssa, 0),
-         nir_get_ssa_scalar(&first->dest.ssa, 1),
-         nir_get_ssa_scalar(&second->dest.ssa, 0),
-         nir_get_ssa_scalar(&second->dest.ssa, second->num_components > 1 ? 1 : 0),
-      };
-      nir_ssa_def *new_ir = nir_vec_scalars(b, channels, instr->num_components);
-      nir_ssa_def_rewrite_uses(&instr->dest.ssa, new_ir);
-   } else {
-      /* Split the src value across the two stores. */
-      b->cursor = nir_before_instr(&instr->instr);
-
-      nir_ssa_def *src0 = instr->src[0].ssa;
-      nir_ssa_scalar channels[4] = {{0}};
-      for (int i = 0; i < instr->num_components; i++)
-         channels[i] = nir_get_ssa_scalar(src0, i);
-
-      nir_intrinsic_set_write_mask(first, nir_intrinsic_write_mask(instr) & 3);
-      nir_intrinsic_set_write_mask(second, nir_intrinsic_write_mask(instr) >> 2);
-
-      nir_instr_rewrite_src(&first->instr,
-                            &first->src[0],
-                            nir_src_for_ssa(nir_vec_scalars(b, channels, 2)));
-      nir_instr_rewrite_src(
-         &second->instr,
-         &second->src[0],
-         nir_src_for_ssa(nir_vec_scalars(b, &channels[2], second->num_components)));
-   }
-
-   int offset_src = -1;
-   uint32_t offset_amount = 16;
-
-   switch (instr->intrinsic) {
-   case nir_intrinsic_load_ssbo:
-   case nir_intrinsic_load_ubo:
-      offset_src = 1;
-      break;
-   case nir_intrinsic_load_ubo_vec4:
-   case nir_intrinsic_load_uniform:
-      offset_src = 0;
-      offset_amount = 1;
-      break;
-   case nir_intrinsic_store_ssbo:
-      offset_src = 2;
-      break;
-   default:
-      break;
-   }
-   if (offset_src != -1) {
-      b->cursor = nir_before_instr(&second->instr);
-      nir_ssa_def *second_offset =
-         nir_iadd_imm(b, second->src[offset_src].ssa, offset_amount);
-      nir_instr_rewrite_src(&second->instr,
-                            &second->src[offset_src],
-                            nir_src_for_ssa(second_offset));
-   }
-
-   /* DCE stores we generated with no writemask (nothing else does this
-    * currently).
-    */
-   if (!has_dest) {
-      if (nir_intrinsic_write_mask(first) == 0)
-         nir_instr_remove(&first->instr);
-      if (nir_intrinsic_write_mask(second) == 0)
-         nir_instr_remove(&second->instr);
-   }
-
-   nir_instr_remove(&instr->instr);
-
-   return true;
-}
-
-static bool
-r600_lower_64bit_load_const(nir_builder *b, nir_load_const_instr *instr)
-{
-   int num_components = instr->def.num_components;
-
-   if (instr->def.bit_size != 64 || num_components <= 2)
-      return false;
-
-   b->cursor = nir_before_instr(&instr->instr);
-
-   nir_load_const_instr *first = nir_load_const_instr_create(b->shader, 2, 64);
-   nir_load_const_instr *second =
-      nir_load_const_instr_create(b->shader, num_components - 2, 64);
-
-   first->value[0] = instr->value[0];
-   first->value[1] = instr->value[1];
-   second->value[0] = instr->value[2];
-   if (num_components == 4)
-      second->value[1] = instr->value[3];
-
-   nir_builder_instr_insert(b, &first->instr);
-   nir_builder_instr_insert(b, &second->instr);
-
-   nir_ssa_def *channels[4] = {
-      nir_channel(b, &first->def, 0),
-      nir_channel(b, &first->def, 1),
-      nir_channel(b, &second->def, 0),
-      num_components == 4 ? nir_channel(b, &second->def, 1) : NULL,
-   };
-   nir_ssa_def *new_ir = nir_vec(b, channels, num_components);
-   nir_ssa_def_rewrite_uses(&instr->def, new_ir);
-   nir_instr_remove(&instr->instr);
-
-   return true;
-}
-
-static bool
-r600_lower_64bit_to_vec2_instr(nir_builder *b, nir_instr *instr, void *data)
-{
-   switch (instr->type) {
-   case nir_instr_type_load_const:
-      return r600_lower_64bit_load_const(b, nir_instr_as_load_const(instr));
-
-   case nir_instr_type_intrinsic:
-      return r600_lower_64bit_intrinsic(b, nir_instr_as_intrinsic(instr));
-   default:
-      return false;
-   }
-}
-
-bool
-r600_lower_64bit_to_vec2(nir_shader *s)
-{
-   return nir_shader_instructions_pass(s,
-                                       r600_lower_64bit_to_vec2_instr,
-                                       nir_metadata_block_index | nir_metadata_dominance,
-                                       NULL);
 }
 
 } // end namespace r600

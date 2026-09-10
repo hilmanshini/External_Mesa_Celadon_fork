@@ -1,66 +1,69 @@
-.etnaviv-armhf-test:
-  extends:
-    - .baremetal-test-armhf
-    - .etnaviv-rules
-  script:
-    - ./install/bare-metal/fastboot.sh
-  variables:
-    BM_CMDLINE: "ip=dhcp console=ttymxc0,115200n8 root=/dev/nfs rw nfsrootdebug init=/init $BM_KERNELARGS"
-    BM_KERNEL: /baremetal-files/zImage
-    FLAKES_CHANNEL: "#etnaviv-ci"
+include:
+  - local: 'src/etnaviv/ci/gitlab-ci-inc.yml'
 
-.etnaviv-arm64-test:
+gc2000-gles2:
   extends:
-    - .baremetal-test-arm64
-    - .etnaviv-rules
-  script:
-    - ./install/bare-metal/fastboot.sh
+    - .ci-tron-arm32-test-gl
+    - .austriancoder-imx6q-cubox-i-4cores:arm32
+    - .etnaviv-manual-rules
   variables:
-    BM_CMDLINE: "ip=dhcp console=ttymxc0,115200n8 root=/dev/nfs rw nfsrootdebug init=/init $BM_KERNELARGS"
-    BM_KERNEL: /baremetal-files/Image
-    FLAKES_CHANNEL: "#etnaviv-ci"
+    DEQP_SUITE: etnaviv-gc2000
+    # Disable reporting, since DUTs don't have internet access
+    FLAKES_CHANNEL: ""
+    CI_TRON_TIMEOUT__OVERALL__MINUTES: 28
+  timeout: 30m
 
-.etnaviv-armhf-gc2000:
+# Disabled until the 168 fails get addressed
+.gc2000-gles2-asan:
   extends:
-    - .etnaviv-armhf-test
+    - .ci-tron-arm32-test-asan-gl
+    - .austriancoder-imx6q-cubox-i-2cores:arm32
+    - .etnaviv-manual-rules
   variables:
-    BM_DTB: /baremetal-files/imx6q-cubox-i.dtb
-    DEQP_EXPECTED_RENDERER: GC2000
-    GPU_VERSION: "etnaviv-gc2000"
-  tags:
-    - etnaviv-gc2000
+    DEQP_SUITE: etnaviv-gc2000
+    FLAKES_CHANNEL: ""
+    DEQP_FRACTION: 100
+    FDO_CI_CONCURRENT: 1
+    CI_TRON_TIMEOUT__OVERALL__MINUTES: 28
+  timeout: 30m
 
-.etnaviv-arm64-gc7000:
+gc2000-piglit:
   extends:
-    - .etnaviv-arm64-test
+    - gc2000-gles2
+    - .test-piglit
   variables:
-    BM_DTB: /baremetal-files/imx8mq-nitrogen.dtb
-    DEQP_EXPECTED_RENDERER: GC7000
-    GPU_VERSION: "etnaviv-gc7000"
-  tags:
-    - austriancoder-etnaviv-imx8mq-nitrogen
+    DEQP_SUITE: etnaviv-gc2000-piglit
+    CI_TRON_TIMEOUT__OVERALL__MINUTES: 25
+  parallel: 2
+  timeout: 30m
 
-gc2000_gles2:
+gc3000-gles2:
   extends:
-    - .etnaviv-armhf-gc2000
-    - .test-manual-mr
+    - .ci-tron-arm32-test-gl
+    - .austriancoder-imx6qp-nitrogen6_max:arm32
+    - .etnaviv-manual-rules
   variables:
-    HWCI_TEST_SCRIPT: "/install/deqp-runner.sh"
-    DEQP_VER: gles2
+    DEQP_SUITE: etnaviv-gc3000
+    FLAKES_CHANNEL: ""
+    CI_TRON_TIMEOUT__OVERALL__MINUTES: 28
+  timeout: 30m
 
-gc2000_piglit:
+gc7000-imx8mq-gles2:
   extends:
-    - .piglit-test
-    - .etnaviv-armhf-gc2000
-    - .test-manual-mr
+    - .ci-tron-arm64-test-gl
+    - .austriancoder-imx8mq-nitrogen:arm64
+    - .etnaviv-manual-rules
   variables:
-    PIGLIT_PLATFORM: gbm
-    PIGLIT_PROFILES: gpu
+    DEQP_SUITE: etnaviv-gc7000-r6214
+    FLAKES_CHANNEL: ""
+    CI_TRON_TIMEOUT__OVERALL__MINUTES: 28
+  timeout: 30m
 
-gc7000_gles2:
+gc7000-imx8mp-gles2:
   extends:
-    - .etnaviv-arm64-gc7000
-    - .test-manual-mr
+    - .lava-arm64-test-gl
+    - .pengutronix-imx8mp-mba8mpxl:arm64
+    - .etnaviv-manual-rules
   variables:
-    HWCI_TEST_SCRIPT: "/install/deqp-runner.sh"
-    DEQP_VER: gles2
+    DEQP_SUITE: etnaviv-gc7000-r6204
+  timeout: 30m

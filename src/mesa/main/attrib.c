@@ -91,9 +91,6 @@ _mesa_PushAttrib(GLbitfield mask)
 
    GET_CURRENT_CONTEXT(ctx);
 
-   if (MESA_VERBOSE & VERBOSE_API)
-      _mesa_debug(ctx, "glPushAttrib %x\n", (int) mask);
-
    if (ctx->AttribStackDepth >= MAX_ATTRIB_STACK_DEPTH) {
       _mesa_error(ctx, GL_STACK_OVERFLOW, "glPushAttrib");
       return;
@@ -334,8 +331,6 @@ _mesa_PushAttrib(GLbitfield mask)
 static void
 pop_enable_group(struct gl_context *ctx, const struct gl_enable_attrib_node *enable)
 {
-   GLuint i;
-
    TEST_AND_UPDATE(ctx->Color.AlphaEnabled, enable->AlphaTest, GL_ALPHA_TEST);
    if (ctx->Color.BlendEnabled != enable->Blend) {
       if (ctx->Extensions.EXT_draw_buffers2) {
@@ -436,9 +431,7 @@ pop_enable_group(struct gl_context *ctx, const struct gl_enable_attrib_node *ena
    TEST_AND_UPDATE(ctx->Polygon.StippleFlag, enable->PolygonStipple,
                    GL_POLYGON_STIPPLE);
    if (ctx->Scissor.EnableFlags != enable->Scissor) {
-      unsigned i;
-
-      for (i = 0; i < ctx->Const.MaxViewports; i++) {
+      for (unsigned i = 0; i < ctx->Const.MaxViewports; i++) {
          TEST_AND_UPDATE_INDEX(ctx->Scissor.EnableFlags, enable->Scissor,
                                i, GL_SCISSOR_TEST);
       }
@@ -489,7 +482,7 @@ pop_enable_group(struct gl_context *ctx, const struct gl_enable_attrib_node *ena
    const unsigned curTexUnitSave = ctx->Texture.CurrentUnit;
 
    /* texture unit enables */
-   for (i = 0; i < ctx->Const.MaxTextureUnits; i++) {
+   for (GLuint i = 0; i < ctx->Const.MaxTextureUnits; i++) {
       const GLbitfield enabled = enable->Texture[i];
       const GLbitfield gen_enabled = enable->TexGen[i];
       const struct gl_fixedfunc_texture_unit *unit = &ctx->Texture.FixedFuncUnit[i];
@@ -682,10 +675,14 @@ _mesa_PopAttrib(void)
    unsigned mask = attr->Mask;
 
    /* Flush current attribs. This must be done before PopAttribState is
-    * applied.
+    * applied. Also reset the attributes stored in vbo, as after this we'll
+    * change Current directly, and these changed values would've been then
+    * overridden by another flush in the future.
     */
-   if (mask & GL_CURRENT_BIT)
+   if ((mask & GL_CURRENT_BIT) && ctx->Driver.NeedFlush) {
       FLUSH_CURRENT(ctx, 0);
+      vbo_reset_all_attr(ctx);
+   }
 
    /* Only restore states that have been changed since glPushAttrib. */
    mask &= ctx->PopAttribState;
@@ -729,9 +726,8 @@ _mesa_PopAttrib(void)
           * function, but legal for the later.
           */
          GLboolean multipleBuffers = GL_FALSE;
-         GLuint i;
 
-         for (i = 1; i < ctx->Const.MaxDrawBuffers; i++) {
+         for (GLuint i = 1; i < ctx->Const.MaxDrawBuffers; i++) {
             if (attr->Color.DrawBuffer[i] != GL_NONE) {
                multipleBuffers = GL_TRUE;
                break;
@@ -944,8 +940,8 @@ _mesa_PopAttrib(void)
       TEST_AND_UPDATE(ctx->Point.PointSprite, attr->Point.PointSprite,
                       GL_POINT_SPRITE);
 
-      if ((ctx->API == API_OPENGL_COMPAT && ctx->Version >= 20)
-          || ctx->API == API_OPENGL_CORE)
+      if ((_mesa_is_desktop_gl_compat(ctx) && ctx->Version >= 20)
+          || _mesa_is_desktop_gl_core(ctx))
          TEST_AND_CALL1_SEL(Point.SpriteOrigin, PointParameterf, GL_POINT_SPRITE_COORD_ORIGIN);
    }
 
@@ -972,7 +968,7 @@ _mesa_PopAttrib(void)
    if (mask & GL_POLYGON_STIPPLE_BIT) {
       memcpy(ctx->PolygonStipple, attr->PolygonStipple, 32*sizeof(GLuint));
 
-      ctx->NewDriverState |= ST_NEW_POLY_STIPPLE;
+      ST_SET_STATE(ctx->NewDriverState, ST_NEW_POLY_STIPPLE);
    }
 
    if (mask & GL_SCISSOR_BIT) {
@@ -1033,7 +1029,7 @@ _mesa_PopAttrib(void)
          _math_matrix_analyse(ctx->ProjectionMatrixStack.Top);
 
       ctx->NewState |= _NEW_TRANSFORM;
-      ctx->NewDriverState |= ST_NEW_CLIP_STATE;
+      ST_SET_STATE(ctx->NewDriverState, ST_NEW_CLIP_STATE);
 
       /* restore clip planes */
       for (i = 0; i < ctx->Const.MaxClipPlanes; i++) {
@@ -1084,7 +1080,7 @@ _mesa_PopAttrib(void)
 
          if (memcmp(&ctx->ViewportArray[i].X, &vp->X, sizeof(float) * 6)) {
             ctx->NewState |= _NEW_VIEWPORT;
-            ctx->NewDriverState |= ST_NEW_VIEWPORT;
+            ST_SET_STATE(ctx->NewDriverState, ST_NEW_VIEWPORT);
 
             memcpy(&ctx->ViewportArray[i].X, &vp->X, sizeof(float) * 6);
 
@@ -1124,7 +1120,11 @@ _mesa_PopAttrib(void)
                      AlphaToCoverageDitherControlNV);
    }
 
-   ctx->PopAttribState = attr->OldPopAttribStateMask;
+   /* Restore the previous PopAttribStateMask as well as any modified state
+    * that was not restored in the current pop.
+    */
+   ctx->PopAttribState = attr->OldPopAttribStateMask |
+                         (ctx->PopAttribState & ~attr->Mask);
 }
 
 
@@ -1208,6 +1208,7 @@ copy_array_object(struct gl_context *ctx,
    /* The bitmask of bound VBOs needs to match the VertexBinding array */
    dest->VertexAttribBufferMask = src->VertexAttribBufferMask;
    dest->NonZeroDivisorMask = src->NonZeroDivisorMask;
+   dest->NonIdentityBufferAttribMapping = src->NonIdentityBufferAttribMapping;
    dest->_AttributeMapMode = src->_AttributeMapMode;
    /* skip NumUpdates and IsDynamic because they can only increase, not decrease */
 }
@@ -1313,6 +1314,8 @@ restore_array_attrib(struct gl_context *ctx,
    }
 
    _mesa_update_edgeflag_state_vao(ctx);
+   _mesa_set_varying_vp_inputs(ctx, ctx->VertexProgram._VPModeInputFilter &
+                               ctx->Array.VAO->_EnabledWithMapMode);
 }
 
 

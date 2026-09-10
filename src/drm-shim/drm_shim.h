@@ -44,7 +44,16 @@ struct shim_device {
    /* Mapping from mmap offset to shim_bo */
    struct hash_table_u64 *offset_map;
 
-   mtx_t mem_lock;
+   /* IOMEM region */
+   struct {
+      off64_t start;
+      size_t size;
+      void *(*mmap)(size_t length, int prot, int flags, off64_t offset);
+   } iomem_region;
+
+   /* Lock for fd_map and mem_heap. */
+   mtx_t lock;
+
    /* Heap from which shim_bo are allocated */
    struct util_vma_heap mem_heap;
 
@@ -83,9 +92,15 @@ struct shim_bo {
 };
 
 /* Core support. */
-extern int render_node_minor;
+extern const int render_node_minor;
+bool drm_shim_inited(void);
 void drm_shim_device_init(void);
+void drm_shim_pci_device_setup(uint16_t vendor_id, uint16_t device_id,
+                               const char *pci_slot, const char *driver_name);
+void drm_shim_platform_device_setup(const char *driver_name, const char *fullname, const char *compatible);
 void drm_shim_override_file(const char *contents,
+                            const char *path_format, ...) PRINTFLIKE(2, 3);
+void drm_shim_override_link(const char *contents,
                             const char *path_format, ...) PRINTFLIKE(2, 3);
 void drm_shim_fd_register(int fd, struct shim_fd *shim_fd);
 void drm_shim_fd_unregister(int fd);
@@ -101,6 +116,8 @@ struct shim_bo *drm_shim_bo_lookup(struct shim_fd *shim_fd, int handle);
 int drm_shim_bo_get_handle(struct shim_fd *shim_fd, struct shim_bo *bo);
 uint64_t drm_shim_bo_get_mmap_offset(struct shim_fd *shim_fd,
                                      struct shim_bo *bo);
+void drm_shim_init_iomem_region(off64_t offset, size_t size,
+                                void *(*mmap_handler)(size_t, int, int, off64_t));
 
 /* driver-specific hooks. */
 void drm_shim_driver_init(void);

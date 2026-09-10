@@ -24,6 +24,11 @@
 #include "d3d12_video_encoder_nalu_writer_h264.h"
 #include <algorithm>
 
+d3d12_video_nalu_writer_h264::d3d12_video_nalu_writer_h264() {
+    m_rbsp_buffer.create_bitstream(MAX_COMPRESSED_NALU);
+    m_nalu_buffer.create_bitstream(2 * MAX_COMPRESSED_NALU);
+}
+
 void
 d3d12_video_nalu_writer_h264::rbsp_trailing(d3d12_video_encoder_bitstream *pBitstream)
 {
@@ -48,21 +53,18 @@ d3d12_video_nalu_writer_h264::write_sps_bytes(d3d12_video_encoder_bitstream *pBi
    assert(pSPS->seq_parameter_set_id < 32);
 
    pBitstream->put_bits(8, pSPS->profile_idc);
-   pBitstream->put_bits(1, 0);   // constraint_set0_flag
-   pBitstream->put_bits(1, 0);   // constraint_set1_flag
-   pBitstream->put_bits(1, 0);   // constraint_set2_flag
-   pBitstream->put_bits(1, pSPS->constraint_set3_flag);
-   pBitstream->put_bits(1, 0);   // constraint_set4_flag
-   pBitstream->put_bits(1, 0);   // constraint_set5_flag
-   pBitstream->put_bits(2, 0);
+   pBitstream->put_bits(6, pSPS->constraint_set_flags);
+   pBitstream->put_bits(2, 0); // reserved_zero_2bits
    pBitstream->put_bits(8, pSPS->level_idc);
    pBitstream->exp_Golomb_ue(pSPS->seq_parameter_set_id);
 
-   // Only support profiles defined in D3D12 Video Encode
    // If adding new profile support, check that the chroma_format_idc and bit depth are set correctly below
    // for the new additions
-   assert((pSPS->profile_idc == H264_PROFILE_MAIN) || (pSPS->profile_idc == H264_PROFILE_HIGH) ||
-          (pSPS->profile_idc == H264_PROFILE_HIGH10));
+   assert((pSPS->profile_idc == H264_PROFILE_MAIN) ||
+         (pSPS->profile_idc == H264_PROFILE_HIGH) ||
+         (pSPS->profile_idc == H264_PROFILE_HIGH10) ||
+         (pSPS->profile_idc == H264_PROFILE_BASELINE) ||
+         (pSPS->profile_idc == H264_PROFILE_CONSTRAINED_BASELINE));
 
    if ((pSPS->profile_idc == H264_PROFILE_HIGH) || (pSPS->profile_idc == H264_PROFILE_HIGH10)) {
       // chroma_format_idc always 4.2.0
@@ -101,14 +103,99 @@ d3d12_video_nalu_writer_h264::write_sps_bytes(d3d12_video_encoder_bitstream *pBi
       pBitstream->exp_Golomb_ue(pSPS->frame_cropping_rect_bottom_offset);
    }
 
-   // We're not including the VUI so this better be zero.
-   pBitstream->put_bits(1, 0);   // vui_paramenters_present_flag
+   pBitstream->put_bits(1, pSPS->vui_parameters_present_flag);
+   if (pSPS->vui_parameters_present_flag)
+   {
+      pBitstream->put_bits(1, pSPS->vui.aspect_ratio_info_present_flag);
+      if (pSPS->vui.aspect_ratio_info_present_flag) {
+         pBitstream->put_bits(8, pSPS->vui.aspect_ratio_idc);
+         if (pSPS->vui.aspect_ratio_idc == 255 /*EXTENDED_SAR*/) {
+               pBitstream->put_bits(16, pSPS->vui.sar_width);
+               pBitstream->put_bits(16, pSPS->vui.sar_height);
+         }
+      }
+
+      pBitstream->put_bits(1, pSPS->vui.overscan_info_present_flag);
+      if (pSPS->vui.overscan_info_present_flag) {
+         pBitstream->put_bits(1, pSPS->vui.overscan_appropriate_flag);
+      }
+
+      pBitstream->put_bits(1, pSPS->vui.video_signal_type_present_flag);
+      if (pSPS->vui.video_signal_type_present_flag) {
+         pBitstream->put_bits(3, pSPS->vui.video_format);
+         pBitstream->put_bits(1, pSPS->vui.video_full_range_flag);
+         pBitstream->put_bits(1, pSPS->vui.colour_description_present_flag);
+         if (pSPS->vui.colour_description_present_flag) {
+               pBitstream->put_bits(8, pSPS->vui.colour_primaries);
+               pBitstream->put_bits(8, pSPS->vui.transfer_characteristics);
+               pBitstream->put_bits(8, pSPS->vui.matrix_coefficients);
+         }
+      }
+
+      pBitstream->put_bits(1, pSPS->vui.chroma_loc_info_present_flag);
+      if (pSPS->vui.chroma_loc_info_present_flag) {
+         pBitstream->exp_Golomb_ue(pSPS->vui.chroma_sample_loc_type_top_field);
+         pBitstream->exp_Golomb_ue(pSPS->vui.chroma_sample_loc_type_bottom_field);
+      }
+
+      pBitstream->put_bits(1, pSPS->vui.timing_info_present_flag);
+      if (pSPS->vui.timing_info_present_flag) {
+         pBitstream->put_bits(16, pSPS->vui.num_units_in_tick >> 16);
+         pBitstream->put_bits(16, pSPS->vui.num_units_in_tick & 0xffff);
+         pBitstream->put_bits(16, pSPS->vui.time_scale >> 16);
+         pBitstream->put_bits(16, pSPS->vui.time_scale & 0xffff);
+         pBitstream->put_bits(1, pSPS->vui.fixed_frame_rate_flag);
+      }
+
+      pBitstream->put_bits(1, pSPS->vui.nal_hrd_parameters_present_flag);
+      if (pSPS->vui.nal_hrd_parameters_present_flag) {
+         write_hrd(pBitstream, &pSPS->vui.nal_hrd_parameters);
+      }
+
+      pBitstream->put_bits(1, pSPS->vui.vcl_hrd_parameters_present_flag);
+      if (pSPS->vui.vcl_hrd_parameters_present_flag) {
+         write_hrd(pBitstream, &pSPS->vui.vcl_hrd_parameters);
+      }
+
+      if (pSPS->vui.nal_hrd_parameters_present_flag || pSPS->vui.vcl_hrd_parameters_present_flag) {
+         pBitstream->put_bits(1, pSPS->vui.low_delay_hrd_flag);
+      }
+
+      pBitstream->put_bits(1, pSPS->vui.pic_struct_present_flag);
+      pBitstream->put_bits(1, pSPS->vui.bitstream_restriction_flag);
+      if (pSPS->vui.bitstream_restriction_flag) {
+         pBitstream->put_bits(1, pSPS->vui.motion_vectors_over_pic_boundaries_flag);
+         pBitstream->exp_Golomb_ue(pSPS->vui.max_bytes_per_pic_denom);
+         pBitstream->exp_Golomb_ue(pSPS->vui.max_bits_per_mb_denom);
+         pBitstream->exp_Golomb_ue(pSPS->vui.log2_max_mv_length_horizontal);
+         pBitstream->exp_Golomb_ue(pSPS->vui.log2_max_mv_length_vertical);
+         pBitstream->exp_Golomb_ue(pSPS->vui.num_reorder_frames);
+         pBitstream->exp_Golomb_ue(pSPS->vui.max_dec_frame_buffering);
+      }
+   }
 
    rbsp_trailing(pBitstream);
    pBitstream->flush();
 
    iBytesWritten = pBitstream->get_byte_count() - iBytesWritten;
    return (uint32_t) iBytesWritten;
+}
+
+void
+d3d12_video_nalu_writer_h264::write_hrd(d3d12_video_encoder_bitstream *pBitstream, H264_HRD_PARAMS *pHrd)
+{
+    pBitstream->exp_Golomb_ue(pHrd->cpb_cnt_minus1);
+    pBitstream->put_bits(4, pHrd->bit_rate_scale);
+    pBitstream->put_bits(4, pHrd->cpb_size_scale);
+    for (uint32_t i = 0; i <= pHrd->cpb_cnt_minus1; i++) {
+        pBitstream->exp_Golomb_ue(pHrd->bit_rate_value_minus1[i]);
+        pBitstream->exp_Golomb_ue(pHrd->cpb_size_value_minus1[i]);
+        pBitstream->put_bits(1, pHrd->cbr_flag[i]);
+    }
+    pBitstream->put_bits(5, pHrd->initial_cpb_removal_delay_length_minus1);
+    pBitstream->put_bits(5, pHrd->cpb_removal_delay_length_minus1);
+    pBitstream->put_bits(5, pHrd->dpb_output_delay_length_minus1);
+    pBitstream->put_bits(5, pHrd->time_offset_length);
 }
 
 uint32_t
@@ -173,10 +260,10 @@ void
 d3d12_video_nalu_writer_h264::write_nalu_end(d3d12_video_encoder_bitstream *pNALU)
 {
    pNALU->flush();
-   pNALU->set_start_code_prevention(FALSE);
+   pNALU->set_start_code_prevention(false);
    int32_t iNALUnitLen = pNALU->get_byte_count();
 
-   if (FALSE == pNALU->m_bBufferOverflow && 0x00 == pNALU->get_bitstream_buffer()[iNALUnitLen - 1]) {
+   if (false == pNALU->m_bBufferOverflow && 0x00 == pNALU->get_bitstream_buffer()[iNALUnitLen - 1]) {
       pNALU->put_bits(8, 0x03);
       pNALU->flush();
    }
@@ -186,14 +273,15 @@ uint32_t
 d3d12_video_nalu_writer_h264::wrap_rbsp_into_nalu(d3d12_video_encoder_bitstream *pNALU,
                                                   d3d12_video_encoder_bitstream *pRBSP,
                                                   uint32_t                       iNaluIdc,
-                                                  uint32_t                       iNaluType)
+                                                  uint32_t                       iNaluType,
+                                                  const H264_SLICE_PREFIX_SVC*   pSvcExtendedHeader)
 {
    bool isAligned = pRBSP->is_byte_aligned();   // causes side-effects in object state, don't put inside assert()
    assert(isAligned);
 
    int32_t iBytesWritten = pNALU->get_byte_count();
 
-   pNALU->set_start_code_prevention(FALSE);
+   pNALU->set_start_code_prevention(false);
 
    // NAL start code
    pNALU->put_bits(24, 0);
@@ -203,6 +291,24 @@ d3d12_video_nalu_writer_h264::wrap_rbsp_into_nalu(d3d12_video_encoder_bitstream 
    pNALU->put_bits(1, 0);
    pNALU->put_bits(2, iNaluIdc);
    pNALU->put_bits(5, iNaluType);
+
+   if (iNaluType == NAL_TYPE_PREFIX)
+   {
+      assert(pSvcExtendedHeader);
+      pNALU->put_bits(1, 1); // svc_extension_flag u(1)
+      // nal_unit_header_svc_extension( )
+      pNALU->put_bits(1, pSvcExtendedHeader->idr_flag);
+      pNALU->put_bits(6, pSvcExtendedHeader->priority_id);
+      pNALU->put_bits(1, pSvcExtendedHeader->no_inter_layer_pred_flag);
+      pNALU->put_bits(3, pSvcExtendedHeader->dependency_id);
+      pNALU->put_bits(4, pSvcExtendedHeader->quality_id);
+      pNALU->put_bits(3, pSvcExtendedHeader->temporal_id);
+      pNALU->put_bits(1, pSvcExtendedHeader->use_ref_base_pic_flag);
+      pNALU->put_bits(1, pSvcExtendedHeader->discardable_flag);
+      pNALU->put_bits(1, pSvcExtendedHeader->output_flag);
+      pNALU->put_bits(2, 3 /* reserved_three_2bits */);
+   }
+
    pNALU->flush();
 
    // NAL body
@@ -213,7 +319,7 @@ d3d12_video_nalu_writer_h264::wrap_rbsp_into_nalu(d3d12_video_encoder_bitstream 
       pNALU->append_byte_stream(pRBSP);
    } else {
       // Copy with start code prevention.
-      pNALU->set_start_code_prevention(TRUE);
+      pNALU->set_start_code_prevention(true);
       int32_t  iLength = pRBSP->get_byte_count();
       uint8_t *pBuffer = pRBSP->get_bitstream_buffer();
 
@@ -238,41 +344,31 @@ d3d12_video_nalu_writer_h264::sps_to_nalu_bytes(H264_SPS *                     p
                                                 std::vector<uint8_t>::iterator placingPositionStart,
                                                 size_t &                       writtenBytes)
 {
-   // Wrap SPS into NALU and copy full NALU into output byte array
-   d3d12_video_encoder_bitstream rbsp, nalu;
+   // Use pre-allocated member buffers for better performance
+   m_rbsp_buffer.clear();
+   m_nalu_buffer.clear();
 
-   if (!rbsp.create_bitstream(MAX_COMPRESSED_SPS)) {
-      debug_printf("rbsp.create_bitstream(MAX_COMPRESSED_SPS) failed\n");
+   m_rbsp_buffer.set_start_code_prevention(true);
+   if (write_sps_bytes(&m_rbsp_buffer, pSPS) <= 0u) {
+      debug_printf("write_sps_bytes(&m_rbsp_buffer, pSPS) didn't write any bytes.\n");
       assert(false);
    }
 
-   if (!nalu.create_bitstream(2 * MAX_COMPRESSED_SPS)) {
-      debug_printf("nalu.create_bitstream(2 * MAX_COMPRESSED_SPS) failed\n");
+   if (wrap_sps_nalu(&m_nalu_buffer, &m_rbsp_buffer) <= 0u) {
+      debug_printf("wrap_sps_nalu(&m_nalu_buffer, &m_rbsp_buffer) didn't write any bytes.\n");
       assert(false);
    }
 
-   rbsp.set_start_code_prevention(TRUE);
-   if (write_sps_bytes(&rbsp, pSPS) <= 0u) {
-      debug_printf("write_sps_bytes(&rbsp, pSPS) didn't write any bytes.\n");
-      assert(false);
-   }
+   // Copy nalu into headerBitstream
+   uint8_t *naluBytes    = m_nalu_buffer.get_bitstream_buffer();
+   size_t   naluByteSize = m_nalu_buffer.get_byte_count();
 
-   if (wrap_sps_nalu(&nalu, &rbsp) <= 0u) {
-      debug_printf("wrap_sps_nalu(&nalu, &rbsp) didn't write any bytes.\n");
-      assert(false);
-   }
-
-   // Deep copy nalu into headerBitstream, nalu gets out of scope here and its destructor frees the nalu object buffer
-   // memory.
-   uint8_t *naluBytes    = nalu.get_bitstream_buffer();
-   size_t   naluByteSize = nalu.get_byte_count();
-
-   auto startDstIndex = std::distance(headerBitstream.begin(), placingPositionStart);
+   size_t startDstIndex = placingPositionStart - headerBitstream.begin();
    if (headerBitstream.size() < (startDstIndex + naluByteSize)) {
       headerBitstream.resize(startDstIndex + naluByteSize);
    }
 
-   std::copy_n(&naluBytes[0], naluByteSize, &headerBitstream.data()[startDstIndex]);
+   memcpy(&headerBitstream.data()[startDstIndex], naluBytes, naluByteSize);
 
    writtenBytes = naluByteSize;
 }
@@ -284,41 +380,32 @@ d3d12_video_nalu_writer_h264::pps_to_nalu_bytes(H264_PPS *                     p
                                                 std::vector<uint8_t>::iterator placingPositionStart,
                                                 size_t &                       writtenBytes)
 {
-   // Wrap PPS into NALU and copy full NALU into output byte array
-   d3d12_video_encoder_bitstream rbsp, nalu;
-   if (!rbsp.create_bitstream(MAX_COMPRESSED_PPS)) {
-      debug_printf("rbsp.create_bitstream(MAX_COMPRESSED_PPS) failed\n");
+   // Use pre-allocated member buffers for better performance
+   m_rbsp_buffer.clear();
+   m_nalu_buffer.clear();
+
+   m_rbsp_buffer.set_start_code_prevention(true);
+
+   if (write_pps_bytes(&m_rbsp_buffer, pPPS, bIsHighProfile) <= 0u) {
+      debug_printf("write_pps_bytes(&m_rbsp_buffer, pPPS, bIsHighProfile) didn't write any bytes.\n");
       assert(false);
    }
 
-   if (!nalu.create_bitstream(2 * MAX_COMPRESSED_PPS)) {
-      debug_printf("nalu.create_bitstream(2 * MAX_COMPRESSED_PPS) failed\n");
+   if (wrap_pps_nalu(&m_nalu_buffer, &m_rbsp_buffer) <= 0u) {
+      debug_printf("wrap_pps_nalu(&m_nalu_buffer, &m_rbsp_buffer) didn't write any bytes.\n");
       assert(false);
    }
 
-   rbsp.set_start_code_prevention(TRUE);
+   // Copy nalu into headerBitstream
+   uint8_t *naluBytes    = m_nalu_buffer.get_bitstream_buffer();
+   size_t   naluByteSize = m_nalu_buffer.get_byte_count();
 
-   if (write_pps_bytes(&rbsp, pPPS, bIsHighProfile) <= 0u) {
-      debug_printf("write_pps_bytes(&rbsp, pPPS, bIsHighProfile) didn't write any bytes.\n");
-      assert(false);
-   }
-
-   if (wrap_pps_nalu(&nalu, &rbsp) <= 0u) {
-      debug_printf("wrap_pps_nalu(&nalu, &rbsp) didn't write any bytes.\n");
-      assert(false);
-   }
-
-   // Deep copy nalu into headerBitstream, nalu gets out of scope here and its destructor frees the nalu object buffer
-   // memory.
-   uint8_t *naluBytes    = nalu.get_bitstream_buffer();
-   size_t   naluByteSize = nalu.get_byte_count();
-
-   auto startDstIndex = std::distance(headerBitstream.begin(), placingPositionStart);
+   size_t startDstIndex = placingPositionStart - headerBitstream.begin();
    if (headerBitstream.size() < (startDstIndex + naluByteSize)) {
       headerBitstream.resize(startDstIndex + naluByteSize);
    }
 
-   std::copy_n(&naluBytes[0], naluByteSize, &headerBitstream.data()[startDstIndex]);
+   memcpy(&headerBitstream.data()[startDstIndex], naluBytes, naluByteSize);
 
    writtenBytes = naluByteSize;
 }
@@ -328,34 +415,27 @@ d3d12_video_nalu_writer_h264::write_end_of_stream_nalu(std::vector<uint8_t> &   
                                                        std::vector<uint8_t>::iterator placingPositionStart,
                                                        size_t &                       writtenBytes)
 {
-   d3d12_video_encoder_bitstream rbsp, nalu;
-   if (!rbsp.create_bitstream(8)) {
-      debug_printf("rbsp.create_bitstream(8) failed\n");
-      assert(false);
-   }
-   if (!nalu.create_bitstream(2 * MAX_COMPRESSED_PPS)) {
-      debug_printf("nalu.create_bitstream(2 * MAX_COMPRESSED_PPS) failed\n");
-      assert(false);
-   }
+   // Use pre-allocated member buffers for better performance
+   m_rbsp_buffer.clear();
+   m_nalu_buffer.clear();
 
-   rbsp.set_start_code_prevention(TRUE);
-   if (wrap_rbsp_into_nalu(&nalu, &rbsp, NAL_REFIDC_REF, NAL_TYPE_END_OF_STREAM) <= 0u) {
+   m_rbsp_buffer.set_start_code_prevention(true);
+   if (wrap_rbsp_into_nalu(&m_nalu_buffer, &m_rbsp_buffer, NAL_REFIDC_REF, NAL_TYPE_END_OF_STREAM) <= 0u) {
       debug_printf(
-         "wrap_rbsp_into_nalu(&nalu, &rbsp, NAL_REFIDC_REF, NAL_TYPE_END_OF_STREAM) didn't write any bytes.\n");;
+         "wrap_rbsp_into_nalu(&m_nalu_buffer, &m_rbsp_buffer, NAL_REFIDC_REF, NAL_TYPE_END_OF_STREAM) didn't write any bytes.\n");;
       assert(false);
    }
 
-   // Deep copy nalu into headerBitstream, nalu gets out of scope here and its destructor frees the nalu object buffer
-   // memory.
-   uint8_t *naluBytes    = nalu.get_bitstream_buffer();
-   size_t   naluByteSize = nalu.get_byte_count();
+   // Copy nalu into headerBitstream
+   uint8_t *naluBytes    = m_nalu_buffer.get_bitstream_buffer();
+   size_t   naluByteSize = m_nalu_buffer.get_byte_count();
 
-   auto startDstIndex = std::distance(headerBitstream.begin(), placingPositionStart);
+   size_t startDstIndex = placingPositionStart - headerBitstream.begin();
    if (headerBitstream.size() < (startDstIndex + naluByteSize)) {
       headerBitstream.resize(startDstIndex + naluByteSize);
    }
 
-   std::copy_n(&naluBytes[0], naluByteSize, &headerBitstream.data()[startDstIndex]);
+   memcpy(&headerBitstream.data()[startDstIndex], naluBytes, naluByteSize);
 
    writtenBytes = naluByteSize;
 }
@@ -365,36 +445,226 @@ d3d12_video_nalu_writer_h264::write_end_of_sequence_nalu(std::vector<uint8_t> & 
                                                          std::vector<uint8_t>::iterator placingPositionStart,
                                                          size_t &                       writtenBytes)
 {
-   d3d12_video_encoder_bitstream rbsp, nalu;
-   if (!rbsp.create_bitstream(8)) {
-      debug_printf("rbsp.create_bitstream(8) failed.\n");
-      assert(false);
-   }
+   // Use pre-allocated member buffers for better performance
+   m_rbsp_buffer.clear();
+   m_nalu_buffer.clear();
 
-   if (!nalu.create_bitstream(2 * MAX_COMPRESSED_PPS)) {
-      debug_printf("nalu.create_bitstream(2 * MAX_COMPRESSED_PPS) failed.\n");
-      assert(false);
-   }
-
-   rbsp.set_start_code_prevention(TRUE);
-   if (wrap_rbsp_into_nalu(&nalu, &rbsp, NAL_REFIDC_REF, NAL_TYPE_END_OF_SEQUENCE) <= 0u) {
+   m_rbsp_buffer.set_start_code_prevention(true);
+   if (wrap_rbsp_into_nalu(&m_nalu_buffer, &m_rbsp_buffer, NAL_REFIDC_REF, NAL_TYPE_END_OF_SEQUENCE) <= 0u) {
 
       debug_printf(
-         "wrap_rbsp_into_nalu(&nalu, &rbsp, NAL_REFIDC_REF, NAL_TYPE_END_OF_SEQUENCE) didn't write any bytes.\n");
+         "wrap_rbsp_into_nalu(&m_nalu_buffer, &m_rbsp_buffer, NAL_REFIDC_REF, NAL_TYPE_END_OF_SEQUENCE) didn't write any bytes.\n");
       assert(false);
    }
 
-   // Deep copy nalu into headerBitstream, nalu gets out of scope here and its destructor frees the nalu object buffer
-   // memory.
-   uint8_t *naluBytes    = nalu.get_bitstream_buffer();
-   size_t   naluByteSize = nalu.get_byte_count();
+   // Copy nalu into headerBitstream
+   uint8_t *naluBytes    = m_nalu_buffer.get_bitstream_buffer();
+   size_t   naluByteSize = m_nalu_buffer.get_byte_count();
 
-   auto startDstIndex = std::distance(headerBitstream.begin(), placingPositionStart);
+   size_t startDstIndex = placingPositionStart - headerBitstream.begin();
    if (headerBitstream.size() < (startDstIndex + naluByteSize)) {
       headerBitstream.resize(startDstIndex + naluByteSize);
    }
 
-   std::copy_n(&naluBytes[0], naluByteSize, &headerBitstream.data()[startDstIndex]);
+   memcpy(&headerBitstream.data()[startDstIndex], naluBytes, naluByteSize);
+
+   writtenBytes = naluByteSize;
+}
+
+void
+d3d12_video_nalu_writer_h264::write_access_unit_delimiter_nalu(std::vector<uint8_t> &         headerBitstream,
+                                                               std::vector<uint8_t>::iterator placingPositionStart,
+                                                               size_t &                       writtenBytes)
+{
+   // Use pre-allocated member buffers for better performance
+   m_rbsp_buffer.clear();
+   m_nalu_buffer.clear();
+
+   m_rbsp_buffer.set_start_code_prevention(true);
+   m_rbsp_buffer.put_bits(3, 2/*primary_pic_type*/);
+   rbsp_trailing(&m_rbsp_buffer);
+   m_rbsp_buffer.flush();
+   if (wrap_rbsp_into_nalu(&m_nalu_buffer, &m_rbsp_buffer, NAL_REFIDC_NONREF, NAL_TYPE_ACCESS_UNIT_DELIMITER) <= 0u) {
+
+      debug_printf(
+         "wrap_rbsp_into_nalu(&m_nalu_buffer, &m_rbsp_buffer, NAL_REFIDC_NONREF, NAL_TYPE_ACCESS_UNIT_DELIMITER) didn't write any bytes.\n");
+      assert(false);
+   }
+
+   // Copy nalu into headerBitstream
+   uint8_t *naluBytes    = m_nalu_buffer.get_bitstream_buffer();
+   size_t   naluByteSize = m_nalu_buffer.get_byte_count();
+
+   size_t startDstIndex = placingPositionStart - headerBitstream.begin();
+   if (headerBitstream.size() < (startDstIndex + naluByteSize)) {
+      headerBitstream.resize(startDstIndex + naluByteSize);
+   }
+
+   memcpy(&headerBitstream.data()[startDstIndex], naluBytes, naluByteSize);
+
+   writtenBytes = naluByteSize;
+}
+
+void
+d3d12_video_nalu_writer_h264::write_sei_nalu(H264_SEI_MESSAGE               sei_message,
+                                             std::vector<uint8_t> &         headerBitstream,
+                                             std::vector<uint8_t>::iterator placingPositionStart,
+                                             size_t &                       writtenBytes)
+{
+   // Fill byte buffer with sei_message() payload
+   d3d12_video_encoder_bitstream sei_payload_bitstream;
+   if (!sei_payload_bitstream.create_bitstream(2 * sizeof(H264_SEI_MESSAGE))) {
+      debug_printf("sei_payload_bitstream.create_bitstream(2 * sizeof(H264_SEI_MESSAGE) failed.\n");
+      assert(false);
+   }
+
+   sei_payload_bitstream.set_start_code_prevention(true);
+
+   switch (sei_message.payload_type)
+   {
+      case H264_SEI_SCALABILITY_INFO:
+      {
+         sei_payload_bitstream.put_bits(1, 0); // temporal_id_nesting_flag
+         sei_payload_bitstream.put_bits(1, 0); // priority_layer_info_present_flag
+         sei_payload_bitstream.put_bits(1, 0); // priority_id_setting_flag
+         sei_payload_bitstream.exp_Golomb_ue(sei_message.scalability_info.num_layers_minus1);
+         for (uint32_t i = 0; i <= sei_message.scalability_info.num_layers_minus1; i++)
+         {
+            sei_payload_bitstream.exp_Golomb_ue(i); // layer_id[i]
+            sei_payload_bitstream.put_bits(6, 0); // priority_id[i]
+            sei_payload_bitstream.put_bits(1, 0); // discardable_flag[i]
+            sei_payload_bitstream.put_bits(3, 0); // dependency_id[i]
+            sei_payload_bitstream.put_bits(4, 0); // quality_id[i]
+            sei_payload_bitstream.put_bits(3, sei_message.scalability_info.temporal_id[i]); // temporal_id[i]
+            sei_payload_bitstream.put_bits(1, 0); // sub_pic_layer_flag[i]
+            sei_payload_bitstream.put_bits(1, 0); // sub_region_layer_flag[i]
+            sei_payload_bitstream.put_bits(1, 0); // iroi_division_info_present_flag[i]
+            sei_payload_bitstream.put_bits(1, 0); // profile_level_info_present_flag[i]
+            sei_payload_bitstream.put_bits(1, 0); // bitrate_info_present_flag[i]
+            sei_payload_bitstream.put_bits(1, 0); // frm_rate_info_present_flag[i]
+            sei_payload_bitstream.put_bits(1, 0); // frm_size_info_present_flag[i]
+            sei_payload_bitstream.put_bits(1, 0); // layer_dependency_info_present_flag[i]
+            sei_payload_bitstream.put_bits(1, 0); // parameter_sets_info_present_flag[i]
+            sei_payload_bitstream.put_bits(1, 0); // bitstream_restriction_info_present_flag[i]
+            sei_payload_bitstream.put_bits(1, 0); // exact_inter_layer_pred_flag[i]
+            sei_payload_bitstream.put_bits(1, 0); // layer_conversion_flag[i]
+            sei_payload_bitstream.put_bits(1, 0); // layer_output_flag[i]
+            sei_payload_bitstream.exp_Golomb_ue(0); // layer_dependency_info_src_layer_id_delta [i]
+            sei_payload_bitstream.exp_Golomb_ue(0); // parameter_sets_info_src_layer_id_delta [i]
+         }
+      } break;
+   default:
+      debug_printf("[d3d12_video_nalu_writer_h264::write_sei_nalu] Unsupported sei_message.payload_type.\n");
+      assert(false);
+      return;
+      break;
+   }
+
+   // Add trailing bits after sei_message() bits in sei_payload_bitstream and flush
+   if(!sei_payload_bitstream.is_byte_aligned())
+      rbsp_trailing(&sei_payload_bitstream);
+   sei_payload_bitstream.flush();
+
+   // Set payload_size from bitstream data written
+   uint32_t payload_size = sei_payload_bitstream.get_byte_count();
+
+   //
+   // Wrap sei_payload_bitstream in RBSP and NALU using pre-allocated buffers
+   //
+
+   m_rbsp_buffer.clear();
+   m_nalu_buffer.clear();
+
+   //
+   // Write payload_type to bitstream
+   //
+   uint32_t payload_type = static_cast<uint32_t>(sei_message.payload_type);
+   while(payload_type >= 255)
+   {
+      m_rbsp_buffer.put_bits(8, 255 /* payload_type */);
+      payload_type -= 255;
+   }
+   m_rbsp_buffer.put_bits(8, payload_type);
+
+   //
+   // Write payload_size to bitstream
+   //
+   while(payload_size >= 255)
+   {
+      m_rbsp_buffer.put_bits(8, 255 /* payload_size */);
+      payload_size -= 255;
+   }
+   m_rbsp_buffer.put_bits(8, payload_size);
+
+   m_rbsp_buffer.flush();
+   m_rbsp_buffer.append_byte_stream(&sei_payload_bitstream);
+
+   rbsp_trailing(&m_rbsp_buffer);
+   m_rbsp_buffer.flush();
+   if (wrap_rbsp_into_nalu(&m_nalu_buffer, &m_rbsp_buffer, NAL_REFIDC_NONREF, NAL_TYPE_SEI) <= 0u) {
+
+      debug_printf(
+         "wrap_rbsp_into_nalu(&m_nalu_buffer, &m_rbsp_buffer, NAL_REFIDC_NONREF, NAL_TYPE_ACCESS_UNIT_DELIMITER) didn't write any bytes.\n");
+      assert(false);
+   }
+
+   // Copy nalu into headerBitstream
+   uint8_t *naluBytes    = m_nalu_buffer.get_bitstream_buffer();
+   size_t   naluByteSize = m_nalu_buffer.get_byte_count();
+
+   size_t startDstIndex = placingPositionStart - headerBitstream.begin();
+   if (headerBitstream.size() < (startDstIndex + naluByteSize)) {
+      headerBitstream.resize(startDstIndex + naluByteSize);
+   }
+
+   memcpy(&headerBitstream.data()[startDstIndex], naluBytes, naluByteSize);
+
+   writtenBytes = naluByteSize;
+}
+
+void
+d3d12_video_nalu_writer_h264::write_slice_svc_prefix(const H264_SLICE_PREFIX_SVC &         nal_svc_prefix,
+                                                     std::vector<uint8_t> &                headerBitstream,
+                                                     std::vector<uint8_t>::iterator        placingPositionStart,
+                                                     size_t &                              writtenBytes)
+{
+   // Use pre-allocated member buffers for better performance
+   m_rbsp_buffer.clear();
+   m_nalu_buffer.clear();
+
+   m_rbsp_buffer.set_start_code_prevention(true);
+
+   // prefix_nal_unit_svc ( )
+   if (nal_svc_prefix.nal_ref_idc == NAL_REFIDC_REF)
+   {
+      m_rbsp_buffer.put_bits(1, nal_svc_prefix.store_ref_base_pic_flag);
+      m_rbsp_buffer.put_bits(1, 0 /* additional_prefix_nal_unit_extension_flag */);
+
+      rbsp_trailing(&m_rbsp_buffer);
+      m_rbsp_buffer.flush();
+   }
+   else
+   {
+      // No more_rbsp_data( ) so we don't need to code anything else
+   }
+
+   if (wrap_rbsp_into_nalu(&m_nalu_buffer, &m_rbsp_buffer, nal_svc_prefix.nal_ref_idc, NAL_TYPE_PREFIX, &nal_svc_prefix) <= 0u) {
+
+      debug_printf(
+         "wrap_rbsp_into_nalu(&nalu, &rbsp, NAL_REFIDC_REF, NAL_TYPE_ACCESS_UNIT_DELIMITER) didn't write any bytes.\n");
+      assert(false);
+   }
+
+   // Copy nalu into headerBitstream
+   uint8_t *naluBytes    = m_nalu_buffer.get_bitstream_buffer();
+   size_t   naluByteSize = m_nalu_buffer.get_byte_count();
+
+   size_t startDstIndex = placingPositionStart - headerBitstream.begin();
+   if (headerBitstream.size() < (startDstIndex + naluByteSize)) {
+      headerBitstream.resize(startDstIndex + naluByteSize);
+   }
+
+   memcpy(&headerBitstream.data()[startDstIndex], naluBytes, naluByteSize);
 
    writtenBytes = naluByteSize;
 }

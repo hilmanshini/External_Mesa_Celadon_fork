@@ -107,7 +107,8 @@ primconvert_init_draw(struct primconvert_context *pc,
                       const struct pipe_draw_info *info,
                       const struct pipe_draw_start_count_bias *draws,
                       struct pipe_draw_info *new_info,
-                      struct pipe_draw_start_count_bias *new_draw)
+                      struct pipe_draw_start_count_bias *new_draw,
+                      struct pipe_resource **releasebuf)
 {
    struct pipe_draw_start_count_bias *direct_draws = NULL;
    unsigned num_direct_draws = 0;
@@ -130,15 +131,21 @@ primconvert_init_draw(struct primconvert_context *pc,
       return false;
 
    util_draw_init_info(new_info);
-   new_info->index_bounds_valid = info->index_bounds_valid;
-   new_info->min_index = info->min_index;
-   new_info->max_index = info->max_index;
+
+   /* Because we've changed the index buffer, the original min_index/max_index
+    * for the draw are no longer valid. That's ok, but we need to tell drivers
+    * so they don't optimize incorrectly.
+    */
+   new_info->index_bounds_valid = false;
+   new_info->min_index = 0;
+   new_info->max_index = ~0;
+
    new_info->start_instance = info->start_instance;
    new_info->instance_count = info->instance_count;
    new_info->primitive_restart = info->primitive_restart;
    new_info->restart_index = info->restart_index;
    if (info->index_size) {
-      enum pipe_prim_type mode = new_info->mode = u_index_prim_type_convert(pc->cfg.primtypes_mask, info->mode, true);
+      enum mesa_prim mode = new_info->mode = u_index_prim_type_convert(pc->cfg.primtypes_mask, info->mode, true);
       unsigned index_size = info->index_size;
       unsigned offset = draw.start * info->index_size;
 
@@ -202,7 +209,7 @@ primconvert_init_draw(struct primconvert_context *pc,
       assert(new_info->index_size == index_size);
    }
    else {
-      enum pipe_prim_type mode = 0;
+      enum mesa_prim mode = 0;
       unsigned index_size;
 
       u_index_generator(pc->cfg.primtypes_mask,
@@ -215,8 +222,13 @@ primconvert_init_draw(struct primconvert_context *pc,
    }
 
    /* (step 5: allocate gpu memory sized for the FINAL index count) */
-   u_upload_alloc(pc->pipe->stream_uploader, 0, new_info->index_size * new_draw->count, 4,
-                  &ib_offset, &new_info->index.resource, &dst);
+   uint64_t new_size = (uint64_t)new_info->index_size * new_draw->count;
+   if (new_size > UINT_MAX)
+      return false;
+   u_upload_alloc(pc->pipe->stream_uploader, 0, new_size, 4,
+                  &ib_offset, &new_info->index.resource, releasebuf, &dst);
+   if (!dst)
+      return false;
    new_draw->start = ib_offset / new_info->index_size;
    new_draw->index_bias = info->index_size ? draw.index_bias : 0;
 
@@ -257,7 +269,7 @@ primconvert_init_draw(struct primconvert_context *pc,
    else {
       gen_func(draw.start, new_draw->count, dst);
    }
-   new_info->was_line_loop = info->mode == PIPE_PRIM_LINE_LOOP;
+   new_info->was_line_loop = info->mode == MESA_PRIM_LINE_LOOP;
 
    if (src_transfer)
       pipe_buffer_unmap(pc->pipe, src_transfer);
@@ -277,13 +289,13 @@ util_primconvert_draw_single_vbo(struct primconvert_context *pc,
 {
    struct pipe_draw_info new_info;
    struct pipe_draw_start_count_bias new_draw;
+   struct pipe_resource *releasebuf = NULL;
 
-   if (!primconvert_init_draw(pc, info, draw, &new_info, &new_draw))
+   if (!primconvert_init_draw(pc, info, draw, &new_info, &new_draw, &releasebuf))
       return;
    /* to the translated draw: */
    pc->pipe->draw_vbo(pc->pipe, &new_info, drawid_offset, NULL, &new_draw, 1);
-
-   pipe_resource_reference(&new_info.index.resource, NULL);
+   pipe_resource_release(pc->pipe, releasebuf);
 }
 
 void
@@ -301,7 +313,7 @@ util_primconvert_draw_vbo(struct primconvert_context *pc,
       unsigned draw_count = 0;
       struct u_indirect_params *new_draws = util_draw_indirect_read(pc->pipe, info, indirect, &draw_count);
       if (!new_draws)
-         goto cleanup;
+         return;
 
       for (unsigned i = 0; i < draw_count; i++)
          util_primconvert_draw_single_vbo(pc, &new_draws[i].info, drawid_offset + i, &new_draws[i].draw);
@@ -315,12 +327,6 @@ util_primconvert_draw_vbo(struct primconvert_context *pc,
             drawid++;
       }
    }
-
-cleanup:
-   if (info->take_index_buffer_ownership) {
-      struct pipe_resource *buffer = info->index.resource;
-      pipe_resource_reference(&buffer, NULL);
-   }
 }
 
 void
@@ -333,6 +339,7 @@ util_primconvert_draw_vertex_state(struct primconvert_context *pc,
 {
    struct pipe_draw_info new_info;
    struct pipe_draw_start_count_bias new_draw;
+   struct pipe_resource *releasebuf = NULL;
 
    if (pc->cfg.primtypes_mask & BITFIELD_BIT(info.mode)) {
       pc->pipe->draw_vertex_state(pc->pipe, vstate, partial_velem_mask, info, draws, num_draws);
@@ -352,7 +359,7 @@ util_primconvert_draw_vertex_state(struct primconvert_context *pc,
    dinfo.index_size = 4;
    dinfo.instance_count = 1;
    dinfo.index.resource = vstate->input.indexbuf;
-   if (!primconvert_init_draw(pc, &dinfo, draws, &new_info, &new_draw))
+   if (!primconvert_init_draw(pc, &dinfo, draws, &new_info, &new_draw, &releasebuf))
       return;
 
    struct pipe_vertex_state *new_state = pc->pipe->screen->create_vertex_state(pc->pipe->screen,
@@ -370,6 +377,5 @@ util_primconvert_draw_vertex_state(struct primconvert_context *pc,
    }
    if (info.take_vertex_state_ownership)
       pipe_vertex_state_reference(&vstate, NULL);
-
-   pipe_resource_reference(&new_info.index.resource, NULL);
+   pipe_resource_release(pc->pipe, releasebuf);
 }

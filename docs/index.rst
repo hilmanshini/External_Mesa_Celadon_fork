@@ -5,7 +5,7 @@ The Mesa project began as an open-source implementation of the
 `OpenGL`_ specification - a system for rendering interactive 3D graphics.
 
 Over the years the project has grown to implement more graphics APIs,
-including `OpenGL ES`_, `OpenCL`_, `OpenMAX`_, `VDPAU`_, `VA-API`_,
+including `OpenGL ES`_, `OpenCL`_, `VA-API`_,
 `Vulkan`_ and `EGL`_.
 
 A variety of device drivers allows the Mesa libraries to be used in many
@@ -19,13 +19,11 @@ Linux, FreeBSD, and other operating systems.
 .. _OpenGL: https://www.opengl.org/
 .. _OpenGL ES: https://www.khronos.org/opengles/
 .. _OpenCL: https://www.khronos.org/opencl/
-.. _OpenMAX: https://www.khronos.org/openmax/
-.. _VDPAU: https://en.wikipedia.org/wiki/VDPAU
 .. _VA-API: https://en.wikipedia.org/wiki/Video_Acceleration_API
 .. _Vulkan: https://www.vulkan.org/
 .. _EGL: https://www.khronos.org/egl/
 .. _Direct Rendering Infrastructure: https://dri.freedesktop.org/
-.. _X.org: https://x.org
+.. _X.org: https://www.x.org
 .. _Wayland: https://wayland.freedesktop.org
 
 .. toctree::
@@ -35,13 +33,11 @@ Linux, FreeBSD, and other operating systems.
 
    self
    history
-   developers
    amber
    systems
    license
    faq
    relnotes
-   thanks
 
 .. toctree::
    :maxdepth: 2
@@ -65,19 +61,16 @@ Linux, FreeBSD, and other operating systems.
    :caption: User Topics
    :hidden:
 
-   shading
+   glsl
    egl
    opengles
    envvars
-   osmesa
-   debugging
    perf
    gpu-perf-tracing
    extensions
    application-issues
-   gallium-nine
    viewperf
-   xlibdriver
+   teflon
 
 .. toctree::
    :maxdepth: 1
@@ -88,9 +81,12 @@ Linux, FreeBSD, and other operating systems.
    drivers/asahi
    drivers/d3d12
    drivers/freedreno
+   drivers/kosmickrisp
    drivers/lima
    drivers/llvmpipe
+   drivers/nvk
    drivers/panfrost
+   drivers/powervr
    drivers/radv
    drivers/svga3d
    drivers/v3d
@@ -98,6 +94,7 @@ Linux, FreeBSD, and other operating systems.
    drivers/venus
    drivers/virgl
    drivers/zink
+   xlibdriver
 
 .. toctree::
    :maxdepth: 1
@@ -108,16 +105,20 @@ Linux, FreeBSD, and other operating systems.
    sourcetree
    utilities
    helpwanted
-   devinfo
    codingstyle
    submittingpatches
+   developing-extensions
+   rust
    releasing
    release-calendar
+   graphics-debugging/debugging-misrenderings-crashes
    dispatch
    gallium/index
    vulkan/index
    nir/index
+   spirv/index
    isl/index
+   isaspec
    rusticl
    android
    macos
@@ -139,10 +140,3 @@ Linux, FreeBSD, and other operating systems.
    OpenGL Website <https://www.opengl.org>
    DRI Website <https://dri.freedesktop.org>
    Developer Blogs <https://planet.freedesktop.org>
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Hosted by:
-   :hidden:
-
-   freedesktop.org <https://www.freedesktop.org>

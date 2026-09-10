@@ -1,51 +1,72 @@
 # Copyright © 2022 Konstantin Seurer
+# SPDX-License-Identifier: MIT
 
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-
-# The above copyright notice and this permission notice shall be included in
-# all copies or substantial portions of the Software.
-
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-# SOFTWARE.
-
+# source file, output name, defines
 bvh_shaders = [
-  'copy.comp',
-  'lbvh_generate_ir.comp',
-  'lbvh_main.comp',
-  'leaf.comp',
-  'morton.comp',
-  'ploc_internal.comp',
-  'converter_internal.comp',
-  'converter_leaf.comp',
+  [
+    'copy_addrs.comp',
+    'copy_addrs',
+  ],
+  [
+    'copy.comp',
+    'copy',
+  ],
+  [
+    'encode_gfx12.comp',
+    'encode_gfx12',
+  ],[
+    'encode_triangles_gfx12.comp',
+    'encode_triangles_gfx12',
+  ],
+  [
+    'encode.comp',
+    'encode',
+  ],
+  [
+    'header.comp',
+    'header',
+  ],
+  [
+    'update.comp',
+    'update',
+  ],
+  [
+    'update_gfx12.comp',
+    'update_gfx12',
+  ],
+  [
+    'leaf.comp',
+    'radv_leaf',
+  ],
 ]
 
 bvh_include_dir = dir_source_root + '/src/amd/vulkan/bvh'
+vk_bvh_include_dir = dir_source_root + '/src/vulkan/runtime/bvh'
 
 bvh_includes = files(
-  'build_helpers.h',
-  'build_interface.h',
-  'bvh.h',
+  'bvh_helpers.h',
+  'bvh_defines.h',
+  'encode.h',
+  'update.h',
+  vk_bvh_include_dir + '/vk_bvh_helpers.h',
+  vk_bvh_include_dir + '/vk_bvh_defines.h',
 )
 
 bvh_spv = []
 foreach s : bvh_shaders
+  command = [
+    prog_glslang, '-V', '-I' + bvh_include_dir, '-I' + vk_bvh_include_dir, '-I' + spirv_include_dir, '--target-env', 'spirv1.5',
+    '-x', '-o', '@OUTPUT@', '@INPUT@', glslang_depfile, glslang_quiet,
+  ] + (with_mesa_debug ? ['-g'] : [])
+  command += vk_glsl_shader_preamble
+
+  _bvh_name = '@0@.spv.h'.format(s[1])
   bvh_spv += custom_target(
-    s + '.spv.h',
-    input : s,
-    output : s + '.spv.h',
-    command : [
-      prog_glslang, '-V', '-I' + bvh_include_dir, '--target-env', 'spirv1.5', '-x', '-o', '@OUTPUT@', '@INPUT@'
-    ] + glslang_quiet,
+    _bvh_name,
+    input : s[0],
+    output : _bvh_name,
+    command : command,
+    depfile : f'@_bvh_name@.d',
     depend_files: bvh_includes
   )
 endforeach

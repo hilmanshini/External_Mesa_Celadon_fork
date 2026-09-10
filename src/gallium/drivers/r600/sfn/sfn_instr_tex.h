@@ -1,27 +1,7 @@
 /* -*- mesa-c++  -*-
- *
- * Copyright (c) 2022 Collabora LTD
- *
+ * Copyright 2022 Collabora LTD
  * Author: Gert Wollny <gert.wollny@collabora.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef INSTR_TEX_H
@@ -30,6 +10,8 @@
 #include "sfn_instr.h"
 #include "sfn_shader.h"
 #include "sfn_valuefactory.h"
+
+#define R600_SHADER_BUFFER_INFO_SEL (512 + R600_BUFFER_INFO_OFFSET / 16)
 
 namespace r600 {
 
@@ -95,8 +77,8 @@ public:
       nir_src *offset;
       PVirtualValue gather_comp;
       PVirtualValue ms_index;
-      PVirtualValue texture_offset;
-      PRegister resource_offset;
+      PRegister texture_offset;
+      PRegister sampler_offset;
       nir_src *backend1;
       nir_src *backend2;
 
@@ -112,9 +94,10 @@ public:
             const RegisterVec4& dest,
             const RegisterVec4::Swizzle& dest_swizzle,
             const RegisterVec4& src,
-            unsigned sid,
-            unsigned rid,
-            PRegister sampler_offs = nullptr);
+            unsigned resource_id,
+            PRegister resource_offs,
+            int sampler_id = 0,
+            PRegister sampler_offset = nullptr);
 
    TexInstr(const TexInstr& orig) = delete;
    TexInstr(const TexInstr&& orig) = delete;
@@ -128,7 +111,11 @@ public:
    auto& src() { return m_src; }
 
    unsigned opcode() const { return m_opcode; }
-   unsigned resource_id() const { return m_resource_id; }
+
+   unsigned sampler_id() const { return m_sampler.resource_id(); }
+   auto sampler_offset() const { return m_sampler.resource_offset(); }
+   void set_sampler_offset(PRegister offs) { m_sampler.set_resource_offset(offs); }
+   auto sampler_index_mode() const { return m_sampler.resource_index_mode(); }
 
    void set_offset(unsigned index, int32_t val);
    int get_offset(unsigned index) const;
@@ -149,9 +136,10 @@ public:
 
    uint32_t slots() const override { return 1; };
 
-   auto prepare_instr() const { return m_prepare_instr; }
+   Block::Instructions prepare_instr() const override { return m_prepare_instr; }
 
    bool replace_source(PRegister old_src, PVirtualValue new_src) override;
+   void update_indirect_addr(PRegister old_reg, PRegister addr) override;
 
    uint8_t allowed_src_chan_mask() const override;
 
@@ -179,24 +167,27 @@ private:
    emit_tex_texture_samples(nir_tex_instr *instr, Inputs& src, Shader& shader);
    static bool emit_lowered_tex(nir_tex_instr *instr, Inputs& src, Shader& shader);
    static void emit_set_gradients(
-      nir_tex_instr *tex, int sampler_id, Inputs& src, TexInstr *irt, Shader& shader);
+      nir_tex_instr *tex, int texture_id, Inputs& src, TexInstr *irt, Shader& shader);
    static void emit_set_offsets(
-      nir_tex_instr *tex, int sampler_id, Inputs& src, TexInstr *irt, Shader& shader);
+      nir_tex_instr *tex, int texture_id, Inputs& src, TexInstr *irt, Shader& shader);
 
    bool set_coord_offsets(nir_src *offset);
    void set_rect_coordinate_flags(nir_tex_instr *instr);
    void add_prepare_instr(TexInstr *ir) { m_prepare_instr.push_back(ir); };
+   void forward_set_blockid(int id, int index) override;
+
 
    Opcode m_opcode;
 
    RegisterVec4 m_src;
    std::bitset<num_tex_flag> m_tex_flags;
-   int m_offset[3];
+   int m_coord_offset[3];
    int m_inst_mode;
-   unsigned m_resource_id;
 
    static const std::map<Opcode, std::string> s_opcode_map;
-   std::list<TexInstr *> m_prepare_instr;
+   Block::Instructions m_prepare_instr;
+
+   Resource m_sampler;
 };
 
 bool

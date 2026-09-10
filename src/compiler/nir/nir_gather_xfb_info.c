@@ -21,6 +21,7 @@
  * IN THE SOFTWARE.
  */
 
+#include "nir.h"
 #include "nir_xfb_info.h"
 
 #include "util/u_dynarray.h"
@@ -43,7 +44,6 @@ add_var_xfb_varying(nir_xfb_info *xfb,
    varying->offset = offset;
    xfb->buffers[buffer].varying_count++;
 }
-
 
 static nir_xfb_info *
 nir_xfb_info_create(void *mem_ctx, uint16_t output_count)
@@ -231,8 +231,8 @@ nir_gather_xfb_info_with_varyings(nir_shader *shader,
        * that contains an array.
        */
       bool is_array_block = var->interface_type != NULL &&
-         glsl_type_is_array(var->type) &&
-         glsl_without_array(var->type) == var->interface_type;
+                            glsl_type_is_array(var->type) &&
+                            glsl_without_array(var->type) == var->interface_type;
 
       if (var->data.explicit_offset && !is_array_block) {
          unsigned offset = var->data.offset;
@@ -275,7 +275,7 @@ nir_gather_xfb_info_with_varyings(nir_shader *shader,
 
 #ifndef NDEBUG
    /* Finally, do a sanity check */
-   unsigned max_offset[NIR_MAX_XFB_BUFFERS] = {0};
+   unsigned max_offset[NIR_MAX_XFB_BUFFERS] = { 0 };
    for (unsigned i = 0; i < xfb->output_count; i++) {
       assert(xfb->outputs[i].offset >= max_offset[xfb->outputs[i].buffer]);
       assert(xfb->outputs[i].component_mask != 0);
@@ -313,26 +313,17 @@ compare_xfb_out(const void *pa, const void *pb)
 
 /**
  * Gather transform feedback info from lowered IO intrinsics.
- *
- * Optionally return slot_to_register, an optional table to translate
- * gl_varying_slot to "base" indices.
  */
-nir_xfb_info *
-nir_gather_xfb_info_from_intrinsics(nir_shader *nir,
-                                    int slot_to_register[NUM_TOTAL_VARYING_SLOTS])
+void
+nir_gather_xfb_info_from_intrinsics(nir_shader *nir)
 {
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
-   uint8_t buffer_to_stream[MAX_XFB_BUFFERS] = {0};
+   uint8_t buffer_to_stream[MAX_XFB_BUFFERS] = { 0 };
    uint8_t buffer_mask = 0;
    uint8_t stream_mask = 0;
 
-   if (slot_to_register) {
-      memset(slot_to_register, -1,
-             sizeof(slot_to_register[0] * NUM_TOTAL_VARYING_SLOTS));
-   }
-
    /* Gather xfb outputs. */
-   struct util_dynarray array = {0};
+   struct util_dynarray array = { 0 };
 
    nir_foreach_block(block, impl) {
       nir_foreach_instr(instr, block) {
@@ -343,33 +334,33 @@ nir_gather_xfb_info_from_intrinsics(nir_shader *nir,
          nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
 
          unsigned wr_mask = nir_intrinsic_write_mask(intr);
+         nir_io_xfb xfb = nir_intrinsic_io_xfb(intr);
 
          while (wr_mask) {
             unsigned i = u_bit_scan(&wr_mask);
             unsigned index = nir_intrinsic_component(intr) + i;
-            nir_io_xfb xfb = index < 2 ? nir_intrinsic_io_xfb(intr) :
-                                         nir_intrinsic_io_xfb2(intr);
 
-            if (xfb.out[index % 2].num_components) {
+            if (xfb.out[index].num_components) {
                nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
                nir_xfb_output_info out;
 
                out.component_offset = index;
                out.component_mask =
-                  BITFIELD_RANGE(index, xfb.out[index % 2].num_components);
+                  BITFIELD_RANGE(index, xfb.out[index].num_components);
                out.location = sem.location;
+               out.data_is_16bit = intr->src[0].ssa->bit_size == 16;
                out.high_16bits = sem.high_16bits;
-               out.buffer = xfb.out[index % 2].buffer;
-               out.offset = (uint32_t)xfb.out[index % 2].offset * 4;
-               util_dynarray_append(&array, nir_xfb_output_info, out);
+               out.mediump = sem.medium_precision;
+               out.mediump_upconvert_type = nir_intrinsic_src_type(intr) &
+                                            (nir_type_float | nir_type_int | nir_type_uint);
+               out.buffer = xfb.out[index].buffer;
+               out.offset = (uint32_t)xfb.out[index].offset * 4;
+               util_dynarray_append(&array, out);
 
                uint8_t stream = (sem.gs_streams >> (i * 2)) & 0x3;
                buffer_to_stream[out.buffer] = stream;
                buffer_mask |= BITFIELD_BIT(out.buffer);
                stream_mask |= BITFIELD_BIT(stream);
-
-               if (slot_to_register)
-                  slot_to_register[sem.location] = nir_intrinsic_base(intr);
 
                /* No elements before component_offset are allowed to be set. */
                assert(!(out.component_mask & BITFIELD_MASK(out.component_offset)));
@@ -382,7 +373,7 @@ nir_gather_xfb_info_from_intrinsics(nir_shader *nir,
    int count = util_dynarray_num_elements(&array, nir_xfb_output_info);
 
    if (!count)
-      return NULL;
+      return;
 
    if (count > 1) {
       /* Sort outputs by buffer, location, and component. */
@@ -400,10 +391,14 @@ nir_gather_xfb_info_from_intrinsics(nir_shader *nir,
               j < count &&
               cur->buffer == outputs[j].buffer &&
               cur->location == outputs[j].location &&
-              cur->high_16bits == outputs[j].high_16bits; j++) {
+              cur->data_is_16bit == outputs[j].data_is_16bit &&
+              cur->high_16bits == outputs[j].high_16bits &&
+              cur->mediump == outputs[j].mediump &&
+              cur->mediump_upconvert_type == outputs[j].mediump_upconvert_type;
+              j++) {
             if (outputs[j].component_mask &&
                 outputs[j].offset - outputs[j].component_offset * 4 ==
-                cur->offset - cur->component_offset * 4) {
+                   cur->offset - cur->component_offset * 4) {
                unsigned merged_offset = MIN2(cur->component_offset,
                                              outputs[j].component_offset);
                /* component_mask is relative to 0, not component_offset */
@@ -436,10 +431,10 @@ nir_gather_xfb_info_from_intrinsics(nir_shader *nir,
       assert(outputs[i].component_mask);
 
    /* Create nir_xfb_info. */
-   nir_xfb_info *info = calloc(1, nir_xfb_info_size(count));
+   nir_xfb_info *info = nir_xfb_info_create(nir, count);
    if (!info) {
       util_dynarray_fini(&array);
-      return NULL;
+      return;
    }
 
    /* Fill nir_xfb_info. */
@@ -452,15 +447,43 @@ nir_gather_xfb_info_from_intrinsics(nir_shader *nir,
    /* Set strides. */
    for (unsigned i = 0; i < MAX_XFB_BUFFERS; i++) {
       if (buffer_mask & BITFIELD_BIT(i))
-         info->buffers[i].stride = nir->info.xfb_stride[i];
+         info->buffers[i].stride = nir->info.xfb_stride[i] * 4;
    }
 
    /* Set varying_count. */
    for (unsigned i = 0; i < count; i++)
       info->buffers[outputs[i].buffer].varying_count++;
 
+   /* Preserve some info from the pre-existing xfb info if the shader had any. */
+   if (nir->xfb_info) {
+      /* We need to remember which streamout buffers and streams were enabled,
+       * even if the shader doesn't actually write any outputs to them,
+       * because the API requires that we count vertices created by this shader
+       * towards queries against those streams.
+       *
+       * That information can be gathered by nir_gather_xfb_info_with_varyings
+       * from the original NIR I/O variables that we get from the frontend,
+       * but it isn't included in any intrinsics so would be otherwise lost here.
+       *
+       * Illustrated by the following test cases:
+       * dEQP-VK.transform_feedback.simple.multiquery_omit_write_*
+       */
+      const uint32_t buffers_not_written = nir->xfb_info->buffers_written & ~info->buffers_written;
+      u_foreach_bit(buffer, buffers_not_written) {
+         const uint32_t stream = nir->xfb_info->buffer_to_stream[buffer];
+         info->streams_written |= BITFIELD_BIT(stream);
+         info->buffers_written |= BITFIELD_BIT(buffer);
+         info->buffer_to_stream[buffer] = stream;
+         info->buffers[buffer].stride = nir->xfb_info->buffers[buffer].stride;
+         info->buffers[buffer].varying_count = 0;
+      }
+   }
+
+   /* Replace original xfb info. */
+   ralloc_free(nir->xfb_info);
+   nir->xfb_info = info;
+
    util_dynarray_fini(&array);
-   return info;
 }
 
 void
@@ -481,12 +504,19 @@ nir_print_xfb_info(nir_xfb_info *info, FILE *fp)
    fprintf(fp, "output_count: %u\n", info->output_count);
 
    for (unsigned i = 0; i < info->output_count; i++) {
-      fprintf(fp, "output%u: buffer=%u, offset=%u, location=%u, high_16bits=%u, "
+      nir_alu_type type = info->outputs[i].mediump_upconvert_type;
+      fprintf(fp, "output%u: buffer=%u, offset=%u, location=%u, data_is_16bit=%u, "
+                  "high_16bits=%u, mediump=%u, upconvert=%s, "
                   "component_offset=%u, component_mask=0x%x\n",
               i, info->outputs[i].buffer,
               info->outputs[i].offset,
               info->outputs[i].location,
+              info->outputs[i].data_is_16bit,
               info->outputs[i].high_16bits,
+              info->outputs[i].mediump,
+              type == nir_type_float ? "float" :
+                  type == nir_type_int ? "int" :
+                  type == nir_type_uint ? "uint" : "none",
               info->outputs[i].component_offset,
               info->outputs[i].component_mask);
    }

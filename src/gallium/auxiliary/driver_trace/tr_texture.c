@@ -33,48 +33,6 @@
 #include "tr_context.h"
 #include "tr_texture.h"
 
-
-struct pipe_surface *
-trace_surf_create(struct trace_context *tr_ctx,
-                  struct pipe_resource *res,
-                  struct pipe_surface *surface)
-{
-   struct trace_surface *tr_surf;
-
-   if (!surface)
-      goto error;
-
-   assert(surface->texture == res);
-
-   tr_surf = CALLOC_STRUCT(trace_surface);
-   if (!tr_surf)
-      goto error;
-
-   memcpy(&tr_surf->base, surface, sizeof(struct pipe_surface));
-   tr_surf->base.context = &tr_ctx->base;
-
-   pipe_reference_init(&tr_surf->base.reference, 1);
-   tr_surf->base.texture = NULL;
-   pipe_resource_reference(&tr_surf->base.texture, res);
-   tr_surf->surface = surface;
-
-   return &tr_surf->base;
-
-error:
-   pipe_surface_reference(&surface, NULL);
-   return NULL;
-}
-
-
-void
-trace_surf_destroy(struct trace_surface *tr_surf)
-{
-   pipe_resource_reference(&tr_surf->base.texture, NULL);
-   pipe_surface_reference(&tr_surf->surface, NULL);
-   FREE(tr_surf);
-}
-
-
 struct pipe_transfer *
 trace_transfer_create(struct trace_context *tr_ctx,
 		      struct pipe_resource *res,
@@ -116,3 +74,35 @@ trace_transfer_destroy(struct trace_context *tr_context,
    FREE(tr_trans);
 }
 
+struct pipe_sampler_view *
+trace_sampler_view_create(struct trace_context *tr_ctx,
+                  struct pipe_resource *tr_res,
+                  struct pipe_sampler_view *view)
+{
+   assert(tr_res == view->texture);
+   struct trace_sampler_view *tr_view = CALLOC_STRUCT(trace_sampler_view);
+   memcpy(&tr_view->base, view, sizeof(struct pipe_sampler_view));
+   tr_view->base.reference.count = 1;
+   tr_view->base.texture = NULL;
+   pipe_resource_reference(&tr_view->base.texture, tr_res);
+   tr_view->base.context = &tr_ctx->base;
+   tr_view->sampler_view = view;
+   return &tr_view->base;
+}
+
+void
+trace_sampler_view_destroy(struct trace_sampler_view *tr_view)
+{
+   pipe_resource_reference(&tr_view->base.texture, NULL);
+   FREE(tr_view);
+}
+
+struct pipe_sampler_view *
+trace_sampler_view_unwrap(struct trace_sampler_view *tr_view)
+{
+   if (!tr_view)
+      return NULL;
+   return tr_view->sampler_view;
+}
+
+#undef SAMPLER_VIEW_PRIVATE_REFCOUNT

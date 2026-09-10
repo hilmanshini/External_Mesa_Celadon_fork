@@ -50,9 +50,10 @@ nir_type_conversion_op(nir_alu_type src, nir_alu_type dst, nir_rounding_mode rnd
       return nir_op_mov;
    }
 
-   /* i2b and u2b do not exist.  Use ine (via nir_type_conversion) instead */
-   assert((src_base != nir_type_int && src_base != nir_type_uint) ||
-          dst_base != nir_type_bool);
+   /* f2b, i2b, and u2b do not exist.  Use ine or fne (via nir_type_conversion)
+    * instead.
+    */
+   assert(src_base == dst_base || dst_base != nir_type_bool);
 
    switch (src_base) {
 %     for src_t in ['int', 'uint', 'float', 'bool']:
@@ -66,13 +67,13 @@ nir_type_conversion_op(nir_alu_type src, nir_alu_type dst, nir_rounding_mode rnd
 %                 else:
 <%                   dst_t = src_t %>
 %                 endif
-%              elif src_t == 'bool' and dst_t in ['int', 'uint', 'bool']:
+%              elif src_t == 'bool' and dst_t in ['int', 'uint']:
 %                 if dst_t == 'int':
 <%                   continue %>
 %                 else:
 <%                   dst_t = 'int' %>
 %                 endif
-%              elif src_t in ['int', 'uint'] and dst_t == 'bool':
+%              elif src_t != 'bool' and dst_t == 'bool':
 <%                   continue %>
 %              endif
                switch (dst_bit_size) {
@@ -86,7 +87,7 @@ nir_type_conversion_op(nir_alu_type src, nir_alu_type dst, nir_rounding_mode rnd
                                                                    dst_bits, rnd_t[1])};
 %                       endfor
                         default:
-                           unreachable("Invalid 16-bit nir rounding mode");
+                           UNREACHABLE("Invalid 16-bit nir rounding mode");
                      }
 %                    else:
                      assert(rnd == nir_rounding_mode_undef);
@@ -94,15 +95,15 @@ nir_type_conversion_op(nir_alu_type src, nir_alu_type dst, nir_rounding_mode rnd
 %                    endif
 %                 endfor
                   default:
-                     unreachable("Invalid nir alu bit size");
+                     UNREACHABLE("Invalid nir alu bit size");
                }
 %           endfor
             default:
-               unreachable("Invalid nir alu base type");
+               UNREACHABLE("Invalid nir alu base type");
          }
 %     endfor
       default:
-         unreachable("Invalid nir alu base type");
+         UNREACHABLE("Invalid nir alu base type");
    }
 }
 
@@ -123,7 +124,11 @@ const nir_op_info nir_op_infos[nir_num_opcodes] = {
    .algebraic_properties =
       ${ "0" if opcode.algebraic_properties == "" else " | ".join(
             "NIR_OP_IS_" + prop.upper() for prop in
-               opcode.algebraic_properties.strip().split(" ")) }
+               opcode.algebraic_properties.strip().split(" ")) },
+   .valid_fp_math_ctrl =
+      ${ "0" if opcode.valid_fp_math_ctrl == "" else " | ".join(
+            "nir_fp_" + prop for prop in
+               opcode.valid_fp_math_ctrl.strip().split(" ")) }
 },
 % endfor
 };

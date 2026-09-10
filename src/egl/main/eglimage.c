@@ -26,7 +26,6 @@
  *
  **************************************************************************/
 
-
 #include <assert.h>
 #include <string.h>
 
@@ -72,36 +71,7 @@ _eglParseKHRImageAttribs(_EGLImageAttribs *attrs, _EGLDisplay *disp,
    return EGL_SUCCESS;
 }
 
-static EGLint
-_eglParseMESADrmImageAttribs(_EGLImageAttribs *attrs, _EGLDisplay *disp,
-                             EGLint attr, EGLint val)
-{
-   if (!disp->Extensions.MESA_drm_image)
-      return EGL_BAD_PARAMETER;
-
-   switch (attr) {
-   case EGL_WIDTH:
-      attrs->Width = val;
-      break;
-   case EGL_HEIGHT:
-      attrs->Height = val;
-      break;
-   case EGL_DRM_BUFFER_FORMAT_MESA:
-      attrs->DRMBufferFormatMESA = val;
-      break;
-   case EGL_DRM_BUFFER_USE_MESA:
-      attrs->DRMBufferUseMESA = val;
-      break;
-   case EGL_DRM_BUFFER_STRIDE_MESA:
-      attrs->DRMBufferStrideMESA = val;
-      break;
-   default:
-      return EGL_BAD_PARAMETER;
-   }
-
-   return EGL_SUCCESS;
-}
-
+#ifdef HAVE_BIND_WL_DISPLAY
 static EGLint
 _eglParseWLBindWaylandDisplayAttribs(_EGLImageAttribs *attrs, _EGLDisplay *disp,
                                      EGLint attr, EGLint val)
@@ -119,6 +89,7 @@ _eglParseWLBindWaylandDisplayAttribs(_EGLImageAttribs *attrs, _EGLDisplay *disp,
 
    return EGL_SUCCESS;
 }
+#endif
 
 static EGLint
 _eglParseEXTImageDmaBufImportAttribs(_EGLImageAttribs *attrs, _EGLDisplay *disp,
@@ -214,8 +185,8 @@ _eglParseEXTImageDmaBufImportAttribs(_EGLImageAttribs *attrs, _EGLDisplay *disp,
 
 static EGLint
 _eglParseEXTImageDmaBufImportModifiersAttribs(_EGLImageAttribs *attrs,
-                                              _EGLDisplay *disp,
-                                              EGLint attr, EGLint val)
+                                              _EGLDisplay *disp, EGLint attr,
+                                              EGLint val)
 {
    if (!disp->Extensions.EXT_image_dma_buf_import_modifiers)
       return EGL_BAD_PARAMETER;
@@ -297,13 +268,11 @@ _eglParseImageAttribList(_EGLImageAttribs *attrs, _EGLDisplay *disp,
       if (err == EGL_SUCCESS)
          continue;
 
-      err = _eglParseMESADrmImageAttribs(attrs, disp, attr, val);
-      if (err == EGL_SUCCESS)
-         continue;
-
+#ifdef HAVE_BIND_WL_DISPLAY
       err = _eglParseWLBindWaylandDisplayAttribs(attrs, disp, attr, val);
       if (err == EGL_SUCCESS)
          continue;
+#endif
 
       err = _eglParseEXTImageDmaBufImportAttribs(attrs, disp, attr, val);
       if (err == EGL_SUCCESS)
@@ -316,7 +285,8 @@ _eglParseImageAttribList(_EGLImageAttribs *attrs, _EGLDisplay *disp,
       if (err == EGL_BAD_ATTRIBUTE)
          return _eglError(err, __func__);
 
-      err = _eglParseEXTImageDmaBufImportModifiersAttribs(attrs, disp, attr, val);
+      err =
+         _eglParseEXTImageDmaBufImportModifiersAttribs(attrs, disp, attr, val);
       if (err == EGL_SUCCESS)
          continue;
 

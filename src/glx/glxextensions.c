@@ -105,10 +105,10 @@ static const struct extension_info known_glx_extensions[] = {
    { GLX(ATI_pixel_format_float),         N, N },
    { GLX(INTEL_swap_event),               N, N },
    { GLX(MESA_copy_sub_buffer),           N, N },
+   { GLX(MESA_gl_interop),                N, Y },
    { GLX(MESA_query_renderer),            N, Y },
    { GLX(MESA_swap_control),              N, Y },
    { GLX(NV_float_buffer),                N, N },
-   { GLX(OML_swap_method),                Y, N },
    { GLX(OML_sync_control),               N, Y },
    { GLX(SGIS_multisample),               Y, N },
    { GLX(SGIX_fbconfig),                  Y, N },
@@ -229,11 +229,6 @@ static const struct extension_info known_gl_extensions[] = {
    { GL(NV_texture_compression_vtc),      N, N },
    { GL(NV_texture_env_combine4),         N, N },
    { GL(NV_texture_rectangle),            N, N },
-   { GL(NV_vertex_program),               N, N },
-   { GL(NV_vertex_program1_1),            N, N },
-   { GL(NV_vertex_program2),              N, N },
-   { GL(NV_vertex_program2_option),       N, N },
-   { GL(NV_vertex_program3),              N, N },
    { GL(OES_read_format),                 N, N },
    { GL(OES_compressed_paletted_texture), N, N },
    { GL(SGI_color_matrix),                N, N },
@@ -386,6 +381,25 @@ __glXEnableDirectExtension(struct glx_screen * psc, const char *name)
 
    set_glx_extension(known_glx_extensions,
                      name, strlen(name), GL_TRUE, psc->direct_support);
+}
+
+/**
+ * \brief Unconditionally advertise a GLX extension, regardless of whether
+ * the screen is direct-rendering capable or the server advertises it.
+ *
+ * Used by back ends that implement an extension entirely client-side.
+ *
+ * \param psc   Pointer to GLX per-screen record.
+ * \param name  Name of the extension.
+ */
+void
+__glXForceEnableExtension(struct glx_screen * psc, const char *name)
+{
+   __glXExtensionsCtr();
+   __glXExtensionsCtrScreen(psc);
+
+   set_glx_extension(known_glx_extensions,
+                     name, strlen(name), GL_TRUE, psc->glx_force_enabled);
 }
 
 static void

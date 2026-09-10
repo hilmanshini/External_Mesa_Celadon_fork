@@ -158,7 +158,7 @@ vc4_emit_gl_shader_state(struct vc4_context *vc4,
 
                 /* VC4_DIRTY_PRIM_MODE | VC4_DIRTY_RASTERIZER */
                 rec.point_size_included_in_shaded_vertex_data =
-                         (info->mode == PIPE_PRIM_POINTS &&
+                         (info->mode == MESA_PRIM_POINTS &&
                           vc4->rasterizer->base.point_size_per_vertex);
 
                 /* VC4_DIRTY_COMPILED_FS */
@@ -192,7 +192,7 @@ vc4_emit_gl_shader_state(struct vc4_context *vc4,
                 /* not vc4->dirty tracked: vc4->last_index_bias */
                 uint32_t offset = (vb->buffer_offset +
                                    elem->src_offset +
-                                   vb->stride * (index_bias +
+                                   elem->src_stride * (index_bias +
                                                  extra_index_bias));
                 uint32_t vb_size = rsc->bo->size - offset;
                 uint32_t elem_size =
@@ -201,16 +201,16 @@ vc4_emit_gl_shader_state(struct vc4_context *vc4,
                 cl_emit(&job->shader_rec, ATTRIBUTE_RECORD, attr) {
                         attr.address = cl_address(rsc->bo, offset);
                         attr.number_of_bytes_minus_1 = elem_size - 1;
-                        attr.stride = vb->stride;
+                        attr.stride = elem->src_stride;
                         attr.coordinate_shader_vpm_offset =
                                 vc4->prog.cs->vattr_offsets[i];
                         attr.vertex_shader_vpm_offset =
                                 vc4->prog.vs->vattr_offsets[i];
                 }
 
-                if (vb->stride > 0) {
+                if (elem->src_stride > 0) {
                         max_index = MIN2(max_index,
-                                         (vb_size - elem_size) / vb->stride);
+                                         (vb_size - elem_size) / elem->src_stride);
                 }
         }
 
@@ -240,13 +240,13 @@ vc4_emit_gl_shader_state(struct vc4_context *vc4,
         }
 
         vc4_write_uniforms(vc4, vc4->prog.fs,
-                           &vc4->constbuf[PIPE_SHADER_FRAGMENT],
+                           &vc4->constbuf[MESA_SHADER_FRAGMENT],
                            &vc4->fragtex);
         vc4_write_uniforms(vc4, vc4->prog.vs,
-                           &vc4->constbuf[PIPE_SHADER_VERTEX],
+                           &vc4->constbuf[MESA_SHADER_VERTEX],
                            &vc4->verttex);
         vc4_write_uniforms(vc4, vc4->prog.cs,
-                           &vc4->constbuf[PIPE_SHADER_VERTEX],
+                           &vc4->constbuf[MESA_SHADER_VERTEX],
                            &vc4->verttex);
 
         vc4->last_index_bias = index_bias + extra_index_bias;
@@ -294,11 +294,11 @@ vc4_draw_workaround_line_loop_2(struct pipe_context *pctx, const struct pipe_dra
              const struct pipe_draw_indirect_info *indirect,
              const struct pipe_draw_start_count_bias *draw)
 {
-        if (draw->count != 2 || info->mode != PIPE_PRIM_LINE_LOOP)
+        if (draw->count != 2 || info->mode != MESA_PRIM_LINE_LOOP)
                 return false;
 
         struct pipe_draw_info local_info = *info;
-        local_info.mode = PIPE_PRIM_LINES;
+        local_info.mode = MESA_PRIM_LINES;
 
         /* Draw twice.  The vertex order will be wrong on the second prim, but
          * that's probably not worth rewriting an index buffer over.
@@ -403,7 +403,7 @@ vc4_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
                         if (info->has_user_indices) {
                                 unsigned start_offset = draws[0].start * info->index_size;
                                 prsc = NULL;
-                                u_upload_data(vc4->uploader, start_offset,
+                                u_upload_data_ref(vc4->uploader, start_offset,
                                               draws[0].count * index_size, 4,
                                               (char*)info->index.user + start_offset,
                                               &offset, &prsc);
@@ -501,9 +501,9 @@ vc4_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
          */
         assert(job->draw_calls_queued <= VC4_HW_2116_COUNT);
 
-        if (vc4->zsa && vc4->framebuffer.zsbuf) {
+        if (vc4->zsa && vc4->framebuffer.zsbuf.texture) {
                 struct vc4_resource *rsc =
-                        vc4_resource(vc4->framebuffer.zsbuf->texture);
+                        vc4_resource(vc4->framebuffer.zsbuf.texture);
 
                 if (vc4->zsa->base.depth_enabled) {
                         job->resolve |= PIPE_CLEAR_DEPTH;
@@ -529,6 +529,22 @@ vc4_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
                 vc4_flush(pctx);
 }
 
+/* The quads the blitter draws for a clear sample nothing, but leaving the
+ * textures bound makes vc4_predraw_check_textures() refresh their shadow
+ * textures from inside the blitter. As u_blitter is not re-entrant, unbind
+ * the textures for the duration of the clear.
+ */
+static void
+vc4_blitter_clear_save(struct pipe_context *pctx, enum vc4_blitter_op op)
+{
+        struct vc4_context *vc4 = vc4_context(pctx);
+
+        vc4_blitter_save(vc4, op | VC4_SAVE_TEXTURES);
+
+        pctx->set_sampler_views(pctx, MESA_SHADER_FRAGMENT, 0, 0, 0, NULL);
+        pctx->bind_sampler_states(pctx, MESA_SHADER_FRAGMENT, 0, 0, NULL);
+}
+
 static uint32_t
 pack_rgba(enum pipe_format format, const float *rgba)
 {
@@ -541,7 +557,9 @@ pack_rgba(enum pipe_format format, const float *rgba)
 }
 
 static void
-vc4_clear(struct pipe_context *pctx, unsigned buffers, const struct pipe_scissor_state *scissor_state,
+vc4_clear(struct pipe_context *pctx, unsigned buffers,
+          uint32_t color_clear_mask, uint8_t stencil_clear_mask,
+          const struct pipe_scissor_state *scissor_state,
           const union pipe_color_union *color, double depth, unsigned stencil)
 {
         struct vc4_context *vc4 = vc4_context(pctx);
@@ -549,7 +567,7 @@ vc4_clear(struct pipe_context *pctx, unsigned buffers, const struct pipe_scissor
 
         if (buffers & PIPE_CLEAR_DEPTHSTENCIL) {
                 struct vc4_resource *rsc =
-                        vc4_resource(vc4->framebuffer.zsbuf->texture);
+                        vc4_resource(vc4->framebuffer.zsbuf.texture);
                 unsigned zsclear = buffers & PIPE_CLEAR_DEPTHSTENCIL;
 
                 /* Clearing ZS will clear both Z and stencil, so if we're
@@ -561,12 +579,12 @@ vc4_clear(struct pipe_context *pctx, unsigned buffers, const struct pipe_scissor
                 if ((zsclear == PIPE_CLEAR_DEPTH ||
                      zsclear == PIPE_CLEAR_STENCIL) &&
                     (rsc->initialized_buffers & ~(zsclear | job->cleared)) &&
-                    util_format_is_depth_and_stencil(vc4->framebuffer.zsbuf->format)) {
+                    util_format_is_depth_and_stencil(vc4->framebuffer.zsbuf.format)) {
                         static const union pipe_color_union dummy_color = {};
 
                         perf_debug("Partial clear of Z+stencil buffer, "
                                    "drawing a quad instead of fast clearing\n");
-                        vc4_blitter_save(vc4);
+                        vc4_blitter_clear_save(pctx, VC4_CLEAR);
                         util_blitter_clear(vc4->blitter,
                                            vc4->framebuffer.width,
                                            vc4->framebuffer.height,
@@ -574,6 +592,7 @@ vc4_clear(struct pipe_context *pctx, unsigned buffers, const struct pipe_scissor
                                            zsclear,
                                            &dummy_color, depth, stencil,
                                            false);
+                        util_blitter_restore_textures(vc4->blitter);
                         buffers &= ~zsclear;
                         if (!buffers)
                                 return;
@@ -592,10 +611,10 @@ vc4_clear(struct pipe_context *pctx, unsigned buffers, const struct pipe_scissor
 
         if (buffers & PIPE_CLEAR_COLOR0) {
                 struct vc4_resource *rsc =
-                        vc4_resource(vc4->framebuffer.cbufs[0]->texture);
+                        vc4_resource(vc4->framebuffer.cbufs[0].texture);
                 uint32_t clear_color;
 
-                if (vc4_rt_format_is_565(vc4->framebuffer.cbufs[0]->format)) {
+                if (vc4_rt_format_is_565(vc4->framebuffer.cbufs[0].format)) {
                         /* In 565 mode, the hardware will be packing our color
                          * for us.
                          */
@@ -606,7 +625,7 @@ vc4_clear(struct pipe_context *pctx, unsigned buffers, const struct pipe_scissor
                          * support multiple swizzlings of RGBA8888.
                          */
                         clear_color =
-                                pack_rgba(vc4->framebuffer.cbufs[0]->format,
+                                pack_rgba(vc4->framebuffer.cbufs[0].format,
                                           color->f);
                 }
                 job->clear_color[0] = job->clear_color[1] = clear_color;
@@ -615,7 +634,7 @@ vc4_clear(struct pipe_context *pctx, unsigned buffers, const struct pipe_scissor
 
         if (buffers & PIPE_CLEAR_DEPTHSTENCIL) {
                 struct vc4_resource *rsc =
-                        vc4_resource(vc4->framebuffer.zsbuf->texture);
+                        vc4_resource(vc4->framebuffer.zsbuf.texture);
 
                 /* Though the depth buffer is stored with Z in the high 24,
                  * for this field we just need to store it in the low 24.
@@ -646,7 +665,11 @@ vc4_clear_render_target(struct pipe_context *pctx, struct pipe_surface *ps,
                         unsigned x, unsigned y, unsigned w, unsigned h,
 			bool render_condition_enabled)
 {
-        fprintf(stderr, "unimpl: clear RT\n");
+        struct vc4_context *vc4 = vc4_context(pctx);
+
+        vc4_blitter_clear_save(pctx, VC4_CLEAR_SURFACE);
+        util_blitter_clear_render_target(vc4->blitter, ps, color, x, y, w, h);
+        util_blitter_restore_textures(vc4->blitter);
 }
 
 static void
@@ -655,7 +678,12 @@ vc4_clear_depth_stencil(struct pipe_context *pctx, struct pipe_surface *ps,
                         unsigned x, unsigned y, unsigned w, unsigned h,
 			bool render_condition_enabled)
 {
-        fprintf(stderr, "unimpl: clear DS\n");
+        struct vc4_context *vc4 = vc4_context(pctx);
+
+        vc4_blitter_clear_save(pctx, VC4_CLEAR_ZS_SURFACE);
+        util_blitter_clear_depth_stencil(vc4->blitter, ps, buffers, depth,
+                                         stencil, x, y, w, h);
+        util_blitter_restore_textures(vc4->blitter);
 }
 
 void

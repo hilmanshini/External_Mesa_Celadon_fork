@@ -1,27 +1,7 @@
 /* -*- mesa-c++  -*-
- *
- * Copyright (c) 2022 Collabora LTD
- *
+ * Copyright 2022 Collabora LTD
  * Author: Gert Wollny <gert.wollny@collabora.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef GDSINSTR_H
@@ -34,7 +14,7 @@ namespace r600 {
 
 class Shader;
 
-class GDSInstr : public InstrWithResource {
+class GDSInstr : public Instr, public Resource {
 public:
    GDSInstr(
       ESDOp op, Register *dest, const RegisterVec4& src, int uav_base, PRegister uav_id);
@@ -59,11 +39,15 @@ public:
    uint32_t slots() const override { return 1; };
    uint8_t allowed_src_chan_mask() const override;
 
+   void update_indirect_addr(PRegister old_reg, PRegister addr) override;
+
 private:
    static bool emit_atomic_read(nir_intrinsic_instr *intr, Shader& shader);
    static bool emit_atomic_op2(nir_intrinsic_instr *intr, Shader& shader);
    static bool emit_atomic_inc(nir_intrinsic_instr *intr, Shader& shader);
    static bool emit_atomic_pre_dec(nir_intrinsic_instr *intr, Shader& shader);
+   static bool emit_atomic_post_dec(nir_intrinsic_instr *intr, Shader& shader);
+   static bool emit_atomic_counter_comp_swap(nir_intrinsic_instr *intr, Shader& shader);
 
    void do_print(std::ostream& os) const override;
 
@@ -75,7 +59,7 @@ private:
    std::bitset<8> m_tex_flags;
 };
 
-class RatInstr : public InstrWithResource {
+class RatInstr : public Instr, public Resource {
 
 public:
    enum ERatOp {
@@ -116,7 +100,8 @@ public:
       OR_RTN,
       XOR_RTN,
       MSKOR_RTN,
-      UINT_RTN,
+      WRAP_INC_RTN,
+      WRAP_DEC_RTN,
       UNSUPPORTED
    };
 
@@ -166,7 +151,11 @@ public:
 
    static bool emit(nir_intrinsic_instr *intr, Shader& shader);
 
+   void update_indirect_addr(PRegister old_reg, PRegister addr) override;
+
 private:
+   static bool emit_global_store(nir_intrinsic_instr *intr, Shader& shader);
+
    static bool emit_ssbo_load(nir_intrinsic_instr *intr, Shader& shader);
    static bool emit_ssbo_store(nir_intrinsic_instr *intr, Shader& shader);
    static bool emit_ssbo_atomic_op(nir_intrinsic_instr *intr, Shader& shader);
@@ -175,6 +164,7 @@ private:
    static bool emit_image_store(nir_intrinsic_instr *intr, Shader& shader);
    static bool emit_image_load_or_atomic(nir_intrinsic_instr *intr, Shader& shader);
    static bool emit_image_size(nir_intrinsic_instr *intr, Shader& shader);
+   static bool emit_image_samples(nir_intrinsic_instr *intrin, Shader& shader);
 
    bool do_ready() const override;
    void do_print(std::ostream& os) const override;

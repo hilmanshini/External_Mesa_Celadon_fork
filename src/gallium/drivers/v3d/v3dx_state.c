@@ -24,6 +24,7 @@
 
 #include "pipe/p_state.h"
 #include "util/format/u_format.h"
+#include "util/u_dual_blend.h"
 #include "util/u_framebuffer.h"
 #include "util/u_inlines.h"
 #include "util/u_math.h"
@@ -34,10 +35,9 @@
 
 #include "v3d_context.h"
 #include "broadcom/common/v3d_tiling.h"
-#include "broadcom/common/v3d_macros.h"
 #include "broadcom/common/v3d_util.h"
 #include "broadcom/compiler/v3d_compiler.h"
-#include "broadcom/cle/v3dx_pack.h"
+#include "v3dx_format_table.h"
 
 static void
 v3d_generic_cso_state_delete(struct pipe_context *pctx, void *hwcso)
@@ -65,15 +65,6 @@ v3d_set_stencil_ref(struct pipe_context *pctx,
         struct v3d_context *v3d = v3d_context(pctx);
         v3d->stencil_ref = stencil_ref;
         v3d->dirty |= V3D_DIRTY_STENCIL_REF;
-}
-
-static void
-v3d_set_clip_state(struct pipe_context *pctx,
-                   const struct pipe_clip_state *clip)
-{
-        struct v3d_context *v3d = v3d_context(pctx);
-        v3d->clip = *clip;
-        v3d->dirty |= V3D_DIRTY_CLIP;
 }
 
 static void
@@ -106,23 +97,37 @@ v3d_create_rasterizer_state(struct pipe_context *pctx,
         v3dx_pack(&so->depth_offset, DEPTH_OFFSET, depth) {
                 depth.depth_offset_factor = cso->offset_scale;
                 depth.depth_offset_units = cso->offset_units;
-#if V3D_VERSION >= 41
                 depth.limit = cso->offset_clamp;
-#endif
         }
 
-        /* The HW treats polygon offset units based on a Z24 buffer, so we
+        /* V3d 4.x treats polygon offset units based on a Z24 buffer, so we
          * need to scale up offset_units if we're only Z16.
          */
+#if V3D_VERSION == 42
         v3dx_pack(&so->depth_offset_z16, DEPTH_OFFSET, depth) {
                 depth.depth_offset_factor = cso->offset_scale;
                 depth.depth_offset_units = cso->offset_units * 256.0;
-#if V3D_VERSION >= 41
                 depth.limit = cso->offset_clamp;
-#endif
         }
+#endif
 
         return so;
+}
+
+/* If the pipe_blend_state contains dual source factors then we need to fall
+ * back to software blend.
+ */
+static bool
+v3d_needs_software_blend(const struct pipe_blend_state *blend)
+{
+        if (V3D_DBG(SOFT_BLEND))
+                return true;
+
+        /* We only support 1 attachment with dual source blend. */
+        if (util_blend_state_is_dual(blend, 0))
+                return true;
+
+        return false;
 }
 
 /* Blend state is baked into shaders. */
@@ -138,23 +143,22 @@ v3d_create_blend_state(struct pipe_context *pctx,
 
         so->base = *cso;
 
-        if (cso->independent_blend_enable) {
-                for (int i = 0; i < V3D_MAX_DRAW_BUFFERS; i++) {
-                        so->blend_enables |= cso->rt[i].blend_enable << i;
+        so->use_software = v3d_needs_software_blend(cso);
 
-                        /* V3D 4.x is when we got independent blend enables. */
-                        assert(V3D_VERSION >= 40 ||
-                               cso->rt[i].blend_enable == cso->rt[0].blend_enable);
+        uint32_t max_rts = V3D_MAX_RENDER_TARGETS(V3D_VERSION);
+        if (cso->independent_blend_enable) {
+                for (int i = 0; i < max_rts; i++) {
+                        so->blend_enables |= cso->rt[i].blend_enable << i;
                 }
         } else {
                 if (cso->rt[0].blend_enable)
-                        so->blend_enables = (1 << V3D_MAX_DRAW_BUFFERS) - 1;
+                        so->blend_enables = (1 << max_rts) - 1;
         }
 
         return so;
 }
 
-static uint32_t
+static enum V3DX(Stencil_Op)
 translate_stencil_op(enum pipe_stencil_op op)
 {
         switch (op) {
@@ -167,7 +171,7 @@ translate_stencil_op(enum pipe_stencil_op op)
         case PIPE_STENCIL_OP_DECR_WRAP: return V3D_STENCIL_OP_DECWRAP;
         case PIPE_STENCIL_OP_INVERT:    return V3D_STENCIL_OP_INVERT;
         }
-        unreachable("bad stencil op");
+        UNREACHABLE("bad stencil op");
 }
 
 static void *
@@ -208,7 +212,7 @@ v3d_create_depth_stencil_alpha_state(struct pipe_context *pctx,
                     (cso->stencil[0].zfail_op != PIPE_STENCIL_OP_KEEP ||
                      cso->stencil[0].func != PIPE_FUNC_ALWAYS ||
                      (cso->stencil[1].enabled &&
-                      (cso->stencil[1].zfail_op != PIPE_STENCIL_OP_KEEP &&
+                      (cso->stencil[1].zfail_op != PIPE_STENCIL_OP_KEEP ||
                        cso->stencil[1].func != PIPE_FUNC_ALWAYS)))) {
                         so->ez_state = V3D_EZ_DISABLED;
                 }
@@ -296,19 +300,17 @@ v3d_set_viewport_states(struct pipe_context *pctx,
 
 static void
 v3d_set_vertex_buffers(struct pipe_context *pctx,
-                       unsigned start_slot, unsigned count,
-                       unsigned unbind_num_trailing_slots,
-                       bool take_ownership,
+                       unsigned count,
                        const struct pipe_vertex_buffer *vb)
 {
         struct v3d_context *v3d = v3d_context(pctx);
         struct v3d_vertexbuf_stateobj *so = &v3d->vertexbuf;
 
-        util_set_vertex_buffers_mask(so->vb, &so->enabled_mask, vb,
-                                     start_slot, count,
-                                     unbind_num_trailing_slots,
-                                     take_ownership);
-        so->count = util_last_bit(so->enabled_mask);
+        assert(BITSET_SIZE(so->enabled_mask) <= 32);
+        util_set_vertex_buffers_mask(so->vb, &so->enabled_mask[0], vb,
+                                     count);
+
+        so->count = BITSET_LAST_BIT(so->enabled_mask);
 
         v3d->dirty |= V3D_DIRTY_VTXBUF;
 }
@@ -325,6 +327,20 @@ static void
 v3d_rasterizer_state_bind(struct pipe_context *pctx, void *hwcso)
 {
         struct v3d_context *v3d = v3d_context(pctx);
+        struct v3d_rasterizer_state *rasterizer = hwcso;
+        if (rasterizer == NULL) {
+                /* Nothing to do: without rasterizer state nothing rasterizes,
+                 * so scissor and viewport are irrelevant.
+                 */
+        } else if (v3d->rasterizer == NULL) {
+                v3d->dirty |= V3D_DIRTY_RASTERIZER_SCISSOR;
+                v3d->dirty |= V3D_DIRTY_VIEWPORT;
+        } else {
+                if (v3d->rasterizer->base.scissor != rasterizer->base.scissor)
+                        v3d->dirty |= V3D_DIRTY_RASTERIZER_SCISSOR;
+                if (v3d->rasterizer->base.clip_halfz != rasterizer->base.clip_halfz)
+                        v3d->dirty |= V3D_DIRTY_VIEWPORT;
+        }
         v3d->rasterizer = hwcso;
         v3d->dirty |= V3D_DIRTY_RASTERIZER;
 }
@@ -335,6 +351,20 @@ v3d_zsa_state_bind(struct pipe_context *pctx, void *hwcso)
         struct v3d_context *v3d = v3d_context(pctx);
         v3d->zsa = hwcso;
         v3d->dirty |= V3D_DIRTY_ZSA;
+}
+
+
+static bool
+needs_default_attribute_values(void)
+{
+#if V3D_VERSION == 42
+        /* FIXME: on vulkan we are able to refine even further, as we know in
+         * advance when we create the pipeline if we have an integer vertex
+         * attrib. Pending to check if we could do something similar here.
+         */
+        return true;
+#endif
+        return false;
 }
 
 static void *
@@ -369,7 +399,7 @@ v3d_vertex_state_create(struct pipe_context *pctx, unsigned num_elements,
                         attr.normalized_int_type = desc->channel[0].normalized;
                         attr.read_as_int_uint = desc->channel[0].pure_integer;
                         attr.instance_divisor = MIN2(elem->instance_divisor,
-                                                     0xffff);
+                                                     V3D_MAX_VERTEX_ATTRIB_DIVISOR);
 
                         switch (desc->channel[0].type) {
                         case UTIL_FORMAT_TYPE_FLOAT:
@@ -397,41 +427,44 @@ v3d_vertex_state_create(struct pipe_context *pctx, unsigned num_elements,
                                         attr.type = ATTRIBUTE_BYTE;
                                         break;
                                 default:
-                                        fprintf(stderr,
-                                                "format %s unsupported\n",
-                                                desc->name);
+                                        mesa_loge("format %s unsupported",
+                                                  desc->name);
                                         attr.type = ATTRIBUTE_BYTE;
                                         abort();
                                 }
                                 break;
 
                         default:
-                                fprintf(stderr,
-                                        "format %s unsupported\n",
-                                        desc->name);
+                                mesa_loge("format %s unsupported",
+                                          desc->name);
                                 abort();
                         }
                 }
         }
 
-        /* Set up the default attribute values in case any of the vertex
-         * elements use them.
-         */
-        uint32_t *attrs;
-        u_upload_alloc(v3d->state_uploader, 0,
-                       V3D_MAX_VS_INPUTS * sizeof(float), 16,
-                       &so->defaults_offset, &so->defaults, (void **)&attrs);
+        if (needs_default_attribute_values()) {
+                /* Set up the default attribute values in case any of the vertex
+                 * elements use them.
+                 */
+                uint32_t *attrs;
+                u_upload_alloc_ref(v3d->state_uploader, 0,
+                               V3D_MAX_VS_INPUTS * sizeof(float), 16,
+                               &so->defaults_offset, &so->defaults, (void **)&attrs);
 
-        for (int i = 0; i < V3D_MAX_VS_INPUTS / 4; i++) {
-                attrs[i * 4 + 0] = 0;
-                attrs[i * 4 + 1] = 0;
-                attrs[i * 4 + 2] = 0;
-                if (i < so->num_elements &&
-                    util_format_is_pure_integer(so->pipe[i].src_format)) {
-                        attrs[i * 4 + 3] = 1;
-                } else {
-                        attrs[i * 4 + 3] = fui(1.0);
+                for (int i = 0; i < V3D_MAX_VS_INPUTS / 4; i++) {
+                        attrs[i * 4 + 0] = 0;
+                        attrs[i * 4 + 1] = 0;
+                        attrs[i * 4 + 2] = 0;
+                        if (i < so->num_elements &&
+                            util_format_is_pure_integer(so->pipe[i].src_format)) {
+                                attrs[i * 4 + 3] = 1;
+                        } else {
+                                attrs[i * 4 + 3] = fui(1.0);
+                        }
                 }
+        } else {
+                so->defaults = NULL;
+                so->defaults_offset = 0;
         }
 
         u_upload_unmap(v3d->state_uploader);
@@ -456,27 +489,39 @@ v3d_vertex_state_bind(struct pipe_context *pctx, void *hwcso)
 }
 
 static void
-v3d_set_constant_buffer(struct pipe_context *pctx, enum pipe_shader_type shader, uint index,
-                        bool take_ownership,
+v3d_set_constant_buffer(struct pipe_context *pctx, mesa_shader_stage shader, uint index,
                         const struct pipe_constant_buffer *cb)
 {
         struct v3d_context *v3d = v3d_context(pctx);
         struct v3d_constbuf_stateobj *so = &v3d->constbuf[shader];
 
-        util_copy_constant_buffer(&so->cb[index], cb, take_ownership);
+        util_copy_constant_buffer(&so->cb[index], cb);
 
         /* Note that the gallium frontend can unbind constant buffers by
          * passing NULL here.
          */
         if (unlikely(!cb)) {
-                so->enabled_mask &= ~(1 << index);
-                so->dirty_mask &= ~(1 << index);
+                BITSET_CLEAR(so->enabled_mask, index);
+                BITSET_CLEAR(so->dirty_mask, index);
                 return;
         }
 
-        so->enabled_mask |= 1 << index;
-        so->dirty_mask |= 1 << index;
+        BITSET_SET(so->enabled_mask, index);
+        BITSET_SET(so->dirty_mask, index);
         v3d->dirty |= V3D_DIRTY_CONSTBUF;
+}
+
+static bool
+v3d_fb_needs_soft_blend(struct v3d_context *v3d,
+                        const struct pipe_framebuffer_state *framebuffer)
+{
+        for (unsigned i = 0; i < framebuffer->nr_cbufs; i++) {
+                const struct pipe_surface *cbuf = &framebuffer->cbufs[i];
+                if (!v3d_format_supports_tlb_resolve_and_blend(&v3d->screen->devinfo,
+                                                               cbuf->format))
+                        return true;
+        }
+        return false;
 }
 
 static void
@@ -490,23 +535,26 @@ v3d_set_framebuffer_state(struct pipe_context *pctx,
 
         util_copy_framebuffer_state(cso, framebuffer);
 
+        bool needs_soft_blend = v3d_fb_needs_soft_blend(v3d, framebuffer);
+
+        if (!(v3d->blend && v3d->blend->use_software) &&
+            (v3d->framebuffer_soft_blend != needs_soft_blend)) {
+                v3d->dirty |= V3D_DIRTY_BLEND;
+        }
+
+        v3d->framebuffer_soft_blend = needs_soft_blend;
+
         v3d->swap_color_rb = 0;
         v3d->blend_dst_alpha_one = 0;
+        v3d->submitted_any_jobs_for_current_fbo = false;
+
         for (int i = 0; i < v3d->framebuffer.nr_cbufs; i++) {
-                struct pipe_surface *cbuf = v3d->framebuffer.cbufs[i];
-                if (!cbuf)
+                const struct pipe_surface *cbuf = &v3d->framebuffer.cbufs[i];
+                if (!cbuf->texture)
                         continue;
-                struct v3d_surface *v3d_cbuf = v3d_surface(cbuf);
 
                 const struct util_format_description *desc =
                         util_format_description(cbuf->format);
-
-                /* For BGRA8 formats (DRI window system default format), we
-                 * need to swap R and B, since the HW's format is RGBA8.  On
-                 * V3D 4.1+, the RCL can swap R and B on load/store.
-                 */
-                if (v3d->screen->devinfo.ver < 41 && v3d_cbuf->swap_rb)
-                        v3d->swap_color_rb |= 1 << i;
 
                 if (desc->swizzle[3] == PIPE_SWIZZLE_1)
                         v3d->blend_dst_alpha_one |= 1 << i;
@@ -516,7 +564,7 @@ v3d_set_framebuffer_state(struct pipe_context *pctx,
 }
 
 static enum V3DX(Wrap_Mode)
-translate_wrap(uint32_t pipe_wrap)
+translate_wrap(enum pipe_tex_wrap pipe_wrap)
 {
         switch (pipe_wrap) {
         case PIPE_TEX_WRAP_REPEAT:
@@ -530,11 +578,10 @@ translate_wrap(uint32_t pipe_wrap)
         case PIPE_TEX_WRAP_MIRROR_CLAMP_TO_EDGE:
                 return V3D_WRAP_MODE_MIRROR_ONCE;
         default:
-                unreachable("Unknown wrap mode");
+                UNREACHABLE("Unknown wrap mode");
         }
 }
 
-#if V3D_VERSION >= 40
 static void
 v3d_upload_sampler_state_variant(void *map,
                                  const struct pipe_sampler_state *cso,
@@ -548,8 +595,9 @@ v3d_upload_sampler_state_variant(void *map,
                 sampler.wrap_r = translate_wrap(cso->wrap_r);
 
                 sampler.fixed_bias = cso->lod_bias;
-                sampler.depth_compare_function = cso->compare_func;
-
+                sampler.depth_compare_function = cso->compare_mode ?
+                                                 cso->compare_func :
+                                                 V3D_COMPARE_FUNC_NEVER;
                 sampler.min_filter_nearest =
                         cso->min_img_filter == PIPE_TEX_FILTER_NEAREST;
                 sampler.mag_filter_nearest =
@@ -698,25 +746,25 @@ v3d_upload_sampler_state_variant(void *map,
                                 break;
                         }
 
-                        if (variant >= V3D_SAMPLER_STATE_32) {
-                                sampler.border_color_word_0 = border.ui[0];
-                                sampler.border_color_word_1 = border.ui[1];
-                                sampler.border_color_word_2 = border.ui[2];
-                                sampler.border_color_word_3 = border.ui[3];
-                        } else {
-                                sampler.border_color_word_0 =
-                                        _mesa_float_to_half(border.f[0]);
-                                sampler.border_color_word_1 =
-                                        _mesa_float_to_half(border.f[1]);
-                                sampler.border_color_word_2 =
-                                        _mesa_float_to_half(border.f[2]);
-                                sampler.border_color_word_3 =
-                                        _mesa_float_to_half(border.f[3]);
+#if V3D_VERSION == 42
+                        /* The TMU in V3D 7.x always takes 32-bit floats and handles conversions
+                         * for us. In V3D 4.x we need to manually convert floating point color
+                         * values to the expected format.
+                         */
+                        if (variant < V3D_SAMPLER_STATE_32) {
+                                border.ui[0] = _mesa_float_to_half(border.f[0]);
+                                border.ui[1] = _mesa_float_to_half(border.f[1]);
+                                border.ui[2] = _mesa_float_to_half(border.f[2]);
+                                border.ui[3] = _mesa_float_to_half(border.f[3]);
                         }
+#endif
+                        sampler.border_color_word_0 = border.ui[0];
+                        sampler.border_color_word_1 = border.ui[1];
+                        sampler.border_color_word_2 = border.ui[2];
+                        sampler.border_color_word_3 = border.ui[3];
                 }
         }
 }
-#endif
 
 static void *
 v3d_create_sampler_state(struct pipe_context *pctx,
@@ -734,7 +782,6 @@ v3d_create_sampler_state(struct pipe_context *pctx,
         enum V3DX(Wrap_Mode) wrap_t = translate_wrap(cso->wrap_t);
         enum V3DX(Wrap_Mode) wrap_r = translate_wrap(cso->wrap_r);
 
-#if V3D_VERSION >= 40
         bool uses_border_color = (wrap_s == V3D_WRAP_MODE_BORDER ||
                                   wrap_t == V3D_WRAP_MODE_BORDER ||
                                   wrap_r == V3D_WRAP_MODE_BORDER);
@@ -769,7 +816,7 @@ v3d_create_sampler_state(struct pipe_context *pctx,
         int sampler_align = so->border_color_variants ? 32 : 8;
         int sampler_size = align(cl_packet_length(SAMPLER_STATE), sampler_align);
         int num_variants = (so->border_color_variants ? ARRAY_SIZE(so->sampler_state_offset) : 1);
-        u_upload_alloc(v3d->state_uploader, 0,
+        u_upload_alloc_ref(v3d->state_uploader, 0,
                        sampler_size * num_variants,
                        sampler_align,
                        &so->sampler_state_offset[0],
@@ -784,24 +831,12 @@ v3d_create_sampler_state(struct pipe_context *pctx,
                                                  so->border_color_variants ? i : border_variant);
         }
 
-#else /* V3D_VERSION < 40 */
-        v3dx_pack(&so->p0, TEXTURE_UNIFORM_PARAMETER_0_CFG_MODE1, p0) {
-                p0.s_wrap_mode = wrap_s;
-                p0.t_wrap_mode = wrap_t;
-                p0.r_wrap_mode = wrap_r;
-        }
-
-        v3dx_pack(&so->texture_shader_state, TEXTURE_SHADER_STATE, tex) {
-                tex.depth_compare_function = cso->compare_func;
-                tex.fixed_bias = cso->lod_bias;
-        }
-#endif /* V3D_VERSION < 40 */
         return so;
 }
 
 static void
 v3d_sampler_states_bind(struct pipe_context *pctx,
-                        enum pipe_shader_type shader, unsigned start,
+                        mesa_shader_stage shader, unsigned start,
                         unsigned nr, void **hwcso)
 {
         struct v3d_context *v3d = v3d_context(pctx);
@@ -866,19 +901,27 @@ v3d_setup_texture_shader_state_from_buffer(struct V3DX(TEXTURE_SHADER_STATE) *te
 }
 
 static void
-v3d_setup_texture_shader_state(struct V3DX(TEXTURE_SHADER_STATE) *tex,
+v3d_setup_texture_shader_state(const struct v3d_device_info *devinfo,
+                               struct V3DX(TEXTURE_SHADER_STATE) *tex,
                                struct pipe_resource *prsc,
                                int base_level, int last_level,
-                               int first_layer, int last_layer)
+                               int first_layer, int last_layer,
+                               bool sampling_cube_array)
 {
+        /* Due to ARB_texture_view, a cubemap array can be seen as 2D texture
+         * array.
+         */
+        assert(!sampling_cube_array ||
+               prsc->target == PIPE_TEXTURE_CUBE_ARRAY ||
+               prsc->target == PIPE_TEXTURE_2D_ARRAY);
+
         struct v3d_resource *rsc = v3d_resource(prsc);
         int msaa_scale = prsc->nr_samples > 1 ? 2 : 1;
 
         tex->image_width = prsc->width0 * msaa_scale;
         tex->image_height = prsc->height0 * msaa_scale;
 
-#if V3D_VERSION >= 40
-        /* On 4.x, the height of a 1D texture is redefined to be the
+       /* On 4.x, the height of a 1D texture is redefined to be the
          * upper 14 bits of the width (which is only usable with txf).
          */
         if (prsc->target == PIPE_TEXTURE_1D ||
@@ -888,7 +931,6 @@ v3d_setup_texture_shader_state(struct V3DX(TEXTURE_SHADER_STATE) *tex,
 
         tex->image_width &= (1 << 14) - 1;
         tex->image_height &= (1 << 14) - 1;
-#endif
 
         if (prsc->target == PIPE_TEXTURE_3D) {
                 tex->image_depth = prsc->depth0;
@@ -896,19 +938,35 @@ v3d_setup_texture_shader_state(struct V3DX(TEXTURE_SHADER_STATE) *tex,
                 tex->image_depth = (last_layer - first_layer) + 1;
         }
 
+        /* Empirical testing with CTS shows that when we are sampling from
+         * cube arrays we want to set image depth to layers / 6, but not when
+         * doing image load/store or sampling from 2d image arrays.
+         */
+        if (sampling_cube_array) {
+                assert(tex->image_depth % 6 == 0);
+                tex->image_depth /= 6;
+        }
+
         tex->base_level = base_level;
-#if V3D_VERSION >= 40
+
         tex->max_level = last_level;
         /* Note that we don't have a job to reference the texture's sBO
          * at state create time, so any time this sampler view is used
          * we need to add the texture to the job.
          */
-        tex->texture_base_pointer =
-                cl_address(NULL,
-                           rsc->bo->offset +
-                           v3d_layer_offset(prsc, 0, first_layer));
-#endif
+        const uint32_t base_offset = rsc->bo->offset +
+                v3d_layer_offset(prsc, 0, first_layer);
+
+        tex->texture_base_pointer = cl_address(NULL, base_offset);
         tex->array_stride_64_byte_aligned = rsc->cube_map_stride / 64;
+
+#if V3D_VERSION >= 71
+        tex->chroma_offset_x = 1;
+        tex->chroma_offset_y = 1;
+        /* See comment in XML field definition for rationale of the shifts */
+        tex->texture_base_pointer_cb = base_offset >> 6;
+        tex->texture_base_pointer_cr = base_offset >> 6;
+#endif
 
         /* Since other platform devices may produce UIF images even
          * when they're not big enough for V3D to assume they're UIF,
@@ -920,15 +978,13 @@ v3d_setup_texture_shader_state(struct V3DX(TEXTURE_SHADER_STATE) *tex,
                  rsc->slices[0].tiling == V3D_TILING_UIF_NO_XOR);
         tex->level_0_xor_enable = (rsc->slices[0].tiling == V3D_TILING_UIF_XOR);
 
-        if (tex->level_0_is_strictly_uif)
+        /* If we ever set tex.uif_xor_disable we also need to flag
+         * tex.extended here.
+         */
+        if (tex->level_0_is_strictly_uif) {
                 tex->level_0_ub_pad = rsc->slices[0].ub_pad;
-
-#if V3D_VERSION >= 40
-        if (tex->uif_xor_disable ||
-            tex->level_0_is_strictly_uif) {
                 tex->extended = true;
         }
-#endif /* V3D_VERSION >= 40 */
 }
 
 void
@@ -944,24 +1000,19 @@ v3dX(create_texture_shader_state_bo)(struct v3d_context *v3d,
 
         assert(so->serial_id != rsc->serial_id);
 
-#if V3D_VERSION >= 40
-        v3d_bo_unreference(&so->bo);
-        so->bo = v3d_bo_alloc(v3d->screen,
-                              cl_packet_length(TEXTURE_SHADER_STATE), "sampler");
-        map = v3d_bo_map(so->bo);
-#else /* V3D_VERSION < 40 */
-        STATIC_ASSERT(sizeof(so->texture_shader_state) >=
-                      cl_packet_length(TEXTURE_SHADER_STATE));
-        map = &so->texture_shader_state;
-#endif
+        u_upload_alloc_ref(v3d->state_uploader, 0,
+                           cl_packet_length(TEXTURE_SHADER_STATE), 32,
+                           &so->tex_state_offset, &so->tex_state, &map);
 
         v3dx_pack(map, TEXTURE_SHADER_STATE, tex) {
                 if (prsc->target != PIPE_BUFFER) {
-                        v3d_setup_texture_shader_state(&tex, prsc,
+                        v3d_setup_texture_shader_state(&v3d->screen->devinfo,
+                                                       &tex, prsc,
                                                        cso->u.tex.first_level,
                                                        cso->u.tex.last_level,
                                                        cso->u.tex.first_layer,
-                                                       cso->u.tex.last_layer);
+                                                       cso->u.tex.last_layer,
+                                                       cso->target == PIPE_TEXTURE_CUBE_ARRAY);
                 } else {
                         v3d_setup_texture_shader_state_from_buffer(&tex, prsc,
                                                                    cso->format,
@@ -969,62 +1020,21 @@ v3dX(create_texture_shader_state_bo)(struct v3d_context *v3d,
                                                                    cso->u.buf.size);
                 }
 
-                tex.srgb = util_format_is_srgb(cso->format);
+                bool is_srgb = util_format_is_srgb(cso->format);
+#if V3D_VERSION == 42
+                tex.srgb = is_srgb;
+#endif
+#if V3D_VERSION >= 71
+                tex.transfer_func = is_srgb ? TRANSFER_FUNC_SRGB : TRANSFER_FUNC_NONE;
+#endif
 
-#if V3D_VERSION >= 40
                 tex.swizzle_r = v3d_translate_pipe_swizzle(so->swizzle[0]);
                 tex.swizzle_g = v3d_translate_pipe_swizzle(so->swizzle[1]);
                 tex.swizzle_b = v3d_translate_pipe_swizzle(so->swizzle[2]);
                 tex.swizzle_a = v3d_translate_pipe_swizzle(so->swizzle[3]);
-#endif
 
-                if (prsc->nr_samples > 1 && V3D_VERSION < 40) {
-                        /* Using texture views to reinterpret formats on our
-                         * MSAA textures won't work, because we don't lay out
-                         * the bits in memory as it's expected -- for example,
-                         * RGBA8 and RGB10_A2 are compatible in the
-                         * ARB_texture_view spec, but in HW we lay them out as
-                         * 32bpp RGBA8 and 64bpp RGBA16F.  Just assert for now
-                         * to catch failures.
-                         *
-                         * We explicitly allow remapping S8Z24 to RGBA8888 for
-                         * v3d_blit.c's stencil blits.
-                         */
-                        assert((util_format_linear(cso->format) ==
-                                util_format_linear(prsc->format)) ||
-                               (prsc->format == PIPE_FORMAT_S8_UINT_Z24_UNORM &&
-                                cso->format == PIPE_FORMAT_R8G8B8A8_UNORM));
-                        uint32_t output_image_format =
-                                v3d_get_rt_format(&screen->devinfo, cso->format);
-                        uint32_t internal_type;
-                        uint32_t internal_bpp;
-                        v3d_get_internal_type_bpp_for_output_format(&screen->devinfo,
-                                                                    output_image_format,
-                                                                    &internal_type,
-                                                                    &internal_bpp);
-
-                        switch (internal_type) {
-                        case V3D_INTERNAL_TYPE_8:
-                                tex.texture_type = TEXTURE_DATA_FORMAT_RGBA8;
-                                break;
-                        case V3D_INTERNAL_TYPE_16F:
-                                tex.texture_type = TEXTURE_DATA_FORMAT_RGBA16F;
-                                break;
-                        default:
-                                unreachable("Bad MSAA texture type");
-                        }
-
-                        /* sRGB was stored in the tile buffer as linear and
-                         * would have been encoded to sRGB on resolved tile
-                         * buffer store.  Note that this means we would need
-                         * shader code if we wanted to read an MSAA sRGB
-                         * texture without sRGB decode.
-                         */
-                        tex.srgb = false;
-                } else {
-                        tex.texture_type = v3d_get_tex_format(&screen->devinfo,
-                                                              cso->format);
-                }
+                tex.texture_type = v3d_get_tex_format(&screen->devinfo,
+                                                      cso->format);
         };
 
         so->serial_id = rsc->serial_id;
@@ -1078,7 +1088,6 @@ v3d_create_sampler_view(struct pipe_context *pctx, struct pipe_resource *prsc,
         if (sample_format == PIPE_FORMAT_S8_UINT_Z24_UNORM)
                 sample_format = PIPE_FORMAT_X8Z24_UNORM;
 
-#if V3D_VERSION >= 40
         const struct util_format_description *desc =
                 util_format_description(sample_format);
 
@@ -1114,8 +1123,7 @@ v3d_create_sampler_view(struct pipe_context *pctx, struct pipe_resource *prsc,
                         }
                 }
         } else {
-                if (v3d_get_tex_return_size(&screen->devinfo, sample_format,
-                                           PIPE_TEX_COMPARE_NONE) == 32) {
+                if (v3d_get_tex_return_size(&screen->devinfo, sample_format) == 32) {
                         if (util_format_is_alpha(sample_format))
                                 so->sampler_variant = V3D_SAMPLER_STATE_32_A;
                         else
@@ -1140,7 +1148,6 @@ v3d_create_sampler_view(struct pipe_context *pctx, struct pipe_resource *prsc,
                                                 V3D_SAMPLER_STATE_F16);
                 }
         }
-#endif
 
         /* V3D still doesn't support sampling from raster textures, so we will
          * have to copy to a temporary tiled texture.
@@ -1168,6 +1175,7 @@ v3d_create_sampler_view(struct pipe_context *pctx, struct pipe_resource *prsc,
                  */
                 prsc = v3d_resource_create(pctx->screen, &tmpl);
                 if (!prsc) {
+                        pipe_resource_reference(&so->base.texture, NULL);
                         free(so);
                         return NULL;
                 }
@@ -1182,7 +1190,7 @@ v3d_create_sampler_view(struct pipe_context *pctx, struct pipe_resource *prsc,
                 pipe_resource_reference(&so->texture, prsc);
         }
 
-        v3d_create_texture_shader_state_bo(v3d, so);
+        v3dX(create_texture_shader_state_bo)(v3d, so);
 
         return &so->base;
 }
@@ -1193,7 +1201,7 @@ v3d_sampler_view_destroy(struct pipe_context *pctx,
 {
         struct v3d_sampler_view *sview = v3d_sampler_view(psview);
 
-        v3d_bo_unreference(&sview->bo);
+        pipe_resource_reference(&sview->tex_state, NULL);
         pipe_resource_reference(&psview->texture, NULL);
         pipe_resource_reference(&sview->texture, NULL);
         free(psview);
@@ -1201,10 +1209,9 @@ v3d_sampler_view_destroy(struct pipe_context *pctx,
 
 static void
 v3d_set_sampler_views(struct pipe_context *pctx,
-                      enum pipe_shader_type shader,
+                      mesa_shader_stage shader,
                       unsigned start, unsigned nr,
                       unsigned unbind_num_trailing_slots,
-                      bool take_ownership,
                       struct pipe_sampler_view **views)
 {
         struct v3d_context *v3d = v3d_context(pctx);
@@ -1217,12 +1224,7 @@ v3d_set_sampler_views(struct pipe_context *pctx,
         for (i = 0; i < nr; i++) {
                 if (views[i])
                         new_nr = i + 1;
-                if (take_ownership) {
-                        pipe_sampler_view_reference(&stage_tex->textures[i], NULL);
-                        stage_tex->textures[i] = views[i];
-                } else {
-                        pipe_sampler_view_reference(&stage_tex->textures[i], views[i]);
-                }
+                pipe_sampler_view_reference(&stage_tex->textures[i], views[i]);
                 /* If our sampler serial doesn't match our texture serial it
                  * means the texture has been updated with a new BO, in which
                  * case we need to update the sampler state to point to the
@@ -1233,7 +1235,7 @@ v3d_set_sampler_views(struct pipe_context *pctx,
                                 v3d_sampler_view(stage_tex->textures[i]);
                         struct v3d_resource *rsc = v3d_resource(so->texture);
                         if (so->serial_id != rsc->serial_id)
-                                v3d_create_texture_shader_state_bo(v3d, so);
+                                v3dX(create_texture_shader_state_bo)(v3d, so);
                 }
         }
 
@@ -1280,7 +1282,8 @@ static void
 v3d_set_stream_output_targets(struct pipe_context *pctx,
                               unsigned num_targets,
                               struct pipe_stream_output_target **targets,
-                              const unsigned *offsets)
+                              const unsigned *offsets,
+                              enum mesa_prim output_prim)
 {
         struct v3d_context *ctx = v3d_context(pctx);
         struct v3d_streamout_stateobj *so = &ctx->streamout;
@@ -1296,9 +1299,12 @@ v3d_set_stream_output_targets(struct pipe_context *pctx,
         if (num_targets == 0 && so->num_targets > 0)
                 v3d_update_primitive_counters(ctx);
 
+        /* If offset is (unsigned) -1, it means continue appending to the
+         * buffer at the existing offset.
+         */
         for (i = 0; i < num_targets; i++) {
-                if (offsets[i] != -1)
-                        so->offsets[i] = offsets[i];
+                if (offsets[i] != (unsigned)-1)
+                        v3d_stream_output_target(targets[i])->offset = offsets[i];
 
                 pipe_so_target_reference(&so->targets[i], targets[i]);
         }
@@ -1317,14 +1323,13 @@ v3d_set_stream_output_targets(struct pipe_context *pctx,
 
 static void
 v3d_set_shader_buffers(struct pipe_context *pctx,
-                       enum pipe_shader_type shader,
+                       mesa_shader_stage shader,
                        unsigned start, unsigned count,
                        const struct pipe_shader_buffer *buffers,
                        unsigned writable_bitmask)
 {
         struct v3d_context *v3d = v3d_context(pctx);
         struct v3d_ssbo_stateobj *so = &v3d->ssbo[shader];
-        unsigned mask = 0;
 
         if (buffers) {
                 for (unsigned i = 0; i < count; i++) {
@@ -1336,20 +1341,16 @@ v3d_set_shader_buffers(struct pipe_context *pctx,
                             (buf->buffer_size == buffers[i].buffer_size))
                                 continue;
 
-                        mask |= 1 << n;
-
                         buf->buffer_offset = buffers[i].buffer_offset;
                         buf->buffer_size = buffers[i].buffer_size;
                         pipe_resource_reference(&buf->buffer, buffers[i].buffer);
 
                         if (buf->buffer)
-                                so->enabled_mask |= 1 << n;
+                                BITSET_SET(so->enabled_mask, n);
                         else
-                                so->enabled_mask &= ~(1 << n);
+                                BITSET_CLEAR(so->enabled_mask, n);
                 }
         } else {
-                mask = ((1 << count) - 1) << start;
-
                 for (unsigned i = 0; i < count; i++) {
                         unsigned n = i + start;
                         struct pipe_shader_buffer *buf = &so->sb[n];
@@ -1357,7 +1358,7 @@ v3d_set_shader_buffers(struct pipe_context *pctx,
                         pipe_resource_reference(&buf->buffer, NULL);
                 }
 
-                so->enabled_mask &= ~mask;
+                BITSET_CLEAR_RANGE(so->enabled_mask, start, start + count);
         }
 
         v3d->dirty |= V3D_DIRTY_SSBO;
@@ -1368,25 +1369,24 @@ v3d_create_image_view_texture_shader_state(struct v3d_context *v3d,
                                            struct v3d_shaderimg_stateobj *so,
                                            int img)
 {
-#if V3D_VERSION >= 40
         struct v3d_image_view *iview = &so->si[img];
 
         void *map;
-        u_upload_alloc(v3d->uploader, 0, cl_packet_length(TEXTURE_SHADER_STATE),
-                       32,
-                       &iview->tex_state_offset,
-                       &iview->tex_state,
-                       &map);
+        u_upload_alloc_ref(v3d->state_uploader, 0,
+                           cl_packet_length(TEXTURE_SHADER_STATE), 32,
+                           &iview->tex_state_offset, &iview->tex_state, &map);
 
         struct pipe_resource *prsc = iview->base.resource;
 
         v3dx_pack(map, TEXTURE_SHADER_STATE, tex) {
                 if (prsc->target != PIPE_BUFFER) {
-                        v3d_setup_texture_shader_state(&tex, prsc,
+                        v3d_setup_texture_shader_state(&v3d->screen->devinfo,
+                                                       &tex, prsc,
                                                        iview->base.u.tex.level,
                                                        iview->base.u.tex.level,
                                                        iview->base.u.tex.first_layer,
-                                                       iview->base.u.tex.last_layer);
+                                                       iview->base.u.tex.last_layer,
+                                                       false);
                 } else {
                         v3d_setup_texture_shader_state_from_buffer(&tex, prsc,
                                                                    iview->base.format,
@@ -1402,17 +1402,11 @@ v3d_create_image_view_texture_shader_state(struct v3d_context *v3d,
                 tex.texture_type = v3d_get_tex_format(&v3d->screen->devinfo,
                                                       iview->base.format);
         };
-#else /* V3D_VERSION < 40 */
-        /* V3D 3.x doesn't use support shader image load/store operations on
-         * textures, so it would get lowered in the shader to general memory
-         * acceses.
-         */
-#endif
 }
 
 static void
 v3d_set_shader_images(struct pipe_context *pctx,
-                      enum pipe_shader_type shader,
+                      mesa_shader_stage shader,
                       unsigned start, unsigned count,
                       unsigned unbind_num_trailing_slots,
                       const struct pipe_image_view *images)
@@ -1435,12 +1429,12 @@ v3d_set_shader_images(struct pipe_context *pctx,
                         util_copy_image_view(&iview->base, &images[i]);
 
                         if (iview->base.resource) {
-                                so->enabled_mask |= 1 << n;
+                                BITSET_SET(so->enabled_mask, n);
                                 v3d_create_image_view_texture_shader_state(v3d,
                                                                            so,
                                                                            n);
                         } else {
-                                so->enabled_mask &= ~(1 << n);
+                                BITSET_CLEAR(so->enabled_mask, n);
                                 pipe_resource_reference(&iview->tex_state, NULL);
                         }
                 }
@@ -1453,10 +1447,7 @@ v3d_set_shader_images(struct pipe_context *pctx,
                         pipe_resource_reference(&iview->tex_state, NULL);
                 }
 
-                if (count == 32)
-                        so->enabled_mask = 0;
-                else
-                        so->enabled_mask &= ~(((1 << count) - 1) << start);
+                BITSET_CLEAR_RANGE(so->enabled_mask, start, start + count);
         }
 
         v3d->dirty |= V3D_DIRTY_SHADER_IMAGE;
@@ -1472,7 +1463,6 @@ v3dX(state_init)(struct pipe_context *pctx)
 {
         pctx->set_blend_color = v3d_set_blend_color;
         pctx->set_stencil_ref = v3d_set_stencil_ref;
-        pctx->set_clip_state = v3d_set_clip_state;
         pctx->set_sample_mask = v3d_set_sample_mask;
         pctx->set_constant_buffer = v3d_set_constant_buffer;
         pctx->set_framebuffer_state = v3d_set_framebuffer_state;
@@ -1504,6 +1494,8 @@ v3dX(state_init)(struct pipe_context *pctx)
 
         pctx->create_sampler_view = v3d_create_sampler_view;
         pctx->sampler_view_destroy = v3d_sampler_view_destroy;
+        pctx->sampler_view_release = u_default_sampler_view_release;
+        pctx->resource_release = u_default_resource_release;
         pctx->set_sampler_views = v3d_set_sampler_views;
 
         pctx->set_shader_buffers = v3d_set_shader_buffers;

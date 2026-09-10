@@ -20,7 +20,7 @@
 #ifndef _DMA_BUF_UAPI_H_
 #define _DMA_BUF_UAPI_H_
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__managarm__)
 
 #include <linux/types.h>
 
@@ -192,8 +192,8 @@ struct dma_buf_import_sync_file {
  * between them in actual uapi, they're just different numbers.
  */
 #define DMA_BUF_SET_NAME	_IOW(DMA_BUF_BASE, 1, const char *)
-#define DMA_BUF_SET_NAME_A	_IOW(DMA_BUF_BASE, 1, u32)
-#define DMA_BUF_SET_NAME_B	_IOW(DMA_BUF_BASE, 1, u64)
+#define DMA_BUF_SET_NAME_A	_IOW(DMA_BUF_BASE, 1, __u32)
+#define DMA_BUF_SET_NAME_B	_IOW(DMA_BUF_BASE, 1, __u64)
 #define DMA_BUF_IOCTL_EXPORT_SYNC_FILE	_IOWR(DMA_BUF_BASE, 2, struct dma_buf_export_sync_file)
 #define DMA_BUF_IOCTL_IMPORT_SYNC_FILE	_IOW(DMA_BUF_BASE, 3, struct dma_buf_import_sync_file)
 

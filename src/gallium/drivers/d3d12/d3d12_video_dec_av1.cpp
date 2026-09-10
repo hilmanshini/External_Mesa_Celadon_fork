@@ -57,7 +57,7 @@ d3d12_video_decoder_refresh_dpb_active_references_av1(struct d3d12_video_decoder
 
 void
 d3d12_video_decoder_get_frame_info_av1(
-   struct d3d12_video_decoder *pD3D12Dec, uint32_t *pWidth, uint32_t *pHeight, uint16_t *pMaxDPB, bool &isInterlaced)
+   struct d3d12_video_decoder *pD3D12Dec, uint32_t *pWidth, uint32_t *pHeight, uint16_t *pMaxDPB)
 {
    auto pPicParams = d3d12_video_decoder_get_current_dxva_picparams<DXVA_PicParams_AV1>(pD3D12Dec);
    /* width, height
@@ -75,7 +75,6 @@ d3d12_video_decoder_get_frame_info_av1(
       Each frame may pick up to 7 reference frames (frame_refs[]) from the pool to use for inter prediction of the current frame. 
    */
    *pMaxDPB = 8 + 1 /*current picture*/;
-   isInterlaced = false;
 }
 
 void
@@ -84,15 +83,15 @@ d3d12_video_decoder_prepare_current_frame_references_av1(struct d3d12_video_deco
                                                           uint32_t subresourceIndex)
 {
    DXVA_PicParams_AV1 *pPicParams = d3d12_video_decoder_get_current_dxva_picparams<DXVA_PicParams_AV1>(pD3D12Dec);
-   pPicParams->CurrPicTextureIndex = pD3D12Dec->m_spDPBManager->store_future_reference(pPicParams->CurrPicTextureIndex,
-                                                                                      pD3D12Dec->m_spVideoDecoderHeap,
-                                                                                      pTexture2D,
-                                                                                      subresourceIndex);
+   pPicParams->CurrPicTextureIndex = static_cast<uint8_t>(pD3D12Dec->m_spDPBManager->store_future_reference(pPicParams->CurrPicTextureIndex,
+                                                                                                            pD3D12Dec->m_spVideoDecoderHeap,
+                                                                                                            pTexture2D,
+                                                                                                            subresourceIndex));
    pD3D12Dec->m_spDPBManager->update_entries_av1(
       d3d12_video_decoder_get_current_dxva_picparams<DXVA_PicParams_AV1>(pD3D12Dec)->RefFrameMapTextureIndex,
       pD3D12Dec->m_transitionsStorage);
 
-   pD3D12Dec->m_spDecodeCommandList->ResourceBarrier(pD3D12Dec->m_transitionsStorage.size(), pD3D12Dec->m_transitionsStorage.data());
+   pD3D12Dec->m_spDecodeCommandList->ResourceBarrier(static_cast<UINT>(pD3D12Dec->m_transitionsStorage.size()), pD3D12Dec->m_transitionsStorage.data());
 
    // Schedule reverse (back to common) transitions before command list closes for current frame
    for (auto BarrierDesc : pD3D12Dec->m_transitionsStorage) {
@@ -333,7 +332,7 @@ d3d12_video_decoder_prepare_dxva_slices_control_av1(struct d3d12_video_decoder *
    debug_printf("[d3d12_video_decoder_av1] Upper layer reported %d tiles for this frame, parsing them below...\n",
                   tileCount);
 
-   uint64_t totalSlicesDXVAArrayByteSize = tileCount * sizeof(DXVA_Tile_AV1);
+   size_t totalSlicesDXVAArrayByteSize = tileCount * sizeof(DXVA_Tile_AV1);
    vecOutSliceControlBuffers.resize(totalSlicesDXVAArrayByteSize);
 
    uint8_t* pData = vecOutSliceControlBuffers.data();
@@ -344,13 +343,15 @@ d3d12_video_decoder_prepare_dxva_slices_control_av1(struct d3d12_video_decoder *
       currentTileEntry.DataSize     = picture_av1->slice_parameter.slice_data_size[tileIdx];
       currentTileEntry.row          = picture_av1->slice_parameter.slice_data_row[tileIdx];
       currentTileEntry.column       = picture_av1->slice_parameter.slice_data_col[tileIdx];
-      currentTileEntry.anchor_frame = picture_av1->slice_parameter.slice_data_anchor_frame_idx[tileIdx];
+      // From va_dec_av1.h `anchor_frame_idx` valid only when large_scale_tile equals 1.
+      currentTileEntry.anchor_frame = (picture_av1->picture_parameter.pic_info_fields.large_scale_tile == 1) ? picture_av1->slice_parameter.slice_data_anchor_frame_idx[tileIdx] : 0xFF;
 
       debug_printf("[d3d12_video_decoder_av1] Detected tile index %" PRIu32
                   " with DataOffset %" PRIu32
                   " - DataSize %" PRIu32
                   " - row: %" PRIu16
                   " - col: %" PRIu16
+                  " - large_scale_tile: %" PRIu32
                   " - anchor_frame_idx: %" PRIu8
                   " for frame with "
                   "fenceValue: %d\n",
@@ -359,6 +360,7 @@ d3d12_video_decoder_prepare_dxva_slices_control_av1(struct d3d12_video_decoder *
                   currentTileEntry.DataSize,
                   currentTileEntry.row,
                   currentTileEntry.column,
+                  picture_av1->picture_parameter.pic_info_fields.large_scale_tile,
                   currentTileEntry.anchor_frame,
                   pD3D12Dec->m_fenceValue);
 
@@ -409,8 +411,8 @@ d3d12_video_decoder_dxva_picparams_from_pipe_picparams_av1(
          for (uint32_t i = 0; i < dxvaStructure.tiles.cols - 1u; i++)
             acumSbWMinusLast += dxvaStructure.tiles.widths[i];
 
-         dxvaStructure.tiles.widths[dxvaStructure.tiles.cols-1] =
-            std::ceil(pipe_av1->picture_parameter.frame_width / (float)sbPixSize) - acumSbWMinusLast;
+         dxvaStructure.tiles.widths[dxvaStructure.tiles.cols-1] = static_cast<uint16_t>(
+            std::ceil(pipe_av1->picture_parameter.frame_width / (float)sbPixSize) - acumSbWMinusLast);
       }
 
       if (dxvaStructure.tiles.rows > 1) {
@@ -418,8 +420,8 @@ d3d12_video_decoder_dxva_picparams_from_pipe_picparams_av1(
          for (uint32_t i = 0; i < dxvaStructure.tiles.rows - 1u; i++)
             acumSbHMinusLast += dxvaStructure.tiles.heights[i];
 
-         dxvaStructure.tiles.heights[dxvaStructure.tiles.rows-1] =
-            std::ceil(pipe_av1->picture_parameter.frame_width / (float)sbPixSize) - acumSbHMinusLast;
+         dxvaStructure.tiles.heights[dxvaStructure.tiles.rows-1] = static_cast<uint16_t>(
+            std::ceil(pipe_av1->picture_parameter.frame_width / (float)sbPixSize) - acumSbHMinusLast);
       }
    }
 

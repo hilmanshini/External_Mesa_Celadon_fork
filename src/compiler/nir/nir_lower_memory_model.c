@@ -27,7 +27,8 @@
  * ACCESS_COHERENT on memory loads/stores
  */
 
-#include "nir/nir.h"
+#include "nir.h"
+#include "nir_builder.h"
 #include "shader_enums.h"
 
 static bool
@@ -44,19 +45,8 @@ get_intrinsic_info(nir_intrinsic_instr *intrin, nir_variable_mode *modes,
       *modes = nir_src_as_deref(intrin->src[0])->modes;
       *writes = true;
       break;
-   case nir_intrinsic_image_deref_atomic_add:
-   case nir_intrinsic_image_deref_atomic_fadd:
-   case nir_intrinsic_image_deref_atomic_umin:
-   case nir_intrinsic_image_deref_atomic_imin:
-   case nir_intrinsic_image_deref_atomic_umax:
-   case nir_intrinsic_image_deref_atomic_imax:
-   case nir_intrinsic_image_deref_atomic_fmin:
-   case nir_intrinsic_image_deref_atomic_fmax:
-   case nir_intrinsic_image_deref_atomic_and:
-   case nir_intrinsic_image_deref_atomic_or:
-   case nir_intrinsic_image_deref_atomic_xor:
-   case nir_intrinsic_image_deref_atomic_exchange:
-   case nir_intrinsic_image_deref_atomic_comp_swap:
+   case nir_intrinsic_image_deref_atomic:
+   case nir_intrinsic_image_deref_atomic_swap:
       *modes = nir_src_as_deref(intrin->src[0])->modes;
       *reads = true;
       *writes = true;
@@ -69,25 +59,14 @@ get_intrinsic_info(nir_intrinsic_instr *intrin, nir_variable_mode *modes,
       *modes = nir_var_mem_ssbo;
       *writes = true;
       break;
-   case nir_intrinsic_ssbo_atomic_add:
-   case nir_intrinsic_ssbo_atomic_imin:
-   case nir_intrinsic_ssbo_atomic_umin:
-   case nir_intrinsic_ssbo_atomic_imax:
-   case nir_intrinsic_ssbo_atomic_umax:
-   case nir_intrinsic_ssbo_atomic_and:
-   case nir_intrinsic_ssbo_atomic_or:
-   case nir_intrinsic_ssbo_atomic_xor:
-   case nir_intrinsic_ssbo_atomic_exchange:
-   case nir_intrinsic_ssbo_atomic_comp_swap:
-   case nir_intrinsic_ssbo_atomic_fadd:
-   case nir_intrinsic_ssbo_atomic_fcomp_swap:
-   case nir_intrinsic_ssbo_atomic_fmax:
-   case nir_intrinsic_ssbo_atomic_fmin:
+   case nir_intrinsic_ssbo_atomic:
+   case nir_intrinsic_ssbo_atomic_swap:
       *modes = nir_var_mem_ssbo;
       *reads = true;
       *writes = true;
       break;
    case nir_intrinsic_load_global:
+   case nir_intrinsic_load_global_transpose_amd:
       *modes = nir_var_mem_global;
       *reads = true;
       break;
@@ -95,25 +74,14 @@ get_intrinsic_info(nir_intrinsic_instr *intrin, nir_variable_mode *modes,
       *modes = nir_var_mem_global;
       *writes = true;
       break;
-   case nir_intrinsic_global_atomic_add:
-   case nir_intrinsic_global_atomic_imin:
-   case nir_intrinsic_global_atomic_umin:
-   case nir_intrinsic_global_atomic_imax:
-   case nir_intrinsic_global_atomic_umax:
-   case nir_intrinsic_global_atomic_and:
-   case nir_intrinsic_global_atomic_or:
-   case nir_intrinsic_global_atomic_xor:
-   case nir_intrinsic_global_atomic_exchange:
-   case nir_intrinsic_global_atomic_comp_swap:
-   case nir_intrinsic_global_atomic_fadd:
-   case nir_intrinsic_global_atomic_fcomp_swap:
-   case nir_intrinsic_global_atomic_fmax:
-   case nir_intrinsic_global_atomic_fmin:
+   case nir_intrinsic_global_atomic:
+   case nir_intrinsic_global_atomic_swap:
       *modes = nir_var_mem_global;
       *reads = true;
       *writes = true;
       break;
    case nir_intrinsic_load_deref:
+   case nir_intrinsic_load_deref_transpose_amd:
       *modes = nir_src_as_deref(intrin->src[0])->modes;
       *reads = true;
       break;
@@ -121,20 +89,8 @@ get_intrinsic_info(nir_intrinsic_instr *intrin, nir_variable_mode *modes,
       *modes = nir_src_as_deref(intrin->src[0])->modes;
       *writes = true;
       break;
-   case nir_intrinsic_deref_atomic_add:
-   case nir_intrinsic_deref_atomic_imin:
-   case nir_intrinsic_deref_atomic_umin:
-   case nir_intrinsic_deref_atomic_imax:
-   case nir_intrinsic_deref_atomic_umax:
-   case nir_intrinsic_deref_atomic_and:
-   case nir_intrinsic_deref_atomic_or:
-   case nir_intrinsic_deref_atomic_xor:
-   case nir_intrinsic_deref_atomic_exchange:
-   case nir_intrinsic_deref_atomic_comp_swap:
-   case nir_intrinsic_deref_atomic_fadd:
-   case nir_intrinsic_deref_atomic_fmin:
-   case nir_intrinsic_deref_atomic_fmax:
-   case nir_intrinsic_deref_atomic_fcomp_swap:
+   case nir_intrinsic_deref_atomic:
+   case nir_intrinsic_deref_atomic_swap:
       *modes = nir_src_as_deref(intrin->src[0])->modes;
       *reads = true;
       *writes = true;
@@ -152,13 +108,22 @@ visit_instr(nir_instr *instr, uint32_t *cur_modes, unsigned vis_avail_sem)
       return false;
    nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
 
-   if (intrin->intrinsic == nir_intrinsic_scoped_barrier &&
+   if (intrin->intrinsic == nir_intrinsic_barrier &&
        (nir_intrinsic_memory_semantics(intrin) & vis_avail_sem)) {
       *cur_modes |= nir_intrinsic_memory_modes(intrin);
 
       unsigned semantics = nir_intrinsic_memory_semantics(intrin);
       nir_intrinsic_set_memory_semantics(
          intrin, semantics & ~vis_avail_sem);
+
+      bool is_split_control_barrier =
+         util_bitcount(semantics & NIR_MEMORY_CONTROL_ARRIVE_WAIT) == 1;
+      mesa_scope rm_scope = is_split_control_barrier ? SCOPE_NONE : SCOPE_INVOCATION;
+
+      if (nir_intrinsic_memory_semantics(intrin) == 0 &&
+          nir_intrinsic_execution_scope(intrin) <= rm_scope)
+         nir_instr_remove(instr);
+
       return true;
    }
 
@@ -198,7 +163,7 @@ lower_make_visible(nir_cf_node *cf_node, uint32_t *cur_modes)
    switch (cf_node->type) {
    case nir_cf_node_block: {
       nir_block *block = nir_cf_node_as_block(cf_node);
-      nir_foreach_instr(instr, block)
+      nir_foreach_instr_safe(instr, block)
          progress |= visit_instr(instr, cur_modes, NIR_MEMORY_MAKE_VISIBLE);
       break;
    }
@@ -215,6 +180,7 @@ lower_make_visible(nir_cf_node *cf_node, uint32_t *cur_modes)
    }
    case nir_cf_node_loop: {
       nir_loop *loop = nir_cf_node_as_loop(cf_node);
+      assert(!nir_loop_has_continue_construct(loop));
       bool loop_progress;
       do {
          loop_progress = false;
@@ -225,7 +191,7 @@ lower_make_visible(nir_cf_node *cf_node, uint32_t *cur_modes)
       break;
    }
    case nir_cf_node_function:
-      unreachable("Invalid cf type");
+      UNREACHABLE("Invalid cf type");
    }
    return progress;
 }
@@ -237,7 +203,7 @@ lower_make_available(nir_cf_node *cf_node, uint32_t *cur_modes)
    switch (cf_node->type) {
    case nir_cf_node_block: {
       nir_block *block = nir_cf_node_as_block(cf_node);
-      nir_foreach_instr_reverse(instr, block)
+      nir_foreach_instr_reverse_safe(instr, block)
          progress |= visit_instr(instr, cur_modes, NIR_MEMORY_MAKE_AVAILABLE);
       break;
    }
@@ -254,6 +220,7 @@ lower_make_available(nir_cf_node *cf_node, uint32_t *cur_modes)
    }
    case nir_cf_node_loop: {
       nir_loop *loop = nir_cf_node_as_loop(cf_node);
+      assert(!nir_loop_has_continue_construct(loop));
       bool loop_progress;
       do {
          loop_progress = false;
@@ -264,7 +231,7 @@ lower_make_available(nir_cf_node *cf_node, uint32_t *cur_modes)
       break;
    }
    case nir_cf_node_function:
-      unreachable("Invalid cf type");
+      UNREACHABLE("Invalid cf type");
    }
    return progress;
 }
@@ -274,21 +241,123 @@ nir_lower_memory_model(nir_shader *shader)
 {
    bool progress = false;
 
-   nir_function_impl *impl = nir_shader_get_entrypoint(shader);
-   struct exec_list *cf_list = &impl->body;
+   nir_foreach_function_impl(impl, shader) {
+      bool impl_progress = false;
+      struct exec_list *cf_list = &impl->body;
 
-   uint32_t modes = 0;
-   foreach_list_typed(nir_cf_node, cf_node, node, cf_list)
-      progress |= lower_make_visible(cf_node, &modes);
+      uint32_t modes = 0;
+      foreach_list_typed(nir_cf_node, cf_node, node, cf_list)
+         impl_progress |= lower_make_visible(cf_node, &modes);
 
-   modes = 0;
-   foreach_list_typed_reverse(nir_cf_node, cf_node, node, cf_list)
-      progress |= lower_make_available(cf_node, &modes);
-
-   if (progress)
-      nir_metadata_preserve(impl, nir_metadata_block_index | nir_metadata_dominance);
-   else
-      nir_metadata_preserve(impl, nir_metadata_all);
+      modes = 0;
+      foreach_list_typed_reverse(nir_cf_node, cf_node, node, cf_list)
+         impl_progress |= lower_make_available(cf_node, &modes);
+      progress |= nir_progress(impl_progress, impl,
+                               nir_metadata_control_flow);
+   }
 
    return progress;
+}
+
+static void
+nir_lower_disordered_control_barriers_impl(nir_function_impl *impl,
+                                           nir_variable *barrier_arrive_without_wait,
+                                           nir_variable *skip_next_barrier_wait)
+{
+   nir_builder b = nir_builder_create(impl);
+   nir_foreach_block_safe(block, impl) {
+      nir_foreach_instr_safe(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
+         if (intrin->intrinsic != nir_intrinsic_barrier ||
+             nir_intrinsic_execution_scope(intrin) != SCOPE_WORKGROUP)
+            continue;
+
+         b.cursor = nir_before_instr(instr);
+
+         unsigned semantics =
+            nir_intrinsic_memory_semantics(intrin) & NIR_MEMORY_CONTROL_ARRIVE_WAIT;
+         if (semantics == NIR_MEMORY_CONTROL_ARRIVE) {
+            nir_store_var(&b, barrier_arrive_without_wait, nir_imm_true(&b), 0x1);
+         } else if (semantics == NIR_MEMORY_CONTROL_WAIT) {
+            nir_push_if(&b, nir_load_var(&b, skip_next_barrier_wait));
+            nir_barrier(&b, .execution_scope = SCOPE_NONE,
+                        .memory_scope = nir_intrinsic_memory_scope(intrin),
+                        .memory_semantics = nir_intrinsic_memory_semantics(intrin) & ~semantics,
+                        .memory_modes = nir_intrinsic_memory_modes(intrin));
+            nir_push_else(&b, NULL);
+            nir_instr_move(b.cursor, instr);
+            nir_pop_if(&b, NULL);
+            nir_store_var(&b, skip_next_barrier_wait, nir_imm_false(&b), 0x1);
+            nir_store_var(&b, barrier_arrive_without_wait, nir_imm_false(&b), 0x1);
+         } else {
+            nir_push_if(&b, nir_load_var(&b, barrier_arrive_without_wait));
+            nir_barrier(&b, .execution_scope = SCOPE_WORKGROUP, .memory_scope = SCOPE_NONE,
+                        .memory_semantics = NIR_MEMORY_CONTROL_WAIT, .memory_modes = 0);
+            nir_store_var(&b, skip_next_barrier_wait, nir_imm_true(&b), 0x1);
+            nir_pop_if(&b, NULL);
+            nir_store_var(&b, barrier_arrive_without_wait, nir_imm_false(&b), 0x1);
+         }
+      }
+   }
+
+   nir_progress(true, impl, nir_metadata_none);
+}
+
+/*
+ * Oddly, VK_EXT_shader_split_barrier disallows a
+ * ControlBarrierArrive/ControlBarrierWait in-between the two instructions,
+ * but it allows a ControlBarrier. If a backend implements workgroup-scope
+ * ControlBarrier as ControlBarrierArrive/ControlBarrierWait, this situation
+ * would be invalid.
+ *
+ * This pass fixes this by lowering:
+ *    ControlBarrierArrive
+ *    ControlBarrier
+ *    ControlBarrierWait
+ * to:
+ *    ControlBarrierArrive
+ *    ControlBarrierWait
+ *    ControlBarrier
+ *    MemoryBarrier
+ * if the control barriers involved are workgroup-scope. This works because
+ * the wait for the ControlBarrierWait in the original code would not be
+ * necessary because of the ControlBarrier in-between.
+ *
+ * This pass also ensures that any workgroup-scope ControlBarrierArrive is
+ * eventually followed by a ControlBarrierWait.
+ *
+ * nir_lower_global_vars_to_local() and nir_lower_vars_to_ssa() should be run
+ * after this pass, if it makes progress. It also assumes returns are lowered.
+ */
+bool
+nir_lower_disordered_control_barriers(nir_shader *shader)
+{
+   if (shader->info.stage != MESA_SHADER_COMPUTE ||
+       !shader->info.cs.has_split_control_barriers)
+      return false;
+
+   nir_variable *barrier_arrive_without_wait =
+      nir_variable_create(shader, nir_var_shader_temp, glsl_bool_type(), "barrier_arrive_without_wait");
+   nir_variable *skip_next_barrier_wait =
+      nir_variable_create(shader, nir_var_shader_temp, glsl_bool_type(), "skip_next_barrier_wait");
+
+   nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+   nir_builder b = nir_builder_at(nir_before_impl(impl));
+   nir_store_var(&b, barrier_arrive_without_wait, nir_imm_false(&b), 0x1);
+   nir_store_var(&b, skip_next_barrier_wait, nir_imm_false(&b), 0x1);
+
+   nir_foreach_function_impl(impl, shader) {
+      nir_lower_disordered_control_barriers_impl(
+         impl, barrier_arrive_without_wait, skip_next_barrier_wait);
+   }
+
+   b.cursor = nir_after_impl(impl);
+   nir_push_if(&b, nir_load_var(&b, barrier_arrive_without_wait));
+   nir_barrier(&b, .execution_scope = SCOPE_WORKGROUP, .memory_scope = SCOPE_NONE,
+               .memory_semantics = NIR_MEMORY_CONTROL_WAIT, .memory_modes = 0);
+   nir_pop_if(&b, NULL);
+
+   return true;
 }

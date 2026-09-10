@@ -30,7 +30,6 @@
 
 #include "pipe/p_context.h"
 #include "pipe/p_defines.h"
-#include "pipe/p_shader_tokens.h"
 #include "pipe/p_state.h"
 #include "pipe/p_screen.h"
 #include "util/compiler.h"
@@ -39,7 +38,8 @@
 #include "util/u_debug_describe.h"
 #include "util/u_debug_refcnt.h"
 #include "util/u_atomic.h"
-#include "util/u_box.h"
+#include "util/u_upload_mgr.h"
+#include "util/box.h"
 #include "util/u_math.h"
 
 
@@ -59,7 +59,7 @@ pipe_reference_init(struct pipe_reference *dst, unsigned count)
    dst->count = count;
 }
 
-static inline boolean
+static inline bool
 pipe_is_referenced(struct pipe_reference *src)
 {
    return p_atomic_read(&src->count) != 0;
@@ -71,7 +71,7 @@ pipe_is_referenced(struct pipe_reference *src)
  * Both 'dst' and 'src' may be NULL.
  * \return TRUE if the object's refcount hits zero and should be destroyed.
  */
-static inline boolean
+static inline bool
 pipe_reference_described(struct pipe_reference *dst,
                          struct pipe_reference *src,
                          debug_reference_descriptor get_desc)
@@ -79,13 +79,13 @@ pipe_reference_described(struct pipe_reference *dst,
    if (dst != src) {
       /* bump the src.count first */
       if (src) {
-         ASSERTED int count = p_atomic_inc_return(&src->count);
+         ASSERTED int64_t count = p_atomic_inc_return(&src->count);
          assert(count != 1); /* src had to be referenced */
          debug_reference(src, get_desc, 1);
       }
 
       if (dst) {
-         int count = p_atomic_dec_return(&dst->count);
+         int64_t count = p_atomic_dec_return(&dst->count);
          assert(count != -1); /* dst had to be referenced */
          debug_reference(dst, get_desc, -1);
          if (!count)
@@ -96,7 +96,38 @@ pipe_reference_described(struct pipe_reference *dst,
    return false;
 }
 
-static inline boolean
+/**
+ * Update reference counting.
+ * The old thing pointed to, if any, will be unreferenced.
+ * Both 'dst' and 'src' may be NULL.
+ * \return TRUE if the object's refcount hits zero and should be destroyed.
+ */
+static inline bool
+pipe_reference_described_nonatomic(struct pipe_reference *dst,
+                                   struct pipe_reference *src,
+                                   debug_reference_descriptor get_desc)
+{
+   if (dst != src) {
+      /* bump the src.count first */
+      if (src) {
+         ASSERTED int64_t count = ++src->count;
+         assert(count != 1); /* src had to be referenced */
+         debug_reference(src, get_desc, 1);
+      }
+
+      if (dst) {
+         int64_t count = --dst->count;
+         assert(count != -1); /* dst had to be referenced */
+         debug_reference(dst, get_desc, -1);
+         if (!count)
+            return true;
+      }
+   }
+
+   return false;
+}
+
+static inline bool
 pipe_reference(struct pipe_reference *dst, struct pipe_reference *src)
 {
    return pipe_reference_described(dst, src,
@@ -104,8 +135,13 @@ pipe_reference(struct pipe_reference *dst, struct pipe_reference *src)
                                    debug_describe_reference);
 }
 
+/* TODO: delete surface refcounting functions */
+typedef void (*pipe_surface_destroy_func)(struct pipe_context*, struct pipe_surface*);
+
 static inline void
-pipe_surface_reference(struct pipe_surface **dst, struct pipe_surface *src)
+pipe_surface_reference(struct pipe_surface **dst, struct pipe_surface *src,
+                       struct pipe_context *pipe,
+                       pipe_surface_destroy_func surface_destroy)
 {
    struct pipe_surface *old_dst = *dst;
 
@@ -113,7 +149,7 @@ pipe_surface_reference(struct pipe_surface **dst, struct pipe_surface *src)
                                 src ? &src->reference : NULL,
                                 (debug_reference_descriptor)
                                 debug_describe_surface))
-      old_dst->context->surface_destroy(old_dst->context, old_dst);
+      surface_destroy(pipe, old_dst);
    *dst = src;
 }
 
@@ -124,14 +160,16 @@ pipe_surface_reference(struct pipe_surface **dst, struct pipe_surface *src)
  * that's shared by multiple contexts.
  */
 static inline void
-pipe_surface_release(struct pipe_context *pipe, struct pipe_surface **ptr)
+pipe_surface_unref(struct pipe_context *pipe, struct pipe_surface **ptr,
+                   pipe_surface_destroy_func surface_destroy)
 {
    struct pipe_surface *old = *ptr;
 
-   if (pipe_reference_described(&old->reference, NULL,
+   if (pipe_reference_described(old ? &old->reference : NULL,
+                                NULL,
                                 (debug_reference_descriptor)
                                 debug_describe_surface))
-      pipe->surface_destroy(pipe, old);
+      surface_destroy(pipe, old);
    *ptr = NULL;
 }
 
@@ -164,37 +202,31 @@ pipe_resource_reference(struct pipe_resource **dst, struct pipe_resource *src)
    *dst = src;
 }
 
+static inline void
+pipe_resource_release(struct pipe_context *pipe, struct pipe_resource *resource)
+{
+   if (resource)
+      pipe->resource_release(pipe, resource);
+}
+
+static inline void
+u_default_resource_release(struct pipe_context *pipe, struct pipe_resource *pres)
+{
+   pipe_resource_reference(&pres, NULL);
+}
+
 /**
  * Subtract the given number of references.
  */
 static inline void
 pipe_drop_resource_references(struct pipe_resource *dst, int num_refs)
 {
-   int count = p_atomic_add_return(&dst->reference.count, -num_refs);
+   int64_t count = p_atomic_add_return(&dst->reference.count, -num_refs);
 
    assert(count >= 0);
    /* Underflows shouldn't happen, but let's be safe. */
    if (count <= 0)
       pipe_resource_destroy(dst);
-}
-
-/**
- * Same as pipe_surface_release, but used when pipe_context doesn't exist
- * anymore.
- */
-static inline void
-pipe_surface_release_no_context(struct pipe_surface **ptr)
-{
-   struct pipe_surface *surf = *ptr;
-
-   if (pipe_reference_described(&surf->reference, NULL,
-                                (debug_reference_descriptor)
-                                debug_describe_surface)) {
-      /* trivially destroy pipe_surface */
-      pipe_resource_reference(&surf->texture, NULL);
-      free(surf);
-   }
-   *ptr = NULL;
 }
 
 /**
@@ -209,12 +241,44 @@ pipe_sampler_view_reference(struct pipe_sampler_view **dst,
 {
    struct pipe_sampler_view *old_dst = *dst;
 
-   if (pipe_reference_described(old_dst ? &old_dst->reference : NULL,
-                                src ? &src->reference : NULL,
-                                (debug_reference_descriptor)
-                                debug_describe_sampler_view))
+   if (pipe_reference_described_nonatomic(old_dst ? &old_dst->reference : NULL,
+                                          src ? &src->reference : NULL,
+                                          (debug_reference_descriptor)
+                                          debug_describe_sampler_view))
       old_dst->context->sampler_view_destroy(old_dst->context, old_dst);
    *dst = src;
+}
+
+static inline void
+pipe_sampler_view_release(struct pipe_sampler_view *view)
+{
+   if (view)
+      view->context->sampler_view_release(view->context, view);
+}
+
+static inline void
+pipe_sampler_view_release_ptr(struct pipe_sampler_view **view_ptr)
+{
+   struct pipe_sampler_view *view = *view_ptr;
+   *view_ptr = NULL;
+   if (view)
+      view->context->sampler_view_release(view->context, view);
+}
+
+static inline void
+pipe_sampler_view_set_release(struct pipe_sampler_view **dst,
+                              struct pipe_sampler_view *src)
+{
+   struct pipe_sampler_view *old_dst = *dst;
+   *dst = src;
+   if (old_dst)
+      old_dst->context->sampler_view_release(old_dst->context, old_dst);
+}
+
+static inline void
+u_default_sampler_view_release(struct pipe_context *pctx, struct pipe_sampler_view *view)
+{
+   pipe_sampler_view_reference(&view, NULL);
 }
 
 static inline void
@@ -257,7 +321,6 @@ pipe_vertex_buffer_reference(struct pipe_vertex_buffer *dst,
 {
    if (dst->buffer.resource == src->buffer.resource) {
       /* Just copy the fields, don't touch reference counts. */
-      dst->stride = src->stride;
       dst->is_user_buffer = src->is_user_buffer;
       dst->buffer_offset = src->buffer_offset;
       return;
@@ -267,7 +330,6 @@ pipe_vertex_buffer_reference(struct pipe_vertex_buffer *dst,
    /* Don't use memcpy because there is a hole between variables.
     * dst can be used as a hash key.
     */
-   dst->stride = src->stride;
    dst->is_user_buffer = src->is_user_buffer;
    dst->buffer_offset = src->buffer_offset;
 
@@ -283,11 +345,8 @@ pipe_surface_reset(struct pipe_context *ctx, struct pipe_surface* ps,
 {
    pipe_resource_reference(&ps->texture, pt);
    ps->format = pt->format;
-   ps->width = u_minify(pt->width0, level);
-   ps->height = u_minify(pt->height0, level);
-   ps->u.tex.level = level;
-   ps->u.tex.first_layer = ps->u.tex.last_layer = layer;
-   ps->context = ctx;
+   ps->level = level;
+   ps->first_layer = ps->last_layer = layer;
 }
 
 static inline void
@@ -299,19 +358,68 @@ pipe_surface_init(struct pipe_context *ctx, struct pipe_surface* ps,
    pipe_surface_reset(ctx, ps, pt, level, layer);
 }
 
-/* Return true if the surfaces are equal. */
-static inline boolean
-pipe_surface_equal(struct pipe_surface *s1, struct pipe_surface *s2)
+static inline unsigned
+pipe_surface_width(const struct pipe_surface *ps)
 {
-   return s1->texture == s2->texture &&
+   unsigned width = u_minify(ps->texture->width0, ps->level);
+
+   /* adjust texture view size to get full blocksize on compressed formats */
+   if (!util_format_is_depth_or_stencil(ps->texture->format) && ps->format != ps->texture->format) {
+      const struct util_format_description *res_desc = util_format_description(ps->texture->format);
+      const struct util_format_description *surf_desc = util_format_description(ps->format);
+
+      if (res_desc->block.width != surf_desc->block.width ||
+          res_desc->block.height != surf_desc->block.height) {
+         unsigned nblks_x = util_format_get_nblocksx(ps->texture->format, width);
+         width = nblks_x * surf_desc->block.width;
+      }
+   }
+
+   return width;
+}
+
+static inline unsigned
+pipe_surface_height(const struct pipe_surface *ps)
+{
+   unsigned height = u_minify(ps->texture->height0, ps->level);
+
+   /* adjust texture view size to get full blocksize on compressed formats */
+   if (!util_format_is_depth_or_stencil(ps->texture->format) && ps->format != ps->texture->format) {
+      const struct util_format_description *res_desc = util_format_description(ps->texture->format);
+      const struct util_format_description *surf_desc = util_format_description(ps->format);
+
+      if (res_desc->block.width != surf_desc->block.width ||
+          res_desc->block.height != surf_desc->block.height) {
+
+         unsigned nblks_y = util_format_get_nblocksy(ps->texture->format, height);
+         height = nblks_y * surf_desc->block.height;
+      }
+   }
+
+   return height;
+}
+
+static inline void
+pipe_surface_size(const struct pipe_surface *ps, unsigned *width, unsigned *height)
+{
+   if (width)
+      *width = pipe_surface_width(ps);
+
+   if (height)
+      *height = pipe_surface_height(ps);
+}
+
+/* Return true if the surfaces are equal. */
+static inline bool
+pipe_surface_equal(const struct pipe_surface *s1, const struct pipe_surface *s2)
+{
+   return !!s1 == !!s2 && s1->texture == s2->texture &&
           s1->format == s2->format &&
-          (s1->texture->target != PIPE_BUFFER ||
-           (s1->u.buf.first_element == s2->u.buf.first_element &&
-            s1->u.buf.last_element == s2->u.buf.last_element)) &&
-          (s1->texture->target == PIPE_BUFFER ||
-           (s1->u.tex.level == s2->u.tex.level &&
-            s1->u.tex.first_layer == s2->u.tex.first_layer &&
-            s1->u.tex.last_layer == s2->u.tex.last_layer));
+          s1->nr_samples == s2->nr_samples &&
+          (!s1->texture ||
+           (s1->level == s2->level &&
+            s1->first_layer == s2->first_layer &&
+            s1->last_layer == s2->last_layer));
 }
 
 /*
@@ -364,7 +472,7 @@ pipe_buffer_create_const0(struct pipe_screen *screen,
    buffer.format = PIPE_FORMAT_R8_UNORM;
    buffer.bind = bind;
    buffer.usage = usage;
-   buffer.flags = screen->get_param(screen, PIPE_CAP_CONSTBUF0_FLAGS);
+   buffer.flags = screen->caps.constbuf0_flags;
    buffer.width0 = size;
    buffer.height0 = 1;
    buffer.depth0 = 1;
@@ -494,9 +602,7 @@ pipe_buffer_copy(struct pipe_context *pipe,
                  unsigned size)
 {
    struct pipe_box box;
-   /* only these fields are used */
-   box.x = (int)src_offset;
-   box.width = (int)size;
+   u_box_1d(src_offset, size, &box);
    pipe->resource_copy_region(pipe, dst, 0, dst_offset, 0, 0, src, 0, &box);
 }
 
@@ -526,9 +632,9 @@ pipe_buffer_read(struct pipe_context *pipe,
                  void *data)
 {
    struct pipe_transfer *src_transfer;
-   ubyte *map;
+   uint8_t *map;
 
-   map = (ubyte *) pipe_buffer_map_range(pipe,
+   map = (uint8_t *) pipe_buffer_map_range(pipe,
                                          buf,
                                          offset, size,
                                          PIPE_MAP_READ,
@@ -589,7 +695,7 @@ pipe_texture_unmap(struct pipe_context *context,
 
 static inline void
 pipe_set_constant_buffer(struct pipe_context *pipe,
-                         enum pipe_shader_type shader, uint index,
+                         mesa_shader_stage shader, uint index,
                          struct pipe_resource *buf)
 {
    if (buf) {
@@ -598,18 +704,40 @@ pipe_set_constant_buffer(struct pipe_context *pipe,
       cb.buffer_offset = 0;
       cb.buffer_size = buf->width0;
       cb.user_buffer = NULL;
-      pipe->set_constant_buffer(pipe, shader, index, false, &cb);
+      pipe->set_constant_buffer(pipe, shader, index, &cb);
    } else {
-      pipe->set_constant_buffer(pipe, shader, index, false, NULL);
+      pipe->set_constant_buffer(pipe, shader, index, NULL);
    }
 }
 
+static inline void
+pipe_upload_constant_buffer0(struct pipe_context *pipe, mesa_shader_stage stage,
+                             struct pipe_constant_buffer *cb,
+                             struct pipe_resource **releasebuf)
+{
+   struct pipe_constant_buffer cbuf = *cb;
+   cbuf.buffer = NULL;
+   const unsigned alignment = MAX2(pipe->screen->caps.constant_buffer_offset_alignment, 64);
+   void *ptr;
+
+   if (pipe->screen->caps.prefer_real_buffer_in_constbuf0) {
+      u_upload_alloc(pipe->const_uploader, 0, cbuf.buffer_size,
+         alignment, &cbuf.buffer_offset, &cbuf.buffer, releasebuf, (void**)&ptr);
+      memcpy(ptr, cbuf.user_buffer, cbuf.buffer_size);
+      cbuf.user_buffer = NULL;
+
+      u_upload_unmap(pipe->const_uploader);
+      pipe->set_constant_buffer(pipe, stage, 0, &cbuf);
+   } else {
+      pipe->set_constant_buffer(pipe, stage, 0, cb);
+   }
+}
 
 /**
  * Get the polygon offset enable/disable flag for the given polygon fill mode.
  * \param fill_mode  one of PIPE_POLYGON_MODE_POINT/LINE/FILL
  */
-static inline boolean
+static inline bool
 util_get_offset(const struct pipe_rasterizer_state *templ,
                 unsigned fill_mode)
 {
@@ -622,7 +750,7 @@ util_get_offset(const struct pipe_rasterizer_state *templ,
       return templ->offset_tri;
    default:
       assert(0);
-      return FALSE;
+      return false;
    }
 }
 
@@ -645,7 +773,7 @@ util_query_clear_result(union pipe_query_result *result, unsigned type)
    case PIPE_QUERY_SO_OVERFLOW_PREDICATE:
    case PIPE_QUERY_SO_OVERFLOW_ANY_PREDICATE:
    case PIPE_QUERY_GPU_FINISHED:
-      result->b = FALSE;
+      result->b = false;
       break;
    case PIPE_QUERY_OCCLUSION_COUNTER:
    case PIPE_QUERY_TIMESTAMP:
@@ -668,64 +796,12 @@ util_query_clear_result(union pipe_query_result *result, unsigned type)
    }
 }
 
-/** Convert PIPE_TEXTURE_x to TGSI_TEXTURE_x */
-static inline enum tgsi_texture_type
-util_pipe_tex_to_tgsi_tex(enum pipe_texture_target pipe_tex_target,
-                          unsigned nr_samples)
-{
-   switch (pipe_tex_target) {
-   case PIPE_BUFFER:
-      return TGSI_TEXTURE_BUFFER;
-
-   case PIPE_TEXTURE_1D:
-      assert(nr_samples <= 1);
-      return TGSI_TEXTURE_1D;
-
-   case PIPE_TEXTURE_2D:
-      return nr_samples > 1 ? TGSI_TEXTURE_2D_MSAA : TGSI_TEXTURE_2D;
-
-   case PIPE_TEXTURE_RECT:
-      assert(nr_samples <= 1);
-      return TGSI_TEXTURE_RECT;
-
-   case PIPE_TEXTURE_3D:
-      assert(nr_samples <= 1);
-      return TGSI_TEXTURE_3D;
-
-   case PIPE_TEXTURE_CUBE:
-      assert(nr_samples <= 1);
-      return TGSI_TEXTURE_CUBE;
-
-   case PIPE_TEXTURE_1D_ARRAY:
-      assert(nr_samples <= 1);
-      return TGSI_TEXTURE_1D_ARRAY;
-
-   case PIPE_TEXTURE_2D_ARRAY:
-      return nr_samples > 1 ? TGSI_TEXTURE_2D_ARRAY_MSAA :
-                              TGSI_TEXTURE_2D_ARRAY;
-
-   case PIPE_TEXTURE_CUBE_ARRAY:
-      return TGSI_TEXTURE_CUBE_ARRAY;
-
-   default:
-      assert(0 && "unexpected texture target");
-      return TGSI_TEXTURE_UNKNOWN;
-   }
-}
-
-
 static inline void
 util_copy_constant_buffer(struct pipe_constant_buffer *dst,
-                          const struct pipe_constant_buffer *src,
-                          bool take_ownership)
+                          const struct pipe_constant_buffer *src)
 {
    if (src) {
-      if (take_ownership) {
-         pipe_resource_reference(&dst->buffer, NULL);
-         dst->buffer = src->buffer;
-      } else {
-         pipe_resource_reference(&dst->buffer, src->buffer);
-      }
+      pipe_resource_reference(&dst->buffer, src->buffer);
       dst->buffer_offset = src->buffer_offset;
       dst->buffer_size = src->buffer_size;
       dst->user_buffer = src->user_buffer;
@@ -878,7 +954,7 @@ util_logicop_reads_dest(enum pipe_logicop op)
    case PIPE_LOGICOP_SET:
       return false;
    }
-   unreachable("bad logicop");
+   UNREACHABLE("bad logicop");
 }
 
 static inline bool
@@ -891,28 +967,34 @@ util_writes_stencil(const struct pipe_stencil_state *s)
 }
 
 static inline bool
+util_writes_depth(const struct pipe_depth_stencil_alpha_state *zsa)
+{
+   return zsa->depth_enabled && zsa->depth_writemask &&
+         (zsa->depth_func != PIPE_FUNC_NEVER);
+}
+
+static inline bool
 util_writes_depth_stencil(const struct pipe_depth_stencil_alpha_state *zsa)
 {
-   if (zsa->depth_enabled && zsa->depth_writemask &&
-       (zsa->depth_func != PIPE_FUNC_NEVER))
-      return true;
-
-   return util_writes_stencil(&zsa->stencil[0]) ||
+   return util_writes_depth(zsa) ||
+          util_writes_stencil(&zsa->stencil[0]) ||
           util_writes_stencil(&zsa->stencil[1]);
 }
 
 static inline struct pipe_context *
-pipe_create_multimedia_context(struct pipe_screen *screen)
+pipe_create_multimedia_context(struct pipe_screen *screen, bool compute_only)
 {
    unsigned flags = 0;
 
-   if (!screen->get_param(screen, PIPE_CAP_GRAPHICS))
+   if (!screen->caps.graphics && !screen->caps.compute)
+      flags |= PIPE_CONTEXT_MEDIA_ONLY;
+   else if (compute_only || !screen->caps.graphics)
       flags |= PIPE_CONTEXT_COMPUTE_ONLY;
 
    return screen->context_create(screen, NULL, flags);
 }
 
-static inline unsigned util_res_sample_count(struct pipe_resource *res)
+static inline unsigned util_res_sample_count(const struct pipe_resource *res)
 {
    return res->nr_samples > 0 ? res->nr_samples : 1;
 }

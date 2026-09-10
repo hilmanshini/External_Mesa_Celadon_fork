@@ -37,7 +37,7 @@ extern "C" {
 // NB: I've copy and pasted some types into this header so we don't have to
 // include other headers. This will surely break if any of these types change.
 
-// Copy of gl_shader_stage
+// Copy of mesa_shader_stage
 typedef enum {
    DXIL_SPIRV_SHADER_NONE = -1,
    DXIL_SPIRV_SHADER_VERTEX = 0,
@@ -64,7 +64,6 @@ typedef union {
    uint64_t u64;
 } dxil_spirv_const_value;
 
-// Copy of nir_spirv_specialization
 struct dxil_spirv_specialization {
    uint32_t id;
    dxil_spirv_const_value value;
@@ -72,7 +71,15 @@ struct dxil_spirv_specialization {
 };
 
 struct dxil_spirv_metadata {
+   // Some sysval or other type of data is accessed which needs to be piped
+   // from the app/API implementation into the shader via a buffer
    bool requires_runtime_data;
+
+   // Specifically if a vertex shader needs the first-vertex or base-instance
+   // sysval. These are relevant since these can come from an indirect arg
+   // buffer, and therefore piping them to the runtime data buffer is extra
+   // complex.
+   bool needs_draw_sysvals;
 };
 
 struct dxil_spirv_object {
@@ -90,6 +97,11 @@ struct dxil_spirv_compute_runtime_data {
    uint32_t group_count_x;
    uint32_t group_count_y;
    uint32_t group_count_z;
+   uint32_t padding0;
+   /* Base */
+   uint32_t base_group_x;
+   uint32_t base_group_y;
+   uint32_t base_group_z;
 };
 
 #define DXIL_SPIRV_Y_FLIP_MASK BITFIELD_MASK(DXIL_SPIRV_MAX_VIEWPORT)
@@ -114,6 +126,11 @@ struct dxil_spirv_vertex_runtime_data {
    uint32_t draw_id;
    float viewport_width;
    float viewport_height;
+   uint32_t view_index;
+   /* When depth bias is dynamic, the constant value to add to point
+    * primitives when emulating triangle point fill mode. Slope-scaled
+    * depth bias is currently unsupported. */
+   float depth_bias;
 };
 
 enum dxil_spirv_yz_flip_mode {
@@ -131,6 +148,16 @@ enum dxil_spirv_yz_flip_mode {
 
 #define DXIL_SPIRV_MAX_VIEWPORT 16
 
+enum dxil_spirv_sysval_type {
+   // The sysval can be inlined in the shader as a constant zero
+   DXIL_SPIRV_SYSVAL_TYPE_ZERO,
+   // The sysval has a supported DXIL equivalent
+   DXIL_SPIRV_SYSVAL_TYPE_NATIVE,
+   // The sysval might be nonzero and has no DXIL equivalent, so it
+   // will need to be provided by the runtime_data constant buffer
+   DXIL_SPIRV_SYSVAL_TYPE_RUNTIME_DATA,
+};
+
 struct dxil_spirv_runtime_conf {
    struct {
       uint32_t register_space;
@@ -142,9 +169,8 @@ struct dxil_spirv_runtime_conf {
       uint32_t base_shader_register;
    } push_constant_cbv;
 
-   // Set true if vertex and instance ids have already been converted to
-   // zero-based. Otherwise, runtime_data will be required to lower them.
-   bool zero_based_vertex_instance_id;
+   enum dxil_spirv_sysval_type first_vertex_and_base_instance_mode;
+   enum dxil_spirv_sysval_type workgroup_id_mode;
 
    struct {
       // mode != DXIL_SPIRV_YZ_FLIP_NONE only valid on vertex/geometry stages.
@@ -157,10 +183,22 @@ struct dxil_spirv_runtime_conf {
 
    // The caller supports read-only images to be turned into SRV accesses,
    // which allows us to run the nir_opt_access() pass
-   bool read_only_images_as_srvs;
+   bool declared_read_only_images_as_srvs;
+
+   // The caller supports read-write images to be turned into SRV accesses,
+   // if they are found not to be written
+   bool inferred_read_only_images_as_srvs;
 
    // Force sample rate shading on a fragment shader
    bool force_sample_rate_shading;
+
+   // View index needs to be lowered to a UBO lookup
+   bool lower_view_index;
+   // View index also needs to be forwarded to RT layer output
+   bool lower_view_index_to_rt_layer;
+
+   // Affects which features can be used by the shader
+   enum dxil_shader_model shader_model_max;
 };
 
 struct dxil_spirv_debug_options {
@@ -191,7 +229,6 @@ spirv_to_dxil(const uint32_t *words, size_t word_count,
               struct dxil_spirv_specialization *specializations,
               unsigned int num_specializations, dxil_spirv_shader_stage stage,
               const char *entry_point_name,
-              enum dxil_shader_model shader_model_max,
               enum dxil_validator_version validator_version_max,
               const struct dxil_spirv_debug_options *debug_options,
               const struct dxil_spirv_runtime_conf *conf,

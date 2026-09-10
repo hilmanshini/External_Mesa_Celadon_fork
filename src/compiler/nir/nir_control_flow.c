@@ -45,32 +45,16 @@
  */
 /*@{*/
 
-static inline void
-block_add_pred(nir_block *block, nir_block *pred)
-{
-   _mesa_set_add(block->predecessors, pred);
-}
-
-static inline void
-block_remove_pred(nir_block *block, nir_block *pred)
-{
-   struct set_entry *entry = _mesa_set_search(block->predecessors, pred);
-
-   assert(entry);
-
-   _mesa_set_remove(block->predecessors, entry);
-}
-
 static void
 link_blocks(nir_block *pred, nir_block *succ1, nir_block *succ2)
 {
    pred->successors[0] = succ1;
    if (succ1 != NULL)
-      block_add_pred(succ1, pred);
+      nir_block_add_pred(succ1, pred);
 
    pred->successors[1] = succ2;
    if (succ2 != NULL)
-      block_add_pred(succ2, pred);
+      nir_block_add_pred(succ2, pred);
 }
 
 static void
@@ -84,7 +68,7 @@ unlink_blocks(nir_block *pred, nir_block *succ)
       pred->successors[1] = NULL;
    }
 
-   block_remove_pred(succ, pred);
+   nir_block_remove_pred(succ, pred);
 }
 
 static void
@@ -154,24 +138,33 @@ link_block_to_non_block(nir_block *block, nir_cf_node *node)
       unlink_block_successors(block);
       link_blocks(block, loop_header_block, NULL);
    }
-
 }
 
 /**
- * Replace a block's successor with a different one.
+ * Replace the successor of a block's predecessors with a different one.
  */
 static void
-replace_successor(nir_block *block, nir_block *old_succ, nir_block *new_succ)
+replace_pred_succs(nir_block *block, nir_block *new_block, nir_block *exclude)
 {
-   if (block->successors[0] == old_succ) {
-      block->successors[0] = new_succ;
-   } else {
-      assert(block->successors[1] == old_succ);
-      block->successors[1] = new_succ;
+   bool found_exclude = false;
+   nir_foreach_pred(pred, block) {
+      if (pred == exclude) {
+         found_exclude = true;
+         continue;
+      }
+
+      if (pred->successors[0] == block) {
+         pred->successors[0] = new_block;
+      } else {
+         assert(pred->successors[1] == block);
+         pred->successors[1] = new_block;
+      }
+      nir_block_add_pred(new_block, pred);
    }
 
-   block_remove_pred(old_succ, block);
-   block_add_pred(new_succ, block);
+   util_dynarray_clear(&block->predecessors);
+   if (found_exclude)
+      nir_block_add_pred(block, exclude);
 }
 
 /**
@@ -185,25 +178,19 @@ replace_successor(nir_block *block, nir_block *old_succ, nir_block *new_succ)
 static nir_block *
 split_block_beginning(nir_block *block)
 {
-   nir_block *new_block = nir_block_create(ralloc_parent(block));
+   nir_block *new_block = nir_block_create(block->impl);
    new_block->cf_node.parent = block->cf_node.parent;
    exec_node_insert_node_before(&block->cf_node.node, &new_block->cf_node.node);
 
-   set_foreach(block->predecessors, entry) {
-      nir_block *pred = (nir_block *) entry->key;
-      replace_successor(pred, block, new_block);
-   }
+   replace_pred_succs(block, new_block, NULL);
 
    /* Any phi nodes must stay part of the new block, or else their
     * sources will be messed up.
     */
-   nir_foreach_instr_safe(instr, block) {
-      if (instr->type != nir_instr_type_phi)
-         break;
-
-      exec_node_remove(&instr->node);
-      instr->block = new_block;
-      exec_list_push_tail(&new_block->instr_list, &instr->node);
+   nir_foreach_phi_safe(phi, block) {
+      exec_node_remove(&phi->instr.node);
+      phi->instr.block = new_block;
+      exec_list_push_tail(&new_block->instr_list, &phi->instr.node);
    }
 
    return new_block;
@@ -212,11 +199,7 @@ split_block_beginning(nir_block *block)
 static void
 rewrite_phi_preds(nir_block *block, nir_block *old_pred, nir_block *new_pred)
 {
-   nir_foreach_instr_safe(instr, block) {
-      if (instr->type != nir_instr_type_phi)
-         break;
-
-      nir_phi_instr *phi = nir_instr_as_phi(instr);
+   nir_foreach_phi_safe(phi, block) {
       nir_foreach_phi_src(src, phi) {
          if (src->pred == old_pred) {
             src->pred = new_pred;
@@ -229,18 +212,14 @@ rewrite_phi_preds(nir_block *block, nir_block *old_pred, nir_block *new_pred)
 void
 nir_insert_phi_undef(nir_block *block, nir_block *pred)
 {
-   nir_function_impl *impl = nir_cf_node_get_function(&block->cf_node);
-   nir_foreach_instr(instr, block) {
-      if (instr->type != nir_instr_type_phi)
-         break;
-
-      nir_phi_instr *phi = nir_instr_as_phi(instr);
-      nir_ssa_undef_instr *undef =
-         nir_ssa_undef_instr_create(impl->function->shader,
-                                    phi->dest.ssa.num_components,
-                                    phi->dest.ssa.bit_size);
+   nir_function_impl *impl = block->impl;
+   nir_foreach_phi(phi, block) {
+      nir_undef_instr *undef =
+         nir_undef_instr_create(impl->function->shader,
+                                phi->def.num_components,
+                                phi->def.bit_size);
       nir_instr_insert_before_cf_list(&impl->body, &undef->instr);
-      nir_phi_src *src = nir_phi_instr_add_src(phi, pred, nir_src_for_ssa(&undef->def));
+      nir_phi_src *src = nir_phi_instr_add_src(phi, pred, &undef->def);
       list_addtail(&src->src.use_link, &undef->def.uses);
    }
 }
@@ -285,13 +264,19 @@ block_add_normal_succs(nir_block *block)
          nir_block *next_block = nir_cf_node_as_block(next);
 
          link_blocks(block, next_block, NULL);
+         nir_insert_phi_undef(next_block, block);
       } else if (parent->type == nir_cf_node_loop) {
          nir_loop *loop = nir_cf_node_as_loop(parent);
 
-         nir_block *head_block = nir_loop_first_block(loop);
+         nir_block *cont_block;
+         if (block == nir_loop_last_block(loop) && nir_loop_has_continue_construct(loop)) {
+            cont_block = nir_loop_first_continue_block(loop);
+         } else {
+            cont_block = nir_loop_first_block(loop);
+         }
 
-         link_blocks(block, head_block, NULL);
-         nir_insert_phi_undef(head_block, block);
+         link_blocks(block, cont_block, NULL);
+         nir_insert_phi_undef(cont_block, block);
       } else {
          nir_function_impl *impl = nir_cf_node_as_function(parent);
          link_blocks(block, impl->end_block, NULL);
@@ -305,6 +290,8 @@ block_add_normal_succs(nir_block *block)
          nir_block *first_else_block = nir_if_first_else_block(next_if);
 
          link_blocks(block, first_then_block, first_else_block);
+         nir_insert_phi_undef(first_then_block, block);
+         nir_insert_phi_undef(first_else_block, block);
       } else if (next->type == nir_cf_node_loop) {
          nir_loop *next_loop = nir_cf_node_as_loop(next);
 
@@ -319,7 +306,7 @@ block_add_normal_succs(nir_block *block)
 static nir_block *
 split_block_end(nir_block *block)
 {
-   nir_block *new_block = nir_block_create(ralloc_parent(block));
+   nir_block *new_block = nir_block_create(block->impl);
    new_block->cf_node.parent = block->cf_node.parent;
    exec_node_insert_after(&block->cf_node.node, &new_block->cf_node.node);
 
@@ -395,7 +382,7 @@ split_block_cursor(nir_cursor cursor,
       break;
 
    default:
-      unreachable("not reached");
+      UNREACHABLE("not reached");
    }
 
    if (_before)
@@ -429,14 +416,43 @@ nearest_loop(nir_cf_node *node)
    return nir_cf_node_as_loop(node);
 }
 
+void
+nir_loop_add_continue_construct(nir_loop *loop)
+{
+   assert(!nir_loop_has_continue_construct(loop));
+   nir_block *header = nir_loop_first_block(loop);
+
+   nir_block *cont = nir_block_create(header->impl);
+   exec_list_push_tail(&loop->continue_list, &cont->cf_node.node);
+   cont->cf_node.parent = &loop->cf_node;
+
+   /* change predecessors and successors */
+   nir_block *preheader = nir_block_cf_tree_prev(header);
+   assert(nir_block_num_preds(header) <= 2);
+   replace_pred_succs(header, cont, preheader);
+
+   link_blocks(cont, header, NULL);
+}
+
+void
+nir_loop_remove_continue_construct(nir_loop *loop)
+{
+   assert(nir_cf_list_is_empty_block(&loop->continue_list));
+
+   /* change predecessors and successors */
+   nir_block *header = nir_loop_first_block(loop);
+   nir_block *cont = nir_loop_first_continue_block(loop);
+   assert(nir_block_num_preds(cont) <= 2);
+   replace_pred_succs(cont, header, NULL);
+   nir_block_remove_pred(header, cont);
+
+   exec_node_remove(&cont->cf_node.node);
+}
+
 static void
 remove_phi_src(nir_block *block, nir_block *pred)
 {
-   nir_foreach_instr(instr, block) {
-      if (instr->type != nir_instr_type_phi)
-         break;
-
-      nir_phi_instr *phi = nir_instr_as_phi(instr);
+   nir_foreach_phi(phi, block) {
       nir_foreach_phi_src_safe(src, phi) {
          if (src->pred == pred) {
             list_del(&src->src.use_link);
@@ -463,12 +479,13 @@ nir_handle_add_jump(nir_block *block)
       remove_phi_src(block->successors[1], block);
    unlink_block_successors(block);
 
-   nir_function_impl *impl = nir_cf_node_get_function(&block->cf_node);
-   nir_metadata_preserve(impl, nir_metadata_none);
+   nir_function_impl *impl = block->impl;
+   nir_progress(true, impl, nir_metadata_none);
 
    switch (jump_instr->type) {
    case nir_jump_return:
    case nir_jump_halt:
+   case nir_jump_abort:
       link_blocks(block, impl->end_block, NULL);
       break;
 
@@ -482,8 +499,8 @@ nir_handle_add_jump(nir_block *block)
 
    case nir_jump_continue: {
       nir_loop *loop = nearest_loop(&block->cf_node);
-      nir_block *first_block = nir_loop_first_block(loop);
-      link_blocks(block, first_block, NULL);
+      nir_block *cont_block = nir_loop_first_continue_block(loop);
+      link_blocks(block, cont_block, NULL);
       break;
    }
 
@@ -496,7 +513,7 @@ nir_handle_add_jump(nir_block *block)
       break;
 
    default:
-      unreachable("Invalid jump type");
+      UNREACHABLE("Invalid jump type");
    }
 }
 
@@ -522,8 +539,7 @@ nir_handle_remove_jump(nir_block *block, nir_jump_type type)
 {
    unlink_jump(block, type, true);
 
-   nir_function_impl *impl = nir_cf_node_get_function(&block->cf_node);
-   nir_metadata_preserve(impl, nir_metadata_none);
+   nir_progress(true, block->impl, nir_metadata_none);
 }
 
 static void
@@ -533,15 +549,10 @@ update_if_uses(nir_cf_node *node)
       return;
 
    nir_if *if_stmt = nir_cf_node_as_if(node);
+   nir_src_set_use_if(&if_stmt->condition, if_stmt);
 
-   if_stmt->condition.parent_if = if_stmt;
-   if (if_stmt->condition.is_ssa) {
-      list_addtail(&if_stmt->condition.use_link,
-                   &if_stmt->condition.ssa->if_uses);
-   } else {
-      list_addtail(&if_stmt->condition.use_link,
-                   &if_stmt->condition.reg.reg->if_uses);
-   }
+   list_addtail(&if_stmt->condition.use_link,
+                &if_stmt->condition.ssa->uses);
 }
 
 /**
@@ -584,8 +595,7 @@ stitch_blocks(nir_block *before, nir_block *after)
       exec_list_append(&before->instr_list, &after->instr_list);
       exec_node_remove(&after->cf_node.node);
 
-      return last_before_instr ? nir_after_instr(last_before_instr) :
-                                 nir_before_block(before);
+      return last_before_instr ? nir_after_instr(last_before_instr) : nir_before_block(before);
    }
 }
 
@@ -616,16 +626,16 @@ nir_cf_node_insert(nir_cursor cursor, nir_cf_node *node)
 }
 
 static bool
-replace_ssa_def_uses(nir_ssa_def *def, void *void_impl)
+replace_ssa_def_uses(nir_def *def, void *void_impl)
 {
    nir_function_impl *impl = void_impl;
 
-   nir_ssa_undef_instr *undef =
-      nir_ssa_undef_instr_create(impl->function->shader,
-                                 def->num_components,
-                                 def->bit_size);
+   nir_undef_instr *undef =
+      nir_undef_instr_create(impl->function->shader,
+                             def->num_components,
+                             def->bit_size);
    nir_instr_insert_before_cf_list(&impl->body, &undef->instr);
-   nir_ssa_def_rewrite_uses(def, &undef->def);
+   nir_def_rewrite_uses(def, &undef->def);
    return true;
 }
 
@@ -641,9 +651,9 @@ cleanup_cf_node(nir_cf_node *node, nir_function_impl *impl)
             nir_jump_instr *jump = nir_instr_as_jump(instr);
             unlink_jump(block, jump->type, false);
             if (jump->type == nir_jump_goto_if)
-               nir_instr_rewrite_src(instr, &jump->condition, NIR_SRC_INIT);
+               nir_instr_clear_src(instr, &jump->condition);
          } else {
-            nir_foreach_ssa_def(instr, replace_ssa_def_uses, impl);
+            nir_foreach_def(instr, replace_ssa_def_uses, impl);
             nir_instr_remove(instr);
          }
       }
@@ -665,6 +675,8 @@ cleanup_cf_node(nir_cf_node *node, nir_function_impl *impl)
       nir_loop *loop = nir_cf_node_as_loop(node);
       foreach_list_typed(nir_cf_node, child, node, &loop->body)
          cleanup_cf_node(child, impl);
+      foreach_list_typed(nir_cf_node, child, node, &loop->continue_list)
+         cleanup_cf_node(child, impl);
       break;
    }
    case nir_cf_node_function: {
@@ -674,7 +686,7 @@ cleanup_cf_node(nir_cf_node *node, nir_function_impl *impl)
       break;
    }
    default:
-      unreachable("Invalid CF node type");
+      UNREACHABLE("Invalid CF node type");
    }
 }
 
@@ -720,11 +732,11 @@ nir_cf_extract(nir_cf_list *extracted, nir_cursor begin, nir_cursor end)
    if (block_begin == block_after)
       block_begin = block_end;
 
-   extracted->impl = nir_cf_node_get_function(&block_begin->cf_node);
+   extracted->impl = block_begin->impl;
    exec_list_make_empty(&extracted->list);
 
    /* Dominance and other block-related information is toast. */
-   nir_metadata_preserve(extracted->impl, nir_metadata_none);
+   nir_progress(true, extracted->impl, nir_metadata_none);
 
    nir_cf_node *cf_node = &block_begin->cf_node;
    nir_cf_node *cf_node_end = &block_end->cf_node;
@@ -751,6 +763,8 @@ relink_jump_halt_cf_node(nir_cf_node *node, nir_block *end_block)
    case nir_cf_node_block: {
       nir_block *block = nir_cf_node_as_block(node);
       nir_instr *last_instr = nir_block_last_instr(block);
+
+      block->impl = end_block->impl;
       if (last_instr == NULL || last_instr->type != nir_instr_type_jump)
          break;
 
@@ -780,14 +794,16 @@ relink_jump_halt_cf_node(nir_cf_node *node, nir_block *end_block)
       nir_loop *loop = nir_cf_node_as_loop(node);
       foreach_list_typed(nir_cf_node, child, node, &loop->body)
          relink_jump_halt_cf_node(child, end_block);
+      foreach_list_typed(nir_cf_node, child, node, &loop->continue_list)
+         relink_jump_halt_cf_node(child, end_block);
       break;
    }
 
    case nir_cf_node_function:
-      unreachable("Cannot insert a function in a function");
+      UNREACHABLE("Cannot insert a function in a function");
 
    default:
-      unreachable("Invalid CF node type");
+      UNREACHABLE("Invalid CF node type");
    }
 }
 
@@ -803,8 +819,7 @@ nir_cf_reinsert(nir_cf_list *cf_list, nir_cursor cursor)
    if (exec_list_is_empty(&cf_list->list))
       return cursor;
 
-   nir_function_impl *cursor_impl =
-      nir_cf_node_get_function(&nir_cursor_current_block(cursor)->cf_node);
+   nir_function_impl *cursor_impl = nir_cursor_current_block(cursor)->impl;
    if (cf_list->impl != cursor_impl) {
       foreach_list_typed(nir_cf_node, node, node, &cf_list->list)
          relink_jump_halt_cf_node(node, cursor_impl->end_block);
@@ -830,4 +845,115 @@ nir_cf_delete(nir_cf_list *cf_list)
    foreach_list_typed(nir_cf_node, node, node, &cf_list->list) {
       cleanup_cf_node(node, cf_list->impl);
    }
+}
+
+void
+nir_remove_after_cf_node(nir_cf_node *node)
+{
+   nir_cf_node *end = node;
+   while (!nir_cf_node_is_last(end))
+      end = nir_cf_node_next(end);
+
+   nir_cursor begin = nir_after_cf_node(node);
+   if (begin.option == nir_cursor_before_block) {
+      /* nir_cf_extract() would ignore these phis */
+      nir_foreach_phi_safe(phi, begin.block) {
+         replace_ssa_def_uses(&phi->def, begin.block->impl);
+         nir_instr_remove_v(&phi->instr);
+      }
+   }
+
+   nir_cf_list list;
+   nir_cf_extract(&list, begin, nir_after_cf_node(end));
+   nir_cf_delete(&list);
+}
+
+struct block_index {
+   nir_block *block;
+   uint32_t index;
+};
+
+static void
+calc_cfg_post_dfs_indices(nir_function_impl *impl,
+                          nir_block *block,
+                          struct block_index *blocks,
+                          uint32_t *count)
+{
+   if (block == impl->end_block)
+      return;
+
+   assert(block->index < impl->num_blocks);
+
+   if (blocks[block->index].block != NULL) {
+      assert(blocks[block->index].block == block);
+      return;
+   }
+
+   blocks[block->index].block = block;
+
+   for (uint32_t i = 0; i < ARRAY_SIZE(block->successors); i++) {
+      if (block->successors[i] != NULL)
+         calc_cfg_post_dfs_indices(impl, block->successors[i], blocks, count);
+   }
+
+   /* Pre-increment so that unreachable blocks have an index of 0 */
+   blocks[block->index].index = ++(*count);
+}
+
+static int
+rev_cmp_block_index(const void *_a, const void *_b)
+{
+   const struct block_index *a = _a, *b = _b;
+
+   return b->index - a->index;
+}
+
+void
+nir_sort_unstructured_blocks(nir_function_impl *impl)
+{
+   /* Re-index the blocks.
+    *
+    * We hand-roll it here instead of calling the helper because we also want
+    * to assert that there are no structured control-flow constructs.
+    */
+   impl->num_blocks = 0;
+   foreach_list_typed(nir_cf_node, node, node, &impl->body) {
+      nir_block *block = nir_cf_node_as_block(node);
+      block->index = impl->num_blocks++;
+   }
+
+   struct block_index *blocks =
+      rzalloc_array(NULL, struct block_index, impl->num_blocks);
+
+   uint32_t count = 0;
+   calc_cfg_post_dfs_indices(impl, nir_start_block(impl), blocks, &count);
+   assert(count <= impl->num_blocks);
+
+   qsort(blocks, impl->num_blocks, sizeof(*blocks), rev_cmp_block_index);
+
+   struct exec_list dead_blocks;
+   exec_list_move_nodes_to(&impl->body, &dead_blocks);
+
+   for (uint32_t i = 0; i < count; i++) {
+      nir_block *block = blocks[i].block;
+      exec_node_remove(&block->cf_node.node);
+      block->index = i;
+      exec_list_push_tail(&impl->body, &block->cf_node.node);
+   }
+   impl->end_block->index = count;
+
+   for (uint32_t i = count; i < impl->num_blocks; i++) {
+      assert(blocks[i].index == 0);
+      assert(blocks[i].block == NULL);
+   }
+   impl->num_blocks = count;
+
+   foreach_list_typed_safe(nir_cf_node, node, node, &dead_blocks)
+      cleanup_cf_node(node, impl);
+
+   ralloc_free(blocks);
+
+   /* Most metadata is toast but we indexed blocks as part of this pass. */
+   nir_progress(true, impl, nir_metadata_live_defs);
+   impl->valid_metadata |= nir_metadata_block_index;
 }

@@ -41,10 +41,7 @@
 #include "util/u_prim_restart.h"
 #include "util/u_math.h"
 
-static const D3D12_RECT MAX_SCISSOR = { D3D12_VIEWPORT_BOUNDS_MIN,
-                                        D3D12_VIEWPORT_BOUNDS_MIN,
-                                        D3D12_VIEWPORT_BOUNDS_MAX,
-                                        D3D12_VIEWPORT_BOUNDS_MAX };
+static const D3D12_RECT MAX_SCISSOR = { 0, 0, 16384, 16384 };
 
 static const D3D12_RECT MAX_SCISSOR_ARRAY[] = {
    MAX_SCISSOR, MAX_SCISSOR, MAX_SCISSOR, MAX_SCISSOR,
@@ -63,9 +60,8 @@ fill_cbv_descriptors(struct d3d12_context *ctx,
    struct d3d12_descriptor_handle table_start;
    d2d12_descriptor_heap_get_next_handle(batch->view_heap, &table_start);
 
-   for (unsigned i = 0; i < shader->num_cb_bindings; i++) {
-      unsigned binding = shader->cb_bindings[i].binding;
-      struct pipe_constant_buffer *buffer = &ctx->cbufs[stage][binding];
+   for (unsigned i = shader->begin_ubo_binding; i < shader->end_ubo_binding; i++) {
+      struct pipe_constant_buffer *buffer = &ctx->cbufs[stage][i];
 
       D3D12_CONSTANT_BUFFER_VIEW_DESC cbv_desc = {};
       if (buffer && buffer->buffer) {
@@ -119,7 +115,7 @@ fill_srv_descriptors(struct d3d12_context *ctx,
             view->texture_generation_id = res->generation_id;
          }
 
-         D3D12_RESOURCE_STATES state = (stage == PIPE_SHADER_FRAGMENT) ?
+         D3D12_RESOURCE_STATES state = (stage == MESA_SHADER_FRAGMENT) ?
                                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE :
                                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
          if (view->base.texture->target == PIPE_BUFFER) {
@@ -165,6 +161,8 @@ fill_ssbo_descriptors(struct d3d12_context *ctx,
       uav_desc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
       uav_desc.Buffer.StructureByteStride = 0;
       uav_desc.Buffer.CounterOffsetInBytes = 0;
+      uav_desc.Buffer.FirstElement = 0;
+      uav_desc.Buffer.NumElements = 0;
       ID3D12Resource *d3d12_res = nullptr;
       if (view->buffer) {
          struct d3d12_resource *res = d3d12_resource(view->buffer);
@@ -250,7 +248,7 @@ image_view_dimension(enum pipe_texture_target target)
       return D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
    case PIPE_TEXTURE_3D: return D3D12_UAV_DIMENSION_TEXTURE3D;
    default:
-      unreachable("unexpected target");
+      UNREACHABLE("unexpected target");
    }
 }
 
@@ -313,37 +311,37 @@ fill_image_descriptors(struct d3d12_context *ctx,
             uav_desc.Texture3D.WSize = array_size;
             break;
          case D3D12_UAV_DIMENSION_BUFFER: {
-            uav_desc.Format = d3d12_get_format(shader->uav_bindings[i].format);
-            uint format_size = util_format_get_blocksize(shader->uav_bindings[i].format);
+            uint format_size = util_format_get_blocksize(view_format);
             offset += view->u.buf.offset;
             uav_desc.Buffer.CounterOffsetInBytes = 0;
             uav_desc.Buffer.FirstElement = offset / format_size;
-            uav_desc.Buffer.NumElements = view->u.buf.size / format_size;
+            uav_desc.Buffer.NumElements = MIN2(view->u.buf.size / format_size,
+                                               1 << D3D12_REQ_BUFFER_RESOURCE_TEXEL_COUNT_2_TO_EXP);
             uav_desc.Buffer.StructureByteStride = 0;
             uav_desc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
             break;
          }
          default:
-            unreachable("Unexpected image view dimension");
+            UNREACHABLE("Unexpected image view dimension");
          }
          
-         if (!batch->pending_memory_barrier) {
-            if (res->base.b.target == PIPE_BUFFER) {
-               d3d12_transition_resource_state(ctx, res, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_TRANSITION_FLAG_ACCUMULATE_STATE);
-            } else {
-               unsigned transition_first_layer = view->u.tex.first_layer;
-               unsigned transition_array_size = array_size;
-               if (res->base.b.target == PIPE_TEXTURE_3D) {
-                  transition_first_layer = 0;
-                  transition_array_size = 0;
-               }
-               d3d12_transition_subresources_state(ctx, res,
-                                                   view->u.tex.level, 1,
-                                                   transition_first_layer, transition_array_size,
-                                                   0, 1,
-                                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                                   D3D12_TRANSITION_FLAG_ACCUMULATE_STATE);
+         d3d12_transition_flags transition_flags = (d3d12_transition_flags)(D3D12_TRANSITION_FLAG_ACCUMULATE_STATE |
+            (batch->pending_memory_barrier ? D3D12_TRANSITION_FLAG_PENDING_MEMORY_BARRIER : 0));
+         if (res->base.b.target == PIPE_BUFFER) {
+            d3d12_transition_resource_state(ctx, res, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, transition_flags);
+         } else {
+            unsigned transition_first_layer = view->u.tex.first_layer;
+            unsigned transition_array_size = array_size;
+            if (res->base.b.target == PIPE_TEXTURE_3D) {
+               transition_first_layer = 0;
+               transition_array_size = 1;
             }
+            d3d12_transition_subresources_state(ctx, res,
+                                                view->u.tex.level, 1,
+                                                transition_first_layer, transition_array_size,
+                                                0, 1,
+                                                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                transition_flags);
          }
          d3d12_batch_reference_resource(batch, res, true);
 
@@ -365,6 +363,7 @@ fill_graphics_state_vars(struct d3d12_context *ctx,
                          const struct pipe_draw_start_count_bias *draw,
                          struct d3d12_shader *shader,
                          uint32_t *values,
+                         unsigned cur_root_param_idx,
                          struct d3d12_cmd_signature_key *cmd_sig_key)
 {
    unsigned size = 0;
@@ -378,8 +377,8 @@ fill_graphics_state_vars(struct d3d12_context *ctx,
          size += 4;
          break;
       case D3D12_STATE_VAR_PT_SPRITE:
-         ptr[0] = fui(1.0 / ctx->viewports[0].Width);
-         ptr[1] = fui(1.0 / ctx->viewports[0].Height);
+         ptr[0] = fui(1.0f / ctx->viewports[0].Width);
+         ptr[1] = fui(1.0f / ctx->viewports[0].Height);
          ptr[2] = fui(ctx->gfx_pipeline_state.rast->base.point_size);
          ptr[3] = fui(D3D12_MAX_POINT_SIZE);
          size += 4;
@@ -389,9 +388,11 @@ fill_graphics_state_vars(struct d3d12_context *ctx,
          ptr[1] = dinfo->start_instance;
          ptr[2] = drawid;
          ptr[3] = dinfo->index_size ? -1 : 0;
+         assert(!cmd_sig_key->draw_or_dispatch_params); // Should only be set once
          cmd_sig_key->draw_or_dispatch_params = 1;
          cmd_sig_key->root_sig = ctx->gfx_pipeline_state.root_signature;
-         cmd_sig_key->params_root_const_offset = size;
+         cmd_sig_key->params_root_const_offset = static_cast<uint8_t>(size);
+         cmd_sig_key->params_root_const_param = static_cast<uint8_t>(cur_root_param_idx);
          size += 4;
          break;
       case D3D12_STATE_VAR_DEPTH_TRANSFORM:
@@ -412,7 +413,7 @@ fill_graphics_state_vars(struct d3d12_context *ctx,
          size += 4;
          break;
       default:
-         unreachable("unknown state variable");
+         UNREACHABLE("unknown state variable");
       }
    }
 
@@ -438,10 +439,11 @@ fill_compute_state_vars(struct d3d12_context *ctx,
          ptr[2] = info->grid[2];
          cmd_sig_key->draw_or_dispatch_params = 1;
          cmd_sig_key->root_sig = ctx->compute_pipeline_state.root_signature;
-         cmd_sig_key->params_root_const_offset = size;
+         cmd_sig_key->params_root_const_offset = static_cast<uint8_t>(size);
          size += 4;
          break;
-      case D3D12_STATE_VAR_TRANSFORM_GENERIC0: {
+      case D3D12_STATE_VAR_TRANSFORM_GENERIC0:
+      case D3D12_STATE_VAR_TRANSFORM_GENERIC1: {
          unsigned idx = shader->state_vars[j].var - D3D12_STATE_VAR_TRANSFORM_GENERIC0;
          ptr[0] = ctx->transform_state_vars[idx * 4];
          ptr[1] = ctx->transform_state_vars[idx * 4 + 1];
@@ -451,7 +453,7 @@ fill_compute_state_vars(struct d3d12_context *ctx,
          break;
       }
       default:
-         unreachable("unknown state variable");
+         UNREACHABLE("unknown state variable");
       }
    }
 
@@ -471,7 +473,7 @@ check_descriptors_left(struct d3d12_context *ctx, bool compute)
       if (!shader)
          continue;
 
-      needed_descs += shader->current->num_cb_bindings;
+      needed_descs += shader->current->end_ubo_binding;
       needed_descs += shader->current->end_srv_binding - shader->current->begin_srv_binding;
       needed_descs += shader->current->nir->info.num_ssbos;
       needed_descs += shader->current->nir->info.num_images;
@@ -511,7 +513,7 @@ update_shader_stage_root_parameters(struct d3d12_context *ctx,
    uint64_t dirty = ctx->shader_dirty[stage];
    assert(shader);
 
-   if (shader->num_cb_bindings > 0) {
+   if (shader->end_ubo_binding - shader->begin_ubo_binding > 0) {
       if (dirty & D3D12_SHADER_DIRTY_CONSTBUF) {
          assert(num_root_descriptors < MAX_DESCRIPTOR_TABLES);
          root_desc_tables[num_root_descriptors] = fill_cbv_descriptors(ctx, shader, stage);
@@ -572,9 +574,7 @@ update_graphics_root_parameters(struct d3d12_context *ctx,
       /* TODO Don't always update state vars */
       if (shader_sel->current->num_state_vars > 0) {
          uint32_t constants[D3D12_MAX_GRAPHICS_STATE_VARS * 4];
-         unsigned size = fill_graphics_state_vars(ctx, dinfo, drawid, draw, shader_sel->current, constants, cmd_sig_key);
-         if (cmd_sig_key->draw_or_dispatch_params)
-            cmd_sig_key->params_root_const_param = num_params;
+         unsigned size = fill_graphics_state_vars(ctx, dinfo, drawid, draw, shader_sel->current, constants, num_params, cmd_sig_key);
          ctx->cmdlist->SetGraphicsRoot32BitConstants(num_params, size, constants, 0);
          num_params++;
       }
@@ -600,7 +600,7 @@ update_compute_root_parameters(struct d3d12_context *ctx,
          uint32_t constants[D3D12_MAX_COMPUTE_STATE_VARS * 4];
          unsigned size = fill_compute_state_vars(ctx, info, shader_sel->current, constants, cmd_sig_key);
          if (cmd_sig_key->draw_or_dispatch_params)
-            cmd_sig_key->params_root_const_param = num_params;
+            cmd_sig_key->params_root_const_param = static_cast<uint8_t>(num_params);
          ctx->cmdlist->SetComputeRoot32BitConstants(num_params, size, constants, 0);
          num_params++;
       }
@@ -614,8 +614,8 @@ validate_stream_output_targets(struct d3d12_context *ctx)
    unsigned factor = 0;
 
    if (ctx->gfx_pipeline_state.num_so_targets &&
-       ctx->gfx_pipeline_state.stages[PIPE_SHADER_GEOMETRY])
-      factor = ctx->gfx_pipeline_state.stages[PIPE_SHADER_GEOMETRY]->key.gs.stream_output_factor;
+       ctx->gfx_pipeline_state.stages[MESA_SHADER_GEOMETRY])
+      factor = ctx->gfx_pipeline_state.stages[MESA_SHADER_GEOMETRY]->key.gs.stream_output_factor;
 
    if (factor > 1)
       return d3d12_enable_fake_so_buffers(ctx, factor);
@@ -624,46 +624,46 @@ validate_stream_output_targets(struct d3d12_context *ctx)
 }
 
 static D3D_PRIMITIVE_TOPOLOGY
-topology(enum pipe_prim_type prim_type, uint8_t patch_vertices)
+topology(enum mesa_prim prim_type, uint8_t patch_vertices)
 {
    switch (prim_type) {
-   case PIPE_PRIM_POINTS:
+   case MESA_PRIM_POINTS:
       return D3D_PRIMITIVE_TOPOLOGY_POINTLIST;
 
-   case PIPE_PRIM_LINES:
+   case MESA_PRIM_LINES:
       return D3D_PRIMITIVE_TOPOLOGY_LINELIST;
 
-   case PIPE_PRIM_LINE_STRIP:
+   case MESA_PRIM_LINE_STRIP:
       return D3D_PRIMITIVE_TOPOLOGY_LINESTRIP;
 
-   case PIPE_PRIM_TRIANGLES:
+   case MESA_PRIM_TRIANGLES:
       return D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 
-   case PIPE_PRIM_TRIANGLE_STRIP:
+   case MESA_PRIM_TRIANGLE_STRIP:
       return D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
 
-   case PIPE_PRIM_LINES_ADJACENCY:
+   case MESA_PRIM_LINES_ADJACENCY:
       return D3D_PRIMITIVE_TOPOLOGY_LINELIST_ADJ;
 
-   case PIPE_PRIM_LINE_STRIP_ADJACENCY:
+   case MESA_PRIM_LINE_STRIP_ADJACENCY:
       return D3D_PRIMITIVE_TOPOLOGY_LINESTRIP_ADJ;
 
-   case PIPE_PRIM_TRIANGLES_ADJACENCY:
+   case MESA_PRIM_TRIANGLES_ADJACENCY:
       return D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST_ADJ;
 
-   case PIPE_PRIM_TRIANGLE_STRIP_ADJACENCY:
+   case MESA_PRIM_TRIANGLE_STRIP_ADJACENCY:
       return D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ;
 
-   case PIPE_PRIM_PATCHES:
+   case MESA_PRIM_PATCHES:
       return (D3D_PRIMITIVE_TOPOLOGY)(D3D_PRIMITIVE_TOPOLOGY_1_CONTROL_POINT_PATCHLIST + patch_vertices - 1);
 
-   case PIPE_PRIM_QUADS:
-   case PIPE_PRIM_QUAD_STRIP:
+   case MESA_PRIM_QUADS:
+   case MESA_PRIM_QUAD_STRIP:
       return D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST; /* HACK: this is just wrong! */
 
    default:
-      debug_printf("pipe_prim_type: %s\n", u_prim_name(prim_type));
-      unreachable("unexpected enum pipe_prim_type");
+      debug_printf("mesa_prim: %s\n", u_prim_name(prim_type));
+      UNREACHABLE("unexpected enum mesa_prim");
    }
 }
 
@@ -676,7 +676,7 @@ ib_format(unsigned index_size)
    case 4: return DXGI_FORMAT_R32_UINT;
 
    default:
-      unreachable("unexpected index-buffer size");
+      UNREACHABLE("unexpected index-buffer size");
    }
 }
 
@@ -707,11 +707,11 @@ transition_surface_subresources_state(struct d3d12_context *ctx,
       start_layer = 0;
       num_layers = 1;
    } else {
-      start_layer = psurf->u.tex.first_layer;
-      num_layers = psurf->u.tex.last_layer - psurf->u.tex.first_layer + 1;
+      start_layer = psurf->first_layer;
+      num_layers = psurf->last_layer - psurf->first_layer + 1;
    }
    d3d12_transition_subresources_state(ctx, res,
-                                       psurf->u.tex.level, 1,
+                                       psurf->level, 1,
                                        start_layer, num_layers,
                                        d3d12_get_format_start_plane(psurf->format),
                                        d3d12_get_format_num_planes(psurf->format),
@@ -720,19 +720,19 @@ transition_surface_subresources_state(struct d3d12_context *ctx,
 }
 
 static bool
-prim_supported(enum pipe_prim_type prim_type)
+prim_supported(enum mesa_prim prim_type)
 {
    switch (prim_type) {
-   case PIPE_PRIM_POINTS:
-   case PIPE_PRIM_LINES:
-   case PIPE_PRIM_LINE_STRIP:
-   case PIPE_PRIM_TRIANGLES:
-   case PIPE_PRIM_TRIANGLE_STRIP:
-   case PIPE_PRIM_LINES_ADJACENCY:
-   case PIPE_PRIM_LINE_STRIP_ADJACENCY:
-   case PIPE_PRIM_TRIANGLES_ADJACENCY:
-   case PIPE_PRIM_TRIANGLE_STRIP_ADJACENCY:
-   case PIPE_PRIM_PATCHES:
+   case MESA_PRIM_POINTS:
+   case MESA_PRIM_LINES:
+   case MESA_PRIM_LINE_STRIP:
+   case MESA_PRIM_TRIANGLES:
+   case MESA_PRIM_TRIANGLE_STRIP:
+   case MESA_PRIM_LINES_ADJACENCY:
+   case MESA_PRIM_LINE_STRIP_ADJACENCY:
+   case MESA_PRIM_TRIANGLES_ADJACENCY:
+   case MESA_PRIM_TRIANGLE_STRIP_ADJACENCY:
+   case MESA_PRIM_PATCHES:
       return true;
 
    default:
@@ -743,11 +743,11 @@ prim_supported(enum pipe_prim_type prim_type)
 static inline struct d3d12_shader_selector *
 d3d12_last_vertex_stage(struct d3d12_context *ctx)
 {
-   struct d3d12_shader_selector *sel = ctx->gfx_stages[PIPE_SHADER_GEOMETRY];
+   struct d3d12_shader_selector *sel = ctx->gfx_stages[MESA_SHADER_GEOMETRY];
    if (!sel || sel->is_variant)
-      sel = ctx->gfx_stages[PIPE_SHADER_TESS_EVAL];
+      sel = ctx->gfx_stages[MESA_SHADER_TESS_EVAL];
    if (!sel)
-      sel = ctx->gfx_stages[PIPE_SHADER_VERTEX];
+      sel = ctx->gfx_stages[MESA_SHADER_VERTEX];
    return sel;
 }
 
@@ -759,20 +759,16 @@ update_draw_indirect_with_sysvals(struct d3d12_context *ctx,
    struct pipe_draw_indirect_info *indirect_out)
 {
    if (*indirect_inout == nullptr ||
-      ctx->gfx_stages[PIPE_SHADER_VERTEX] == nullptr)
+      ctx->gfx_stages[MESA_SHADER_VERTEX] == nullptr)
       return false;
 
-   unsigned sysvals[] = {
-      SYSTEM_VALUE_VERTEX_ID_ZERO_BASE,
-      SYSTEM_VALUE_BASE_VERTEX,
-      SYSTEM_VALUE_FIRST_VERTEX,
-      SYSTEM_VALUE_BASE_INSTANCE,
-      SYSTEM_VALUE_DRAW_ID,
-   };
-   bool any = false;
-   for (unsigned sysval : sysvals) {
-      any |= (BITSET_TEST(ctx->gfx_stages[PIPE_SHADER_VERTEX]->initial->info.system_values_read, sysval));
-   }
+   auto sys_values_read = ctx->gfx_stages[MESA_SHADER_VERTEX]->initial->info.system_values_read;
+   bool any =  BITSET_TEST(sys_values_read, SYSTEM_VALUE_VERTEX_ID_ZERO_BASE) ||
+               BITSET_TEST(sys_values_read, SYSTEM_VALUE_BASE_VERTEX) ||
+               BITSET_TEST(sys_values_read, SYSTEM_VALUE_FIRST_VERTEX) ||
+               BITSET_TEST(sys_values_read, SYSTEM_VALUE_BASE_INSTANCE) ||
+               BITSET_TEST(sys_values_read, SYSTEM_VALUE_DRAW_ID);
+
    if (!any)
       return false;
 
@@ -799,7 +795,7 @@ update_draw_indirect_with_sysvals(struct d3d12_context *ctx,
       draw_count_cbuf.buffer_offset = indirect_in->indirect_draw_count_offset;
       draw_count_cbuf.buffer_size = 4;
       draw_count_cbuf.user_buffer = nullptr;
-      ctx->base.set_constant_buffer(&ctx->base, PIPE_SHADER_COMPUTE, 1, false, &draw_count_cbuf);
+      ctx->base.set_constant_buffer(&ctx->base, MESA_SHADER_COMPUTE, 1, &draw_count_cbuf);
    }
    
    pipe_shader_buffer new_cs_ssbos[2];
@@ -819,7 +815,7 @@ update_draw_indirect_with_sysvals(struct d3d12_context *ctx,
    new_cs_ssbos[1].buffer = ctx->base.screen->resource_create(ctx->base.screen, &output_buf_templ);
    new_cs_ssbos[1].buffer_offset = 0;
    new_cs_ssbos[1].buffer_size = output_buf_templ.width0;
-   ctx->base.set_shader_buffers(&ctx->base, PIPE_SHADER_COMPUTE, 0, 2, new_cs_ssbos, 2);
+   ctx->base.set_shader_buffers(&ctx->base, MESA_SHADER_COMPUTE, 0, 2, new_cs_ssbos, 2);
 
    pipe_grid_info grid = {};
    grid.block[0] = grid.block[1] = grid.block[2] = 1;
@@ -843,7 +839,7 @@ update_draw_auto(struct d3d12_context *ctx,
 {
    if (*indirect_inout == nullptr ||
        (*indirect_inout)->count_from_stream_output == nullptr ||
-       ctx->gfx_stages[PIPE_SHADER_VERTEX] == nullptr)
+       ctx->gfx_stages[MESA_SHADER_VERTEX] == nullptr)
       return false;
 
    d3d12_compute_transform_save_restore save;
@@ -860,14 +856,14 @@ update_draw_auto(struct d3d12_context *ctx,
    auto so_arg = indirect_in->count_from_stream_output;
    d3d12_stream_output_target *target = (d3d12_stream_output_target *)so_arg;
 
-   ctx->transform_state_vars[0] = ctx->vbs[0].stride;
-   ctx->transform_state_vars[1] = ctx->vbs[0].buffer_offset - so_arg->buffer_offset;
+   ctx->transform_state_vars[0] = ctx->gfx_pipeline_state.ves->strides[0];
+   ctx->transform_state_vars[1] = 0;
    
    pipe_shader_buffer new_cs_ssbo;
    new_cs_ssbo.buffer = target->fill_buffer;
    new_cs_ssbo.buffer_offset = target->fill_buffer_offset;
    new_cs_ssbo.buffer_size = target->fill_buffer->width0 - new_cs_ssbo.buffer_offset;
-   ctx->base.set_shader_buffers(&ctx->base, PIPE_SHADER_COMPUTE, 0, 1, &new_cs_ssbo, 1);
+   ctx->base.set_shader_buffers(&ctx->base, MESA_SHADER_COMPUTE, 0, 1, &new_cs_ssbo, 1);
 
    pipe_grid_info grid = {};
    grid.block[0] = grid.block[1] = grid.block[2] = 1;
@@ -908,17 +904,17 @@ d3d12_draw_vbo(struct pipe_context *pctx,
    enum d3d12_surface_conversion_mode conversion_modes[PIPE_MAX_COLOR_BUFS] = {};
    struct pipe_draw_indirect_info patched_indirect = {};
 
-   if (!prim_supported((enum pipe_prim_type)dinfo->mode) ||
+   if (!prim_supported((enum mesa_prim)dinfo->mode) ||
        dinfo->index_size == 1 ||
        (dinfo->primitive_restart && dinfo->restart_index != 0xffff &&
         dinfo->restart_index != 0xffffffff)) {
 
       if (!dinfo->primitive_restart &&
           !indirect &&
-          !u_trim_pipe_prim((enum pipe_prim_type)dinfo->mode, (unsigned *)&draws[0].count))
+          !u_trim_pipe_prim((enum mesa_prim)dinfo->mode, (unsigned *)&draws[0].count))
          return;
 
-      ctx->initial_api_prim = (enum pipe_prim_type)dinfo->mode;
+      ctx->initial_api_prim = (enum mesa_prim)dinfo->mode;
       util_primconvert_save_rasterizer_state(ctx->primconvert, &ctx->gfx_pipeline_state.rast->base);
       util_primconvert_draw_vbo(ctx->primconvert, dinfo, drawid_offset, indirect, draws, num_draws);
       return;
@@ -943,8 +939,8 @@ d3d12_draw_vbo(struct pipe_context *pctx,
    }
 
    for (int i = 0; i < ctx->fb.nr_cbufs; ++i) {
-      if (ctx->fb.cbufs[i]) {
-         struct d3d12_surface *surface = d3d12_surface(ctx->fb.cbufs[i]);
+      if (ctx->fb_cbufs[i]) {
+         struct d3d12_surface *surface = ctx->fb_cbufs[i];
          conversion_modes[i] = d3d12_surface_update_pre_draw(pctx, surface, d3d12_rtv_format(ctx, i));
          if (conversion_modes[i] != D3D12_SURFACE_CONVERSION_NONE)
             ctx->cmdlist_dirty |= D3D12_DIRTY_FRAMEBUFFER;
@@ -953,23 +949,23 @@ d3d12_draw_vbo(struct pipe_context *pctx,
 
    struct d3d12_rasterizer_state *rast = ctx->gfx_pipeline_state.rast;
    if (rast->twoface_back) {
-      enum pipe_prim_type saved_mode = ctx->initial_api_prim;
+      enum mesa_prim saved_mode = ctx->initial_api_prim;
       twoface_emulation(ctx, rast, dinfo, indirect, &draws[0]);
       ctx->initial_api_prim = saved_mode;
    }
 
    if (ctx->pstipple.enabled && ctx->gfx_pipeline_state.rast->base.poly_stipple_enable)
-      ctx->shader_dirty[PIPE_SHADER_FRAGMENT] |= D3D12_SHADER_DIRTY_SAMPLER_VIEWS |
+      ctx->shader_dirty[MESA_SHADER_FRAGMENT] |= D3D12_SHADER_DIRTY_SAMPLER_VIEWS |
                                                  D3D12_SHADER_DIRTY_SAMPLERS;
 
    /* this should *really* be fixed at a higher level than here! */
-   enum pipe_prim_type reduced_prim = u_reduced_prim((enum pipe_prim_type)dinfo->mode);
-   if (reduced_prim == PIPE_PRIM_TRIANGLES &&
+   enum mesa_prim reduced_prim = u_reduced_prim((enum mesa_prim)dinfo->mode);
+   if (reduced_prim == MESA_PRIM_TRIANGLES &&
        ctx->gfx_pipeline_state.rast->base.cull_face == PIPE_FACE_FRONT_AND_BACK)
       return;
 
    if (ctx->gfx_pipeline_state.prim_type != dinfo->mode) {
-      ctx->gfx_pipeline_state.prim_type = (enum pipe_prim_type)dinfo->mode;
+      ctx->gfx_pipeline_state.prim_type = (enum mesa_prim)dinfo->mode;
       ctx->state_dirty |= D3D12_DIRTY_PRIM_MODE;
    }
 
@@ -984,7 +980,7 @@ d3d12_draw_vbo(struct pipe_context *pctx,
    }
 
    /* Reset to an invalid value after it's been used */
-   ctx->initial_api_prim = PIPE_PRIM_MAX;
+   ctx->initial_api_prim = MESA_PRIM_COUNT;
 
    /* Copy the stream output info from the current vertex/geometry shader */
    if (ctx->state_dirty & D3D12_DIRTY_SHADER) {
@@ -1080,7 +1076,7 @@ d3d12_draw_vbo(struct pipe_context *pctx,
             viewports[i].MinDepth = 0.0f;
             viewports[i].MaxDepth = 1.0f;
          }
-         if (ctx->fb.nr_cbufs == 0 && !ctx->fb.zsbuf) {
+         if (ctx->fb.nr_cbufs == 0 && !ctx->fb.zsbuf.texture) {
             viewports[i].TopLeftX = MAX2(0.0f, viewports[i].TopLeftX);
             viewports[i].TopLeftY = MAX2(0.0f, viewports[i].TopLeftY);
             viewports[i].Width = MIN2(ctx->fb.width, viewports[i].Width);
@@ -1108,11 +1104,17 @@ d3d12_draw_vbo(struct pipe_context *pctx,
       }
    }
 
-   if (ctx->cmdlist_dirty & D3D12_DIRTY_STENCIL_REF)
-      ctx->cmdlist->OMSetStencilRef(ctx->stencil_ref.ref_value[0]);
+   if (ctx->cmdlist_dirty & D3D12_DIRTY_STENCIL_REF) {
+      if (ctx->gfx_pipeline_state.zsa->backface_enabled &&
+          screen->opts14.IndependentFrontAndBackStencilRefMaskSupported &&
+          ctx->cmdlist8 != nullptr)
+         ctx->cmdlist8->OMSetFrontAndBackStencilRef(ctx->stencil_ref.ref_value[0], ctx->stencil_ref.ref_value[1]);
+      else
+         ctx->cmdlist->OMSetStencilRef(ctx->stencil_ref.ref_value[0]);
+   }
 
    if (ctx->cmdlist_dirty & D3D12_DIRTY_PRIM_MODE)
-      ctx->cmdlist->IASetPrimitiveTopology(topology((enum pipe_prim_type)dinfo->mode, ctx->patch_vertices));
+      ctx->cmdlist->IASetPrimitiveTopology(topology((enum mesa_prim)dinfo->mode, ctx->patch_vertices));
 
    for (unsigned i = 0; i < ctx->num_vbs; ++i) {
       if (ctx->vbs[i].buffer.resource) {
@@ -1122,8 +1124,17 @@ d3d12_draw_vbo(struct pipe_context *pctx,
             d3d12_batch_reference_resource(batch, res, false);
       }
    }
-   if (ctx->cmdlist_dirty & D3D12_DIRTY_VERTEX_BUFFERS)
+   if (ctx->cmdlist_dirty & (D3D12_DIRTY_VERTEX_BUFFERS | D3D12_DIRTY_VERTEX_ELEMENTS)) {
+      uint16_t *strides = ctx->gfx_pipeline_state.ves ? ctx->gfx_pipeline_state.ves->strides : NULL;
+      if (strides) {
+         for (unsigned i = 0; i < ctx->num_vbs; i++)
+            ctx->vbvs[i].StrideInBytes = strides[i];
+      } else {
+         for (unsigned i = 0; i < ctx->num_vbs; i++)
+            ctx->vbvs[i].StrideInBytes = 0;
+      }
       ctx->cmdlist->IASetVertexBuffers(0, ctx->num_vbs, ctx->vbvs);
+   }
 
    if (index_buffer) {
       D3D12_INDEX_BUFFER_VIEW ibv;
@@ -1147,20 +1158,20 @@ d3d12_draw_vbo(struct pipe_context *pctx,
       D3D12_CPU_DESCRIPTOR_HANDLE render_targets[PIPE_MAX_COLOR_BUFS] = {};
       D3D12_CPU_DESCRIPTOR_HANDLE *depth_desc = NULL, tmp_desc;
       for (int i = 0; i < ctx->fb.nr_cbufs; ++i) {
-         if (ctx->fb.cbufs[i]) {
-            struct d3d12_surface *surface = d3d12_surface(ctx->fb.cbufs[i]);
-            render_targets[i] = d3d12_surface_get_handle(surface, conversion_modes[i]);
+         if (ctx->fb_cbufs[i]) {
+            struct d3d12_surface *surface = ctx->fb_cbufs[i];
+            render_targets[i] = d3d12_surface_get_handle(surface, conversion_modes[i], d3d12_rtv_format(ctx, i));
             d3d12_batch_reference_surface_texture(batch, surface);
          } else
             render_targets[i] = screen->null_rtv.cpu_handle;
       }
-      if (ctx->fb.zsbuf) {
-         struct d3d12_surface *surface = d3d12_surface(ctx->fb.zsbuf);
+      if (ctx->fb_zsbuf) {
+         struct d3d12_surface *surface = ctx->fb_zsbuf;
          tmp_desc = surface->desc_handle.cpu_handle;
          d3d12_batch_reference_surface_texture(batch, surface);
          depth_desc = &tmp_desc;
       }
-      ctx->cmdlist->OMSetRenderTargets(ctx->fb.nr_cbufs, render_targets, FALSE, depth_desc);
+      ctx->cmdlist->OMSetRenderTargets(ctx->fb.nr_cbufs, render_targets, false, depth_desc);
    }
 
    struct pipe_stream_output_target **so_targets = ctx->fake_so_buffer_factor ? ctx->fake_so_targets
@@ -1188,18 +1199,19 @@ d3d12_draw_vbo(struct pipe_context *pctx,
       ctx->cmdlist->SOSetTargets(0, 4, so_buffer_views);
 
    for (int i = 0; i < ctx->fb.nr_cbufs; ++i) {
-      struct pipe_surface *psurf = ctx->fb.cbufs[i];
-      if (!psurf)
+      struct d3d12_surface *surf = ctx->fb_cbufs[i];
+      if (!surf)
          continue;
 
-      struct pipe_resource *pres = conversion_modes[i] == D3D12_SURFACE_CONVERSION_BGRA_UINT ?
-                                      d3d12_surface(psurf)->rgba_texture : psurf->texture;
-      transition_surface_subresources_state(ctx, psurf, pres,
+      struct pipe_resource *pres = surf->base.texture;
+      if (conversion_modes[i] == D3D12_SURFACE_CONVERSION_BGRA_UINT)
+         pres = d3d12_resource_get_logicop_texture(d3d12_resource(pres));
+      transition_surface_subresources_state(ctx, &surf->base, pres,
          D3D12_RESOURCE_STATE_RENDER_TARGET);
    }
-   if (ctx->fb.zsbuf) {
-      struct pipe_surface *psurf = ctx->fb.zsbuf;
-      transition_surface_subresources_state(ctx, psurf, psurf->texture,
+   if (ctx->fb_zsbuf) {
+      struct d3d12_surface *surf = ctx->fb_zsbuf;
+      transition_surface_subresources_state(ctx, &surf->base, surf->base.texture,
          D3D12_RESOURCE_STATE_DEPTH_WRITE);
    }
 
@@ -1247,6 +1259,7 @@ d3d12_draw_vbo(struct pipe_context *pctx,
          ctx->cmdlist->DrawInstanced(draws[0].count, dinfo->instance_count,
                                      draws[0].start, dinfo->start_instance);
    }
+   ctx->has_commands = true;
 
    ctx->state_dirty &= D3D12_DIRTY_COMPUTE_MASK;
    batch->pending_memory_barrier = false;
@@ -1261,8 +1274,8 @@ d3d12_draw_vbo(struct pipe_context *pctx,
       ctx->shader_dirty[i] = 0;
 
    for (int i = 0; i < ctx->fb.nr_cbufs; ++i) {
-      if (ctx->fb.cbufs[i]) {
-         struct d3d12_surface *surface = d3d12_surface(ctx->fb.cbufs[i]);
+      if (ctx->fb_cbufs[i]) {
+         struct d3d12_surface *surface = ctx->fb_cbufs[i];
          d3d12_surface_update_post_draw(pctx, surface, conversion_modes[i]);
       }
    }
@@ -1280,7 +1293,7 @@ update_dispatch_indirect_with_sysvals(struct d3d12_context *ctx,
        ctx->compute_state == nullptr)
       return false;
 
-   if (!BITSET_TEST(ctx->compute_state->current->nir->info.system_values_read, SYSTEM_VALUE_NUM_WORKGROUPS))
+   if (!BITSET_TEST(ctx->compute_state->initial->info.system_values_read, SYSTEM_VALUE_NUM_WORKGROUPS))
       return false;
 
    if (ctx->current_predication)
@@ -1297,7 +1310,8 @@ update_dispatch_indirect_with_sysvals(struct d3d12_context *ctx,
    output_buf_templ.usage = PIPE_USAGE_DEFAULT;
    *indirect_out = ctx->base.screen->resource_create(ctx->base.screen, &output_buf_templ);
 
-   struct pipe_box src_box = { (int)*indirect_offset_inout, 0, 0, sizeof(uint32_t) * 3, 1, 1 };
+   struct pipe_box src_box;
+   u_box_3d((int)*indirect_offset_inout, 0, 0, sizeof(uint32_t) * 3, 1, 1, &src_box);
    ctx->base.resource_copy_region(&ctx->base, *indirect_out, 0, 0, 0, 0, indirect_in, 0, &src_box);
    ctx->base.resource_copy_region(&ctx->base, *indirect_out, 0, src_box.width, 0, 0, indirect_in, 0, &src_box);
 
@@ -1339,7 +1353,7 @@ d3d12_launch_grid(struct pipe_context *pctx, const struct pipe_grid_info *info)
       if (ctx->compute_pipeline_state.root_signature != root_signature) {
          ctx->compute_pipeline_state.root_signature = root_signature;
          ctx->state_dirty |= D3D12_DIRTY_COMPUTE_ROOT_SIGNATURE;
-         ctx->shader_dirty[PIPE_SHADER_COMPUTE] |= D3D12_SHADER_DIRTY_ALL;
+         ctx->shader_dirty[MESA_SHADER_COMPUTE] |= D3D12_SHADER_DIRTY_ALL;
       }
    }
 
@@ -1392,6 +1406,7 @@ d3d12_launch_grid(struct pipe_context *pctx, const struct pipe_grid_info *info)
    } else {
       ctx->cmdlist->Dispatch(info->grid[0], info->grid[1], info->grid[2]);
    }
+   ctx->has_commands = true;
 
    ctx->state_dirty &= D3D12_DIRTY_GFX_MASK;
    ctx->cmdlist_dirty &= D3D12_DIRTY_GFX_MASK;
@@ -1400,6 +1415,6 @@ d3d12_launch_grid(struct pipe_context *pctx, const struct pipe_grid_info *info)
    ctx->cmdlist_dirty |= D3D12_DIRTY_SHADER;
    batch->pending_memory_barrier = false;
 
-   ctx->shader_dirty[PIPE_SHADER_COMPUTE] = 0;
+   ctx->shader_dirty[MESA_SHADER_COMPUTE] = 0;
    pipe_resource_reference(&patched_indirect, nullptr);
 }

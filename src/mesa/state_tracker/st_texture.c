@@ -62,8 +62,10 @@ st_texture_create(struct st_context *st,
                   GLuint depth0,
                   GLuint layers,
                   GLuint nr_samples,
+                  unsigned flags,
                   GLuint bind,
-                  bool sparse)
+                  bool sparse,
+                  uint32_t compression)
 {
    struct pipe_resource pt, *newtex;
    struct pipe_screen *screen = st->screen;
@@ -96,6 +98,7 @@ st_texture_create(struct st_context *st,
    pt.flags = PIPE_RESOURCE_FLAG_TEXTURING_MORE_LIKELY;
    pt.nr_samples = nr_samples;
    pt.nr_storage_samples = nr_samples;
+   pt.compression_rate = compression;
 
    if (sparse)
       pt.flags |= PIPE_RESOURCE_FLAG_SPARSE;
@@ -117,10 +120,10 @@ st_texture_create(struct st_context *st,
 void
 st_gl_texture_dims_to_pipe_dims(GLenum texture,
                                 unsigned widthIn,
-                                uint16_t heightIn,
+                                unsigned heightIn,
                                 uint16_t depthIn,
                                 unsigned *widthOut,
-                                uint16_t *heightOut,
+                                unsigned *heightOut,
                                 uint16_t *depthOut,
                                 uint16_t *layersOut)
 {
@@ -186,7 +189,7 @@ st_gl_texture_dims_to_pipe_dims(GLenum texture,
       *layersOut = util_align_npot(depthIn, 6);
       break;
    default:
-      unreachable("Unexpected texture in st_gl_texture_dims_to_pipe_dims()");
+      UNREACHABLE("Unexpected texture in st_gl_texture_dims_to_pipe_dims()");
    case GL_TEXTURE_3D:
    case GL_PROXY_TEXTURE_3D:
       *widthOut = widthIn;
@@ -206,8 +209,8 @@ st_texture_match_image(struct st_context *st,
                        const struct pipe_resource *pt,
                        const struct gl_texture_image *image)
 {
-   unsigned ptWidth;
-   uint16_t ptHeight, ptDepth, ptLayers;
+   unsigned ptWidth, ptHeight;
+   uint16_t ptDepth, ptLayers;
 
    /* Images with borders are never pulled into mipmap textures.
     */
@@ -257,6 +260,21 @@ st_texture_image_insert_transfer(struct gl_texture_image *stImage,
 
    assert(!stImage->transfer[index].transfer);
    stImage->transfer[index].transfer = transfer;
+}
+
+/* See st_texture.h for more information. */
+GLuint
+st_texture_image_resource_level(struct gl_texture_image *stImage)
+{
+   /* An image for a non-finalized texture object only has a single level. */
+   if (stImage->pt != stImage->TexObject->pt)
+      return 0;
+
+   /* An immutable texture object may have views with an LOD offset. */
+   if (stImage->TexObject->Immutable)
+      return stImage->Level + stImage->TexObject->Attrib.MinLevel;
+
+   return stImage->Level;
 }
 
 /**
@@ -334,7 +352,7 @@ print_center_pixel(struct pipe_context *pipe, struct pipe_resource *src)
 {
    struct pipe_transfer *xfer;
    struct pipe_box region;
-   ubyte *map;
+   uint8_t *map;
 
    region.x = src->width0 / 2;
    region.y = src->height0 / 2;
@@ -428,7 +446,8 @@ st_create_color_map_texture(struct gl_context *ctx)
 
    /* create texture for color map/table */
    pt = st_texture_create(st, PIPE_TEXTURE_2D, format, 0,
-                          texSize, texSize, 1, 1, 0, PIPE_BIND_SAMPLER_VIEW, false);
+                          texSize, texSize, 1, 1, 0, PIPE_RESOURCE_FLAG_MAP_UNSYNCHRONIZED, PIPE_BIND_SAMPLER_VIEW, false,
+                          PIPE_COMPRESSION_FIXED_RATE_NONE);
    return pt;
 }
 
@@ -438,7 +457,7 @@ st_create_color_map_texture(struct gl_context *ctx)
  */
 static void
 st_destroy_bound_texture_handles_per_stage(struct st_context *st,
-                                           enum pipe_shader_type shader)
+                                           mesa_shader_stage shader)
 {
    struct st_bound_handles *bound_handles = &st->bound_texture_handles[shader];
    struct pipe_context *pipe = st->pipe;
@@ -467,7 +486,7 @@ st_destroy_bound_texture_handles(struct st_context *st)
 {
    unsigned i;
 
-   for (i = 0; i < PIPE_SHADER_TYPES; i++) {
+   for (i = 0; i < MESA_SHADER_MESH_STAGES; i++) {
       st_destroy_bound_texture_handles_per_stage(st, i);
    }
 }
@@ -478,7 +497,7 @@ st_destroy_bound_texture_handles(struct st_context *st)
  */
 static void
 st_destroy_bound_image_handles_per_stage(struct st_context *st,
-                                         enum pipe_shader_type shader)
+                                         mesa_shader_stage shader)
 {
    struct st_bound_handles *bound_handles = &st->bound_image_handles[shader];
    struct pipe_context *pipe = st->pipe;
@@ -507,7 +526,7 @@ st_destroy_bound_image_handles(struct st_context *st)
 {
    unsigned i;
 
-   for (i = 0; i < PIPE_SHADER_TYPES; i++) {
+   for (i = 0; i < MESA_SHADER_MESH_STAGES; i++) {
       st_destroy_bound_image_handles_per_stage(st, i);
    }
 }
@@ -523,16 +542,16 @@ st_create_texture_handle_from_unit(struct st_context *st,
    struct pipe_context *pipe = st->pipe;
    struct pipe_sampler_view *view;
    struct pipe_sampler_state sampler = {0};
+   const bool glsl130 =
+      (prog->shader_program ? prog->shader_program->GLSL_Version : 0) >= 130;
 
    /* TODO: Clarify the interaction of ARB_bindless_texture and EXT_texture_sRGB_decode */
-   view = st_update_single_texture(st, texUnit, prog->sh.data->Version >= 130,
-                                   true, false);
+   view = st_update_single_texture(st, texUnit, glsl130, true, 0, NULL);
    if (!view)
       return 0;
 
    if (view->target != PIPE_BUFFER)
-      st_convert_sampler_from_unit(st, &sampler, texUnit,
-                                   prog->sh.data && prog->sh.data->Version >= 130);
+      st_convert_sampler_from_unit(st, &sampler, texUnit, glsl130);
 
    assert(st->ctx->Texture.Unit[texUnit]._Current);
 
@@ -563,7 +582,7 @@ void
 st_make_bound_samplers_resident(struct st_context *st,
                                 struct gl_program *prog)
 {
-   enum pipe_shader_type shader = pipe_shader_type_from_mesa(prog->info.stage);
+   mesa_shader_stage shader = prog->info.stage;
    struct st_bound_handles *bound_handles = &st->bound_texture_handles[shader];
    struct pipe_context *pipe = st->pipe;
    GLuint64 handle;
@@ -610,7 +629,7 @@ void
 st_make_bound_images_resident(struct st_context *st,
                               struct gl_program *prog)
 {
-   enum pipe_shader_type shader = pipe_shader_type_from_mesa(prog->info.stage);
+   mesa_shader_stage shader = prog->info.stage;
    struct st_bound_handles *bound_handles = &st->bound_image_handles[shader];
    struct pipe_context *pipe = st->pipe;
    GLuint64 handle;

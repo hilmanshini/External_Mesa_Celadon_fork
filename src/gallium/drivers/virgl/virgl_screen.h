@@ -38,12 +38,20 @@ enum virgl_debug_flags {
    VIRGL_DEBUG_SYNC                 = 1 << 4,
    VIRGL_DEBUG_XFER                 = 1 << 5,
    VIRGL_DEBUG_NO_COHERENT          = 1 << 6,
-   VIRGL_DEBUG_USE_TGSI             = 1 << 7,
    VIRGL_DEBUG_L8_SRGB_ENABLE_READBACK = 1 << 8,
    VIRGL_DEBUG_VIDEO                = 1 << 9,
+   VIRGL_DEBUG_SHADER_SYNC          = 1 << 10,
 };
 
+extern const struct debug_named_value virgl_debug_options[];
 extern int virgl_debug;
+
+struct virgl_screen_gbm_format_modifier {
+   struct virgl_gbm_format_modifier list;
+   struct virgl_resource *res;
+   struct pipe_context *ctx;
+   simple_mtx_t lock;
+};
 
 struct virgl_screen {
    struct pipe_screen base;
@@ -64,11 +72,14 @@ struct virgl_screen {
    bool tweak_gles_apply_bgra_dest_swizzle;
    bool tweak_l8_srgb_readback;
    bool no_coherent;
+   bool shader_sync;
    int32_t tweak_gles_tf3_value;
 
    nir_shader_compiler_options compiler_options;
 
    struct disk_cache *disk_cache;
+
+   struct virgl_screen_gbm_format_modifier gbm;
 };
 
 
@@ -88,23 +99,23 @@ virgl_has_scanout_format(struct virgl_screen *vscreen,
                          bool may_emulate_bgra);
 
 static inline enum virgl_shader_stage
-virgl_shader_stage_convert(enum pipe_shader_type type)
+virgl_shader_stage_convert(mesa_shader_stage type)
 {
    switch (type) {
-   case PIPE_SHADER_VERTEX:
+   case MESA_SHADER_VERTEX:
       return VIRGL_SHADER_VERTEX;
-   case PIPE_SHADER_TESS_CTRL:
+   case MESA_SHADER_TESS_CTRL:
       return VIRGL_SHADER_TESS_CTRL;
-   case PIPE_SHADER_TESS_EVAL:
+   case MESA_SHADER_TESS_EVAL:
       return VIRGL_SHADER_TESS_EVAL;
-   case PIPE_SHADER_GEOMETRY:
+   case MESA_SHADER_GEOMETRY:
       return VIRGL_SHADER_GEOMETRY;
-   case PIPE_SHADER_FRAGMENT:
+   case MESA_SHADER_FRAGMENT:
       return VIRGL_SHADER_FRAGMENT;
-   case PIPE_SHADER_COMPUTE:
+   case MESA_SHADER_COMPUTE:
       return VIRGL_SHADER_COMPUTE;
    default:
-      unreachable("virgl: unknown shader stage.\n");
+      UNREACHABLE("virgl: unknown shader stage.\n");
    }
 }
 
@@ -114,5 +125,8 @@ virgl_shader_stage_convert(enum pipe_shader_type type)
  * maps that don't have a 16 byte alignment.
  */
 #define VIRGL_MAP_BUFFER_ALIGNMENT 64
+
+void
+virgl_screen_sync_format_modifier(struct virgl_screen *vscreen);
 
 #endif

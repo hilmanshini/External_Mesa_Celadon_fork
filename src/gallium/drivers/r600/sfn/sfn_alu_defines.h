@@ -1,27 +1,7 @@
 /* -*- mesa-c++  -*-
- *
- * Copyright (c) 2018-2019 Collabora LTD
- *
+ * Copyright 2018-2019 Collabora LTD
  * Author: Gert Wollny <gert.wollny@collabora.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef r600_sfn_alu_defines_h
@@ -33,6 +13,12 @@
 #include <map>
 
 namespace r600 {
+
+// We sacrifice 123 for dummy dests
+static const int g_registers_end = 123;
+static const int g_clause_local_start = 124;
+static const int g_clause_local_end = 128;
+static const int g_registers_unused = 0x7fffffff;
 
 /* ALU op2 instructions 17:7 top three bits always zero. */
 enum EAluOp {
@@ -186,7 +172,7 @@ enum EAluOp {
    op1_ldexp_64 = 197,
    op1_fract_64 = 198,
    op2_pred_setgt_64 = 199,
-   op2_pred_sete_64 = 198,
+   op2_pred_sete_64 = 200,
    op2_pred_setge_64 = 201,
    OP2V_MUL_64 = 202,
    op2_add_64 = 203,
@@ -242,13 +228,8 @@ enum EAluOp {
 };
 
 enum AluModifiers {
-   alu_src0_neg,
-   alu_src0_abs,
    alu_src0_rel,
-   alu_src1_neg,
-   alu_src1_abs,
    alu_src1_rel,
-   alu_src2_neg,
    alu_src2_rel,
    alu_dst_clamp,
    alu_dst_rel,
@@ -265,14 +246,8 @@ enum AluModifiers {
    alu_lds_address,
    alu_no_schedule_bias,
    alu_64bit_op,
+   alu_flag_none,
    alu_flag_count
-};
-
-enum AluDstModifiers {
-   omod_off = 0,
-   omod_mul2 = 1,
-   omod_mul4 = 2,
-   omod_divl2 = 3
 };
 
 enum AluPredSel {
@@ -314,9 +289,12 @@ struct AluOp {
    static constexpr int t = 16;
    static constexpr int a = 31;
 
-   AluOp(int ns, int f, uint8_t um_r600, uint8_t um_r700, uint8_t um_eg, const char *n):
+   AluOp(int ns, bool src_mod, bool clamp, bool fp64, uint8_t um_r600,
+         uint8_t um_r700, uint8_t um_eg, const char *n):
        nsrc(ns),
-       is_float(f),
+       can_srcmod(src_mod),
+       can_clamp(clamp),
+       is_fp64(fp64),
        name(n)
    {
       unit_mask[0] = um_r600;
@@ -331,7 +309,9 @@ struct AluOp {
    }
 
    int nsrc : 4;
-   int is_float : 1;
+   int can_srcmod : 1;
+   int can_clamp : 1;
+   int is_fp64 : 1;
    uint8_t unit_mask[3];
    const char *name;
 };
@@ -470,6 +450,7 @@ struct KCacheLine {
    int bank{0};
    int addr{0};
    int len{0};
+   int index_mode{0};
    enum KCacheLockMode {
       free,
       lock_1,

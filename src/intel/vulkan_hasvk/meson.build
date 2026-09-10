@@ -1,22 +1,5 @@
 # Copyright © 2017-2019 Intel Corporation
-
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-
-# The above copyright notice and this permission notice shall be included in
-# all copies or substantial portions of the Software.
-
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-# SOFTWARE.
+# SPDX-License-Identifier: MIT
 
 anv_hasvk_entrypoints = custom_target(
   'anv_hasvk_entrypoints',
@@ -25,6 +8,7 @@ anv_hasvk_entrypoints = custom_target(
   command : [
     prog_python, '@INPUT0@', '--xml', '@INPUT1@', '--proto', '--weak',
     '--out-h', '@OUTPUT0@', '--out-c', '@OUTPUT1@', '--prefix', 'anv',
+    '--beta', with_vulkan_beta.to_string(),
     '--device-prefix', 'gfx7', '--device-prefix', 'gfx75',
     '--device-prefix', 'gfx8',
     '--device-prefix', 'doom64',
@@ -32,39 +16,75 @@ anv_hasvk_entrypoints = custom_target(
   depend_files : vk_entrypoints_gen_depend_files,
 )
 
+icd_file_name = libname_prefix + 'vulkan_intel_hasvk.' + libname_suffix
+
 intel_hasvk_icd = custom_target(
   'intel_hasvk_icd',
   input : [vk_icd_gen, vk_api_xml],
-  output : 'intel_hasvk_icd.@0@.json'.format(host_machine.cpu()),
+  output : 'intel_hasvk_icd.' + vulkan_manifest_suffix,
   command : [
     prog_python, '@INPUT0@',
     '--api-version', '1.3', '--xml', '@INPUT1@',
-    '--lib-path', join_paths(get_option('prefix'), get_option('libdir'),
-                             'libvulkan_intel_hasvk.so'),
+    '--sizeof-pointer', sizeof_pointer,
+    '--icd-lib-path', vulkan_icd_lib_path,
+    '--icd-filename', icd_file_name,
     '--out', '@OUTPUT@',
   ],
   build_by_default : true,
   install_dir : with_vulkan_icd_dir,
+  install_tag : 'runtime',
   install : true,
 )
 
-if meson.version().version_compare('>= 0.58')
-  _dev_icdname = 'intel_hasvk_devenv_icd.@0@.json'.format(host_machine.cpu())
-  custom_target(
-    'intel_hasvk_devenv_icd',
-    input : [vk_icd_gen, vk_api_xml],
-    output : _dev_icdname,
-    command : [
-      prog_python, '@INPUT0@',
-      '--api-version', '1.3', '--xml', '@INPUT1@',
-      '--lib-path', meson.current_build_dir() / 'libvulkan_intel_hasvk.so',
-      '--out', '@OUTPUT@',
-    ],
-    build_by_default : true,
-  )
+_dev_icdname = 'intel_hasvk_devenv_icd.@0@.json'.format(host_machine.cpu())
+_dev_icd = custom_target(
+  'intel_hasvk_devenv_icd',
+  input : [vk_icd_gen, vk_api_xml],
+  output : _dev_icdname,
+  command : [
+    prog_python, '@INPUT0@',
+    '--api-version', '1.3', '--xml', '@INPUT1@',
+    '--sizeof-pointer', sizeof_pointer,
+    '--icd-lib-path', meson.current_build_dir(),
+    '--icd-filename', icd_file_name,
+    '--out', '@OUTPUT@',
+  ],
+  build_by_default : true,
+)
 
-  devenv.append('VK_ICD_FILENAMES', meson.current_build_dir() / _dev_icdname)
-endif
+devenv.append('VK_DRIVER_FILES', _dev_icd.full_path())
+
+anv_flags = [
+  no_override_init_args,
+  sse2_args,
+]
+
+anv_hasvk_drirc = custom_target(
+  'anv_hasvk_drirc',
+  input  : [files('anv_drirc_gen.py'), drirc_gen, '00-hasvk-defaults.conf'],
+  output : ['hasvk_drirc.c', 'hasvk_drirc.h'],
+  command : [
+    prog_python, '@INPUT0@',
+    '--import-path', join_paths(dir_source_root, 'src/util'),
+    '--drirc-src', '@OUTPUT0@',
+    '--drirc-hdr', '@OUTPUT1@',
+    '--validate', '@INPUT2@',
+  ],
+)
+
+libanv_hasvk_drirc = static_library(
+  'anv_hasvk_drirc',
+  anv_hasvk_drirc,
+  include_directories : [inc_include, inc_src, inc_intel],
+  c_args : anv_flags,
+  gnu_symbol_visibility : 'hidden',
+  dependencies : idep_mesautil,
+)
+
+idep_anv_hasvk_drirc = declare_dependency(
+  sources : anv_hasvk_drirc[1],
+  link_with : libanv_hasvk_drirc,
+)
 
 libanv_per_hw_ver_libs = []
 anv_per_hw_ver_files = files(
@@ -83,10 +103,10 @@ foreach g : [['70', ['gfx7_cmd_buffer.c']],
     'anv_per_hw_ver@0@'.format(_gfx_ver),
     [anv_per_hw_ver_files, g[1], anv_hasvk_entrypoints[0]],
     include_directories : [
-      inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_compiler, inc_intel,
+      inc_include, inc_src, inc_intel,
     ],
     c_args : [
-      no_override_init_args, c_sse2_args,
+      no_override_init_args, sse2_args,
       '-DGFX_VERx10=@0@'.format(_gfx_ver),
     ],
     gnu_symbol_visibility : 'hidden',
@@ -94,6 +114,7 @@ foreach g : [['70', ['gfx7_cmd_buffer.c']],
       dep_libdrm, dep_valgrind, idep_nir_headers, idep_genxml,
       idep_vulkan_util_headers, idep_vulkan_wsi_headers,
       idep_vulkan_runtime_headers, idep_intel_driver_ds_headers,
+      idep_intel_blorp_elk, idep_mesautil, idep_anv_hasvk_drirc,
     ],
   )
 endforeach
@@ -104,7 +125,6 @@ libanv_files = files(
   'anv_android.h',
   'anv_batch_chain.c',
   'anv_blorp.c',
-  'anv_bo_sync.c',
   'anv_cmd_buffer.c',
   'anv_descriptor_set.c',
   'anv_device.c',
@@ -133,14 +153,12 @@ anv_deps = [
   dep_libdrm,
   dep_valgrind,
   idep_genxml,
+  idep_mesautil,
   idep_nir_headers,
   idep_vulkan_util_headers,
   idep_vulkan_runtime_headers,
   idep_vulkan_wsi_headers,
-]
-anv_flags = [
-  no_override_init_args,
-  c_sse2_args,
+  idep_anv_hasvk_drirc,
 ]
 
 anv_cpp_flags = []
@@ -172,7 +190,7 @@ libanv_hasvk_common = static_library(
     gen_xml_pack,
   ],
   include_directories : [
-    inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_intel, inc_compiler,
+    inc_include, inc_src, inc_intel,
     inc_util,
   ],
   c_args : anv_flags,
@@ -185,21 +203,24 @@ libvulkan_intel_hasvk = shared_library(
   'vulkan_intel_hasvk',
   [files('anv_gem.c'), anv_hasvk_entrypoints[0]],
   include_directories : [
-    inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_intel, inc_compiler,
+    inc_include, inc_src, inc_intel,
   ],
   link_whole : [libanv_hasvk_common, libanv_per_hw_ver_libs],
   link_with : [
-    libintel_compiler, libintel_dev, libisl, libblorp, libintel_perf,
+    libisl, libintel_perf,
   ],
   dependencies : [
     dep_thread, dep_dl, dep_m, anv_deps, idep_libintel_common,
     idep_nir, idep_genxml, idep_vulkan_util, idep_vulkan_wsi,
     idep_vulkan_runtime, idep_mesautil, idep_xmlconfig,
-    idep_intel_driver_ds,
+    idep_intel_driver_ds, idep_intel_dev, idep_intel_blorp_elk,
+    idep_intel_decoder_elk, idep_intel_compiler_elk,
   ],
   c_args : anv_flags,
   gnu_symbol_visibility : 'hidden',
-  link_args : [ld_args_build_id, ld_args_bsymbolic, ld_args_gc_sections],
+  link_args : [vulkan_icd_link_args, ld_args_build_id,
+               ld_args_bsymbolic, ld_args_gc_sections],
+  link_depends : vulkan_icd_link_depends,
   install : true,
 )
 
@@ -216,47 +237,58 @@ if with_symbols_check
   )
 endif
 
-if with_tests
+# HasVK and its tests can only run on x86
+if with_tests and host_machine.cpu_family().startswith('x86')
   libvulkan_intel_hasvk_test = static_library(
     'vulkan_intel_hasvk_test',
     [files('anv_gem_stubs.c'), anv_hasvk_entrypoints[0]],
     include_directories : [
-      inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_intel, inc_compiler,
+      inc_include, inc_src, inc_intel,
     ],
     link_whole : libanv_hasvk_common,
     link_with : [
-      libanv_per_hw_ver_libs, libintel_compiler, libintel_common, libintel_dev,
-      libisl, libblorp, libintel_perf,
+      libanv_per_hw_ver_libs, libintel_common,
+      libisl, libintel_perf,
     ],
     dependencies : [
       dep_thread, dep_dl, dep_m, anv_deps,
       idep_nir, idep_vulkan_util, idep_vulkan_wsi, idep_vulkan_runtime,
-      idep_mesautil,
+      idep_mesautil, idep_intel_dev, idep_intel_blorp_elk,
+      idep_intel_decoder_elk, idep_intel_compiler_elk,
     ],
     c_args : anv_flags,
     gnu_symbol_visibility : 'hidden',
   )
 
-  foreach t : ['block_pool_no_free', 'block_pool_grow_first',
-               'state_pool_no_free', 'state_pool_free_list_only',
-               'state_pool', 'state_pool_padding']
-    test(
-      'anv_hasvk_@0@'.format(t),
-      executable(
-        t,
-        ['tests/@0@.c'.format(t), anv_hasvk_entrypoints[0]],
-        c_args : [ c_sse2_args ],
-        link_with : libvulkan_intel_hasvk_test,
-        dependencies : [
-          dep_libdrm, dep_thread, dep_m, dep_valgrind,
-          idep_vulkan_util, idep_vulkan_wsi_headers,
-          idep_vulkan_runtime, idep_intel_driver_ds,
-        ],
-        include_directories : [
-          inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_intel, inc_compiler,
-        ],
-      ),
-      suite : ['intel'],
-    )
-  endforeach
+  files_hasvk_tests = files(
+    'tests/hasvk_tests.cpp',
+
+    'tests/state_pool.c',
+    'tests/state_pool_free_list_only.c',
+    'tests/state_pool_no_free.c',
+    'tests/state_pool_padding.c',
+    'tests/block_pool_no_free.c',
+    'tests/block_pool_grow_first.c',
+  )
+
+  test(
+    'hasvk_tests',
+    executable(
+      'hasvk_tests',
+      [files_hasvk_tests, anv_hasvk_entrypoints[0]],
+      c_args : [ sse2_args ],
+      link_with : libvulkan_intel_hasvk_test,
+      dependencies : [
+        idep_gtest, dep_libdrm, dep_thread, dep_m, dep_valgrind,
+        idep_vulkan_util, idep_vulkan_wsi_headers,
+        idep_vulkan_runtime, idep_intel_driver_ds, idep_intel_dev,
+        idep_anv_hasvk_drirc,
+      ],
+      include_directories : [
+        inc_include, inc_src, inc_intel,
+      ],
+    ),
+    suite : ['intel'],
+    protocol : 'gtest',
+  )
 endif

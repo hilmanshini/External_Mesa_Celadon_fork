@@ -28,6 +28,7 @@
 #define _API_H_
 
 #include "util/format/u_formats.h"
+#include "util/mesa-blake3.h"
 
 struct st_context;
 
@@ -98,6 +99,20 @@ enum st_attachment_type {
 #define ST_INVALIDATE_VS_CONSTBUF0        (1 << 2)
 #define ST_INVALIDATE_VERTEX_BUFFERS      (1 << 3)
 #define ST_INVALIDATE_FB_STATE            (1 << 4)
+#define ST_INVALIDATE_VIEWPORT            (1 << 5)
+#define ST_INVALIDATE_VS_STATE            (1 << 6)
+#define ST_INVALIDATE_GS_STATE            (1 << 7)
+#define ST_INVALIDATE_TCS_STATE           (1 << 8)
+#define ST_INVALIDATE_TES_STATE           (1 << 9)
+#define ST_INVALIDATE_MESH_STATE          (1 << 10)
+#define ST_INVALIDATE_RASTERIZER          (1 << 11)
+#define ST_INVALIDATE_FS_SAMPLERS         (1 << 12)
+#define ST_INVALIDATE_FS_STATE            (1 << 13)
+#define ST_INVALIDATE_BLEND               (1 << 14)
+#define ST_INVALIDATE_DSA                 (1 << 15)
+#define ST_INVALIDATE_SAMPLE_MASK         (1 << 16)
+#define ST_INVALIDATE_SAMPLE_SHADING      (1 << 17)
+#define ST_INVALIDATE_FS_IMAGES           (1 << 18)
 
 /**
  * Value to pipe_frontend_streen::get_param function.
@@ -171,12 +186,15 @@ struct st_config_options
    bool disable_glsl_line_continuations;
    bool disable_arb_gpu_shader5;
    bool disable_uniform_array_resize;
+   char *alias_shader_extension;
+   bool allow_vertex_texture_bias;
    bool force_compat_shaders;
    bool force_glsl_extensions_warn;
    unsigned force_glsl_version;
    bool allow_extra_pp_tokens;
    bool allow_glsl_extension_directive_midshader;
    bool allow_glsl_120_subset_in_110;
+   bool allow_glsl_embedded_structure_declarations;
    bool allow_glsl_builtin_const_expression;
    bool allow_glsl_relaxed_es;
    bool allow_glsl_builtin_variable_redeclaration;
@@ -192,15 +210,22 @@ struct st_config_options
    bool allow_draw_out_of_order;
    bool glthread_nop_check_framebuffer_status;
    bool ignore_map_unsynchronized;
+   bool zero_invalidated_buffers;
+   bool ignore_discard_framebuffer;
    bool force_integer_tex_nearest;
-   bool force_gl_names_reuse;
    bool force_gl_map_buffer_synchronized;
+   bool force_gl_depth_component_type_int;
    bool transcode_etc;
    bool transcode_astc;
+   bool allow_compressed_fallback;
+   char *force_explicit_uniform_loc_zero;
    char *force_gl_vendor;
    char *force_gl_renderer;
    char *mesa_extension_override;
-   unsigned char config_options_sha1[20];
+   bool allow_multisampled_copyteximage;
+   bool vertex_program_default_out;
+
+   unsigned char config_options_blake3[BLAKE3_KEY_LEN];
 };
 
 struct pipe_frontend_screen;
@@ -272,7 +297,8 @@ struct pipe_frontend_drawable
                     struct pipe_frontend_drawable *drawable,
                     const enum st_attachment_type *statts,
                     unsigned count,
-                    struct pipe_resource **out);
+                    struct pipe_resource **out,
+                    struct pipe_resource **resolve);
 
    bool (*flush_swapbuffers)(struct st_context *st,
                              struct pipe_frontend_drawable *drawable);

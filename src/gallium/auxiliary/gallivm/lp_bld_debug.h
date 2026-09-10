@@ -30,11 +30,16 @@
 #define LP_BLD_DEBUG_H
 
 
-#include "gallivm/lp_bld.h"
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdbool.h>
 
-#include "pipe/p_compiler.h"
-#include "util/u_string.h"
+#include "util/detect_os.h"
 
+#include <llvm-c/Core.h>
+#include <llvm-c/DebugInfo.h>
+
+struct gallivm_state;
 
 #define GALLIVM_DEBUG_TGSI          (1 << 0)
 #define GALLIVM_DEBUG_IR            (1 << 1)
@@ -42,12 +47,14 @@
 #define GALLIVM_DEBUG_PERF          (1 << 3)
 #define GALLIVM_DEBUG_GC            (1 << 4)
 #define GALLIVM_DEBUG_DUMP_BC       (1 << 5)
+#define GALLIVM_DEBUG_SYMBOLS       (1 << 8)
 
 #define GALLIVM_PERF_BRILINEAR       (1 << 0)
 #define GALLIVM_PERF_RHO_APPROX      (1 << 1)
 #define GALLIVM_PERF_NO_QUAD_LOD     (1 << 2)
 #define GALLIVM_PERF_NO_OPT          (1 << 3)
 #define GALLIVM_PERF_NO_AOS_SAMPLING (1 << 4)
+#define GALLIVM_PERF_NO_LOD_ELLIPSE  (1 << 5)
 
 #ifdef __cplusplus
 extern "C" {
@@ -56,17 +63,13 @@ extern "C" {
 
 extern unsigned gallivm_perf;
 
-#ifdef DEBUG
 extern unsigned gallivm_debug;
-#else
-#define gallivm_debug 0
-#endif
 
 
 static inline void
 lp_build_name(LLVMValueRef val, const char *format, ...)
 {
-#ifdef DEBUG
+#if MESA_DEBUG
    char name[32];
    va_list ap;
    va_start(ap, format);
@@ -84,7 +87,7 @@ void
 lp_debug_dump_value(LLVMValueRef value);
 
 
-boolean
+bool
 lp_check_alignment(const void *ptr, unsigned alignment);
 
 
@@ -94,6 +97,21 @@ lp_disassemble(LLVMValueRef func, const void *code);
 
 void
 lp_profile(LLVMValueRef func, const void *code);
+
+
+LLVMMetadataRef
+lp_bld_debug_info_type(struct gallivm_state *gallivm, LLVMTypeRef type);
+
+
+void
+lp_function_add_debug_info(struct gallivm_state *gallivm, LLVMValueRef func, LLVMTypeRef func_type);
+
+
+#if DETECT_OS_ANDROID
+#define LP_NIR_SHADER_DUMP_DIR "/data/local/tmp/nir_shaders"
+#else
+#define LP_NIR_SHADER_DUMP_DIR "/tmp/nir_shaders"
+#endif
 
 
 #ifdef __cplusplus

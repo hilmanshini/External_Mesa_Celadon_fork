@@ -1,27 +1,9 @@
-/**********************************************************
- * Copyright 2008-2015 VMware, Inc.  All rights reserved.
- *
- * Permission is hereby granted, free of charge, to any person
- * obtaining a copy of this software and associated documentation
- * files (the "Software"), to deal in the Software without
- * restriction, including without limitation the rights to use, copy,
- * modify, merge, publish, distribute, sublicense, and/or sell copies
- * of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be
- * included in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- *
- **********************************************************/
+/*
+ * Copyright (c) 2008-2024 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc.
+ * and/or its subsidiaries.
+ * SPDX-License-Identifier: MIT
+ */
 
 #include "pipe/p_state.h"
 #include "pipe/p_context.h"
@@ -50,7 +32,7 @@ struct svga_query {
    SVGA3dQueryType svga_type;      /**< SVGA3D_QUERYTYPE_x or unused */
 
    unsigned id;                    /** Per-context query identifier */
-   boolean active;                 /** TRUE if query is active */
+   bool active;                 /** TRUE if query is active */
 
    struct pipe_fence_handle *fence;
 
@@ -133,7 +115,7 @@ begin_query_vgpu9(struct svga_context *svga, struct svga_query *sq)
        * big deal, given that no sane application would do this.
        */
        uint64_t result;
-       svga_get_query_result(&svga->pipe, &sq->base, TRUE, (void*)&result);
+       svga_get_query_result(&svga->pipe, &sq->base, true, (void*)&result);
        assert(sq->queryResult->state != SVGA3D_QUERYSTATE_PENDING);
    }
 
@@ -174,7 +156,7 @@ get_query_result_vgpu9(struct svga_context *svga, struct svga_query *sq,
    if (state == SVGA3D_QUERYSTATE_PENDING) {
       if (!wait)
          return false;
-      sws->fence_finish(sws, sq->fence, PIPE_TIMEOUT_INFINITE,
+      sws->fence_finish(sws, sq->fence, OS_TIMEOUT_INFINITE,
                         SVGA_FENCE_FLAG_QUERY);
       state = sq->queryResult->state;
    }
@@ -545,7 +527,7 @@ rebind_vgpu10_query(struct svga_context *svga)
 {
    SVGA_RETRY(svga, svga->swc->query_bind(svga->swc, svga->gb_query,
                                           SVGA_QUERY_FLAG_REF));
-   svga->rebind.flags.query = FALSE;
+   svga->rebind.flags.query = false;
 }
 
 
@@ -607,7 +589,7 @@ get_query_result_vgpu10(struct svga_context *svga, struct svga_query *sq,
        queryState == SVGA3D_QUERYSTATE_NEW) {
       if (!wait)
          return false;
-      sws->fence_finish(sws, sq->fence, PIPE_TIMEOUT_INFINITE,
+      sws->fence_finish(sws, sq->fence, OS_TIMEOUT_INFINITE,
                         SVGA_FENCE_FLAG_QUERY);
       sws->query_get_result(sws, sq->gb_query, sq->offset, &queryState, result, resultLen);
    }
@@ -638,8 +620,8 @@ svga_create_query(struct pipe_context *pipe,
    if (sq->id == UTIL_BITMASK_INVALID_INDEX)
       goto fail;
 
-   SVGA_DBG(DEBUG_QUERY, "%s type=%d sq=0x%x id=%d\n", __func__,
-            query_type, sq, sq->id);
+   SVGA_DBG(DEBUG_QUERY, "%s type=%d sq=0x%x id=%d idx=%u\n", __func__,
+            query_type, sq, sq->id, index);
 
    switch (query_type) {
    case PIPE_QUERY_OCCLUSION_COUNTER:
@@ -712,6 +694,13 @@ svga_create_query(struct pipe_context *pipe,
       if (ret != PIPE_OK)
          goto fail;
       break;
+   case PIPE_QUERY_PIPELINE_STATISTICS:
+      sq->svga_type = SVGA3D_QUERYTYPE_PIPELINESTATS;
+      ret = define_query_vgpu10(svga, sq,
+                                sizeof(SVGADXPipelineStatisticsQueryResult));
+      if (ret != PIPE_OK)
+         goto fail;
+      break;
    case SVGA_QUERY_NUM_DRAW_CALLS:
    case SVGA_QUERY_NUM_FALLBACKS:
    case SVGA_QUERY_NUM_FLUSHES:
@@ -742,7 +731,7 @@ svga_create_query(struct pipe_context *pipe,
    case SVGA_QUERY_FLUSH_TIME:
    case SVGA_QUERY_MAP_BUFFER_TIME:
       /* These queries need os_time_get() */
-      svga->hud.uses_time = TRUE;
+      svga->hud.uses_time = true;
       break;
 
    default:
@@ -793,6 +782,7 @@ svga_destroy_query(struct pipe_context *pipe, struct pipe_query *q)
    case PIPE_QUERY_PRIMITIVES_EMITTED:
    case PIPE_QUERY_SO_STATISTICS:
    case PIPE_QUERY_TIMESTAMP:
+   case PIPE_QUERY_PIPELINE_STATISTICS:
       assert(svga_have_vgpu10(svga));
       destroy_query_vgpu10(svga, sq);
       sws->fence_reference(sws, &sq->fence, NULL);
@@ -876,6 +866,7 @@ svga_begin_query(struct pipe_context *pipe, struct pipe_query *q)
    case PIPE_QUERY_PRIMITIVES_EMITTED:
    case PIPE_QUERY_SO_STATISTICS:
    case PIPE_QUERY_TIMESTAMP:
+   case PIPE_QUERY_PIPELINE_STATISTICS:
       assert(svga_have_vgpu10(svga));
       ret = begin_query_vgpu10(svga, sq);
       assert(ret == PIPE_OK);
@@ -955,7 +946,7 @@ svga_begin_query(struct pipe_context *pipe, struct pipe_query *q)
    SVGA_DBG(DEBUG_QUERY, "%s sq=0x%x id=%d type=%d svga_type=%d\n",
             __func__, sq, sq->id, sq->type, sq->svga_type);
 
-   sq->active = TRUE;
+   sq->active = true;
 
    return true;
 }
@@ -1001,6 +992,7 @@ svga_end_query(struct pipe_context *pipe, struct pipe_query *q)
    case PIPE_QUERY_PRIMITIVES_EMITTED:
    case PIPE_QUERY_SO_STATISTICS:
    case PIPE_QUERY_TIMESTAMP:
+   case PIPE_QUERY_PIPELINE_STATISTICS:
       assert(svga_have_vgpu10(svga));
       end_query_vgpu10(svga, sq);
       break;
@@ -1075,7 +1067,7 @@ svga_end_query(struct pipe_context *pipe, struct pipe_query *q)
    default:
       assert(!"unexpected query type in svga_end_query()");
    }
-   sq->active = FALSE;
+   sq->active = false;
    return true;
 }
 
@@ -1161,6 +1153,18 @@ svga_get_query_result(struct pipe_context *pipe,
       *result = (uint64_t)sResult.numPrimitivesWritten;
       break;
    }
+   case PIPE_QUERY_PIPELINE_STATISTICS: {
+      /* Our stats struct matches the 3D11_QUERY_DATA_PIPELINE_STATISTICS
+       * struct which matches the layout of the first 11 members of mesa's
+       * struct pipe_query_data_pipeline_statistics.
+       * The mesa version is extended for mesh shaders which we don't support.
+       */
+      assert(svga_have_vgpu10(svga));
+      ret = get_query_result_vgpu10(svga, sq, wait,
+                                    &vresult->pipeline_statistics,
+                                    sizeof(SVGADXPipelineStatisticsQueryResult));
+      break;
+  }
    /* These are per-frame counters */
    case SVGA_QUERY_NUM_DRAW_CALLS:
    case SVGA_QUERY_NUM_FALLBACKS:
@@ -1185,13 +1189,13 @@ svga_get_query_result(struct pipe_context *pipe,
       break;
    /* These are running total counters */
    case SVGA_QUERY_MEMORY_USED:
-      vresult->u64 = svgascreen->hud.total_resource_bytes;
+      vresult->u64 = p_atomic_read(&svgascreen->hud.total_resource_bytes);
       break;
    case SVGA_QUERY_NUM_SHADERS:
       vresult->u64 = svga->hud.num_shaders;
       break;
    case SVGA_QUERY_NUM_RESOURCES:
-      vresult->u64 = svgascreen->hud.num_resources;
+      vresult->u64 = p_atomic_read(&svgascreen->hud.num_resources);
       break;
    case SVGA_QUERY_NUM_STATE_OBJECTS:
       vresult->u64 = (svga->hud.num_blend_objects +
@@ -1208,7 +1212,7 @@ svga_get_query_result(struct pipe_context *pipe,
       vresult->u64 = svga->hud.num_generate_mipmap;
       break;
    case SVGA_QUERY_NUM_FAILED_ALLOCATIONS:
-      vresult->u64 = svgascreen->hud.num_failed_allocations;
+      vresult->u64 = p_atomic_read(&svgascreen->hud.num_failed_allocations);
       break;
    case SVGA_QUERY_NUM_COMMANDS_PER_DRAW:
       vresult->f = (float) svga->swc->num_commands
@@ -1257,7 +1261,7 @@ svga_render_condition(struct pipe_context *pipe, struct pipe_query *q,
 
       if ((mode == PIPE_RENDER_COND_WAIT ||
            mode == PIPE_RENDER_COND_BY_REGION_WAIT) && sq->fence) {
-         sws->fence_finish(sws, sq->fence, PIPE_TIMEOUT_INFINITE,
+         sws->fence_finish(sws, sq->fence, OS_TIMEOUT_INFINITE,
                            SVGA_FENCE_FLAG_QUERY);
       }
    }
@@ -1290,7 +1294,7 @@ svga_get_timestamp(struct pipe_context *pipe)
    util_query_clear_result(&result, PIPE_QUERY_TIMESTAMP);
    svga_begin_query(pipe, q);
    svga_end_query(pipe,q);
-   svga_get_query_result(pipe, q, TRUE, &result);
+   svga_get_query_result(pipe, q, true, &result);
    svga_destroy_query(pipe, q);
 
    return result.u64;
@@ -1313,8 +1317,8 @@ svga_set_active_query_state(struct pipe_context *pipe, bool enable)
  */
 void
 svga_toggle_render_condition(struct svga_context *svga,
-                             boolean render_condition_enabled,
-                             boolean on)
+                             bool render_condition_enabled,
+                             bool on)
 {
    SVGA3dQueryId query_id;
 

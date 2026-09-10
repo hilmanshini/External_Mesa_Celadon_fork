@@ -34,10 +34,11 @@
 #ifndef LP_CS_QUEUE
 #define LP_CS_QUEUE
 
-#include "pipe/p_compiler.h"
+#include "util/compiler.h"
 
 #include "util/u_thread.h"
 #include "util/list.h"
+#include "lp_state_cs.h"
 
 #include "lp_limits.h"
 

@@ -24,6 +24,7 @@
 #include "vk_fence.h"
 
 #include "util/os_time.h"
+#include "util/perf/cpu_trace.h"
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -252,6 +253,8 @@ vk_common_WaitForFences(VkDevice _device,
                         VkBool32 waitAll,
                         uint64_t timeout)
 {
+   MESA_TRACE_FUNC();
+
    VK_FROM_HANDLE(vk_device, device, _device);
 
    if (vk_device_is_lost(device))
@@ -470,7 +473,7 @@ vk_common_GetFenceFdKHR(VkDevice _device,
       break;
 
    default:
-      unreachable("Invalid fence export handle type");
+      UNREACHABLE("Invalid fence export handle type");
    }
 
    /* From the Vulkan 1.2.194 spec:

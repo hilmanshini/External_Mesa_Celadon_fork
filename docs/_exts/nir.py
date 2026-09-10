@@ -40,7 +40,7 @@ import nir_opcodes
 OP_DESC_TEMPLATE = mako.template.Template("""
 <%
 def src_decl_list(num_srcs):
-   return ', '.join('nir_ssa_def *src' + str(i) for i in range(num_srcs))
+   return ', '.join('nir_def *src' + str(i) for i in range(num_srcs))
 
 def to_yn(b):
     return 'Y' if b else 'N'
@@ -58,6 +58,8 @@ def to_yn(b):
      - ${to_yn('associative' in op.algebraic_properties)}
      - ${to_yn('2src_commutative' in op.algebraic_properties)}
 
+${("**Description:** " + op.description) if op.description != "" else ""}
+
 **Constant-folding:**
 
 .. code-block:: c
@@ -66,18 +68,21 @@ ${textwrap.indent(op.const_expr, '    ')}
 
 **Builder function:**
 
-.. c:function:: nir_ssa_def *nir_${op.name}(nir_builder *, ${src_decl_list(op.num_inputs)})
+.. c:function:: nir_def *nir_${op.name}(nir_builder *, ${src_decl_list(op.num_inputs)})
 """)
+
 
 def parse_rst(state, parent, rst):
     vl = docutils.statemachine.ViewList(rst.splitlines())
     state.nested_parse(vl, 0, parent)
+
 
 def nir_alu_type_name(t, s):
     if s:
         return '{}[{}]'.format(t, s)
     else:
         return '{}[N]'.format(t)
+
 
 def build_alu_op_desc(state, env, op):
     desc = sphinx.addnodes.desc(domain='nir', objtype='aluop')
@@ -93,8 +98,7 @@ def build_alu_op_desc(state, env, op):
         params += sphinx.addnodes.desc_parameter('', 'src' + str(i))
     sig += params
 
-    sig += sphinx.addnodes.desc_returns('',
-        nir_alu_type_name(op.output_type, op.output_size))
+    sig += sphinx.addnodes.desc_returns('', nir_alu_type_name(op.output_type, op.output_size))
 
     nir_domain = env.get_domain('nir')
     sig['ids'].append(nir_domain.add_alu_op_ref(op))
@@ -106,10 +110,12 @@ def build_alu_op_desc(state, env, op):
 
     return desc
 
+
 class NIRALUOpcodesDirective(SphinxDirective):
     def run(self):
         return [build_alu_op_desc(self.state, self.env, op)
                 for op in nir_opcodes.opcodes.values()]
+
 
 class NIRDomain(Domain):
     """A new NIR directive
@@ -123,10 +129,10 @@ class NIRDomain(Domain):
     """
     name = 'nir'
     roles = {
-        'alu-op' : sphinx.roles.XRefRole(),
+        'alu-op': sphinx.roles.XRefRole(),
     }
     directives = {
-        'alu-opcodes' : NIRALUOpcodesDirective,
+        'alu-opcodes': NIRALUOpcodesDirective,
     }
     initial_data = {
         'alu-op-refs': [],
@@ -146,6 +152,7 @@ class NIRDomain(Domain):
                                     contnode, targ)
 
         return None
+
 
 def setup(app):
     app.add_domain(NIRDomain)

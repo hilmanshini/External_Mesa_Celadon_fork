@@ -34,10 +34,9 @@
 #include "main/shaderobj.h"
 #include "main/uniforms.h"
 #include "compiler/glsl/ir.h"
-#include "compiler/glsl/ir_uniform.h"
 #include "compiler/glsl/glsl_parser_extras.h"
-#include "compiler/glsl/program.h"
 #include "util/bitscan.h"
+#include "util/u_range_remap.h"
 
 #include "state_tracker/st_context.h"
 
@@ -202,25 +201,24 @@ validate_uniform_parameters(GLint location, GLsizei count,
       return NULL;
    }
 
-   /* Check that the given location is in bounds of uniform remap table.
-    * Unlinked programs will have NumUniformRemapTable == 0, so we can take
-    * the shProg->data->LinkStatus check out of the main path.
-    */
-   if (unlikely(location >= (GLint) shProg->NumUniformRemapTable)) {
+   if (location == -1) {
+      if (!shProg->data->LinkStatus)
+         _mesa_error(ctx, GL_INVALID_OPERATION, "%s(program not linked)",
+                     caller);
+
+      return NULL;
+   }
+
+   /* Check that the given location is in bounds of uniform remap table */
+   if (unlikely(location >= 0 &&
+       (shProg->UniformRemapTable == NULL ||
+        shProg->UniformRemapTable->sorted_array == NULL))) {
       if (!shProg->data->LinkStatus)
          _mesa_error(ctx, GL_INVALID_OPERATION, "%s(program not linked)",
                      caller);
       else
          _mesa_error(ctx, GL_INVALID_OPERATION, "%s(location=%d)",
                      caller, location);
-
-      return NULL;
-   }
-
-   if (location == -1) {
-      if (!shProg->data->LinkStatus)
-         _mesa_error(ctx, GL_INVALID_OPERATION, "%s(program not linked)",
-                     caller);
 
       return NULL;
    }
@@ -238,7 +236,14 @@ validate_uniform_parameters(GLint location, GLsizei count,
     *         - if count is greater than one, and the uniform declared in the
     *           shader is not an array variable,
     */
-   if (location < -1 || !shProg->UniformRemapTable[location]) {
+   struct gl_uniform_storage *uni = NULL;
+   if (location >= 0) {
+      struct range_entry *e =
+         util_range_remap(location, shProg->UniformRemapTable);
+      uni = e ? (struct gl_uniform_storage *)e->ptr : NULL;
+   }
+
+   if (!uni) {
       _mesa_error(ctx, GL_INVALID_OPERATION, "%s(location=%d)",
                   caller, location);
       return NULL;
@@ -255,11 +260,8 @@ validate_uniform_parameters(GLint location, GLsizei count,
     *     no error is generated."
     *
     */
-   if (shProg->UniformRemapTable[location] ==
-       INACTIVE_UNIFORM_EXPLICIT_LOCATION)
+   if (uni == INACTIVE_UNIFORM_EXPLICIT_LOCATION)
       return NULL;
-
-   struct gl_uniform_storage *const uni = shProg->UniformRemapTable[location];
 
    /* Even though no location is assigned to a built-in uniform and this
     * function should already have returned NULL, this test makes it explicit
@@ -345,13 +347,13 @@ _mesa_get_uniform(struct gl_context *ctx, GLuint program, GLint location,
    }
 
    {
-      unsigned elements = uni->type->components();
+      unsigned elements = glsl_get_components(uni->type);
       unsigned components = uni->type->vector_elements;
 
       const int rmul = glsl_base_type_is_64bit(returnType) ? 2 : 1;
-      int dmul = (uni->type->is_64bit()) ? 2 : 1;
+      int dmul = (glsl_type_is_64bit(uni->type)) ? 2 : 1;
 
-      if ((uni->type->is_sampler() || uni->type->is_image()) &&
+      if ((glsl_type_is_sampler(uni->type) || glsl_type_is_image(uni->type)) &&
           !uni->is_bindless) {
          /* Non-bindless samplers/images are represented using unsigned integer
           * 32-bit, while bindless handles are 64-bit.
@@ -364,7 +366,7 @@ _mesa_get_uniform(struct gl_context *ctx, GLuint program, GLint location,
        */
       const union gl_constant_value *src;
       if (ctx->Const.PackedDriverUniformStorage &&
-          (uni->is_bindless || !uni->type->contains_opaque())) {
+          (uni->is_bindless || !glsl_contains_opaque(uni->type))) {
          unsigned dword_elements = elements;
 
          /* 16-bit uniforms are packed. */
@@ -398,7 +400,7 @@ _mesa_get_uniform(struct gl_context *ctx, GLuint program, GLint location,
        */
       if (returnType == uni->type->base_type ||
           ((returnType == GLSL_TYPE_INT || returnType == GLSL_TYPE_UINT) &&
-           (uni->type->is_sampler() || uni->type->is_image())) ||
+           (glsl_type_is_sampler(uni->type) || glsl_type_is_image(uni->type))) ||
           (returnType == GLSL_TYPE_UINT64 && uni->is_bindless)) {
          memcpy(paramsOut, src, bytes);
       } else {
@@ -613,7 +615,7 @@ _mesa_get_uniform(struct gl_context *ctx, GLuint program, GLint location,
                   break;
                }
                default:
-                  unreachable("invalid uniform type");
+                  UNREACHABLE("invalid uniform type");
                }
                break;
 
@@ -742,7 +744,7 @@ log_uniform(const void *values, enum glsl_base_type basicType,
 
    printf("Mesa: set program %u %s \"%s\" (loc %d, type \"%s\", "
 	  "transpose = %s) to: ",
-	  shProg->Name, extra, uni->name.string, location, uni->type->name,
+	  shProg->Name, extra, uni->name.string, location, glsl_get_type_name(uni->type),
 	  transpose ? "true" : "false");
    for (unsigned i = 0; i < elems; i++) {
       if (i != 0 && ((i % rows) == 0))
@@ -789,7 +791,7 @@ log_uniform(const void *values, enum glsl_base_type basicType,
 static void
 log_program_parameters(const struct gl_shader_program *shProg)
 {
-   for (unsigned i = 0; i < MESA_SHADER_STAGES; i++) {
+   for (unsigned i = 0; i < MESA_SHADER_MESH_STAGES; i++) {
       if (shProg->_LinkedShaders[i] == NULL)
 	 continue;
 
@@ -836,7 +838,7 @@ _mesa_propagate_uniforms_to_driver_storage(struct gl_uniform_storage *uni,
 
    const unsigned components = uni->type->vector_elements;
    const unsigned vectors = uni->type->matrix_columns;
-   const int dmul = uni->type->is_64bit() ? 2 : 1;
+   const int dmul = glsl_type_is_64bit(uni->type) ? 2 : 1;
 
    /* Store the data in the driver's requested type in the driver's storage
     * areas.
@@ -929,7 +931,7 @@ associate_uniform_storage(struct gl_context *ctx,
                           struct gl_program *prog)
 {
    struct gl_program_parameter_list *params = prog->Parameters;
-   gl_shader_stage shader_type = prog->info.stage;
+   mesa_shader_stage shader_type = prog->info.stage;
 
    _mesa_disallow_parameter_storage_realloc(params);
 
@@ -991,6 +993,7 @@ associate_uniform_storage(struct gl_context *ctx,
             FALLTHROUGH;
          case GLSL_TYPE_FLOAT:
          case GLSL_TYPE_FLOAT16:
+         case GLSL_TYPE_BFLOAT16:
             format = uniform_native;
             columns = storage->type->matrix_columns;
             break;
@@ -1011,7 +1014,9 @@ associate_uniform_storage(struct gl_context *ctx,
          case GLSL_TYPE_STRUCT:
          case GLSL_TYPE_ERROR:
          case GLSL_TYPE_INTERFACE:
-         case GLSL_TYPE_FUNCTION:
+         case GLSL_TYPE_COOPERATIVE_MATRIX:
+         case GLSL_TYPE_FLOAT_E4M3FN:
+         case GLSL_TYPE_FLOAT_E5M2:
             assert(!"Should not get here.");
             break;
          }
@@ -1033,11 +1038,11 @@ associate_uniform_storage(struct gl_context *ctx,
             for (unsigned j = 0; j < array_elements; ++j) {
                unsigned unit = storage->opaque[shader_type].index + j;
 
-               if (storage->type->without_array()->is_sampler()) {
+               if (glsl_type_is_sampler(glsl_without_array(storage->type))) {
                   assert(unit >= 0 && unit < prog->sh.NumBindlessSamplers);
                   prog->sh.BindlessSamplers[unit].data =
                      &params->ParameterValues[pvo] + 4 * j;
-               } else if (storage->type->without_array()->is_image()) {
+               } else if (glsl_type_is_image(glsl_without_array(storage->type))) {
                   assert(unit >= 0 && unit < prog->sh.NumBindlessImages);
                   prog->sh.BindlessImages[unit].data =
                      &params->ParameterValues[pvo] + 4 * j;
@@ -1051,8 +1056,8 @@ associate_uniform_storage(struct gl_context *ctx,
           */
          unsigned array_elements = MAX2(1, storage->array_elements);
          if (ctx->Const.PackedDriverUniformStorage && !prog->info.use_legacy_math_rules &&
-             (storage->is_bindless || !storage->type->contains_opaque())) {
-            const int dmul = storage->type->is_64bit() ? 2 : 1;
+             (storage->is_bindless || !glsl_contains_opaque(storage->type))) {
+            const int dmul = glsl_type_is_64bit(storage->type) ? 2 : 1;
             const unsigned components =
                storage->type->vector_elements *
                storage->type->matrix_columns;
@@ -1149,7 +1154,7 @@ validate_uniform(GLint location, GLsizei count, const GLvoid *values,
    if (uni == NULL)
       return NULL;
 
-   if (uni->type->is_matrix()) {
+   if (glsl_type_is_matrix(uni->type)) {
       /* Can't set matrix uniforms (like mat4) with glUniform */
       _mesa_error(ctx, GL_INVALID_OPERATION,
                   "glUniform%u(uniform \"%s\"@%d is matrix)",
@@ -1219,7 +1224,7 @@ validate_uniform(GLint location, GLsizei count, const GLvoid *values,
     * Based on that, when an invalid sampler is specified, we generate a
     * GL_INVALID_VALUE error and ignore the command.
     */
-   if (uni->type->is_sampler()) {
+   if (glsl_type_is_sampler(uni->type)) {
       for (int i = 0; i < count; i++) {
          const unsigned texUnit = ((unsigned *) values)[i];
 
@@ -1237,7 +1242,7 @@ validate_uniform(GLint location, GLsizei count, const GLvoid *values,
       ctx->_Shader->Validated = ctx->_Shader->UserValidated = GL_FALSE;
    }
 
-   if (uni->type->is_image()) {
+   if (glsl_type_is_image(uni->type)) {
       for (int i = 0; i < count; i++) {
          const int unit = ((GLint *) values)[i];
 
@@ -1256,28 +1261,38 @@ validate_uniform(GLint location, GLsizei count, const GLvoid *values,
 
 void
 _mesa_flush_vertices_for_uniforms(struct gl_context *ctx,
-                                  const struct gl_uniform_storage *uni)
+                                  struct gl_uniform_storage *uni)
 {
    /* Opaque uniforms have no storage unless they are bindless */
-   if (!uni->is_bindless && uni->type->contains_opaque()) {
+   if (!uni->is_bindless && glsl_contains_opaque(uni->type)) {
       /* Samplers flush on demand and ignore redundant updates. */
-      if (!uni->type->is_sampler())
+      if (!glsl_type_is_sampler(uni->type))
          FLUSH_VERTICES(ctx, 0, 0);
       return;
    }
 
-   uint64_t new_driver_state = 0;
+   st_state_bitset new_driver_state = {0};
    unsigned mask = uni->active_shader_mask;
 
    while (mask) {
       unsigned index = u_bit_scan(&mask);
 
-      assert(index < MESA_SHADER_STAGES);
-      new_driver_state |= ctx->DriverFlags.NewShaderConstants[index];
+      assert(index < MESA_SHADER_MESH_STAGES);
+      ST_SET_STATES(new_driver_state, ctx->DriverFlags.NewShaderConstants[index]);
    }
 
-   FLUSH_VERTICES(ctx, new_driver_state ? 0 : _NEW_PROGRAM_CONSTANTS, 0);
-   ctx->NewDriverState |= new_driver_state;
+   FLUSH_VERTICES(ctx, BITSET_IS_EMPTY(new_driver_state) ? _NEW_PROGRAM_CONSTANTS : 0, 0);
+   ST_SET_STATES(ctx->NewDriverState, new_driver_state);
+
+   /* If we are updating the uniform from multiple contexts we cant be sure
+    * if a context needs to be flushed so set the unknown_src_ctx flag which
+    * will cause the "redundant uniform update" optimisation to be skipped.
+    */
+   if (uni->first_set_by) {
+      if (uni->first_set_by != ctx)
+         uni->unknown_src_ctx = true;
+   } else
+      uni->first_set_by = ctx;
 }
 
 static bool
@@ -1290,10 +1305,15 @@ copy_uniforms_to_storage(gl_constant_value *storage,
 {
    const gl_constant_value *src = (const gl_constant_value*)values;
    bool copy_as_uint64 = uni->is_bindless &&
-                         (uni->type->is_sampler() || uni->type->is_image());
+                         (glsl_type_is_sampler(uni->type) || glsl_type_is_image(uni->type));
    bool copy_to_float16 = uni->type->base_type == GLSL_TYPE_FLOAT16;
 
-   if (!uni->type->is_boolean() && !copy_as_uint64 && !copy_to_float16) {
+   if (flush && uni->unknown_src_ctx) {
+      _mesa_flush_vertices_for_uniforms(ctx, uni);
+      flush = false;
+   }
+
+   if (!glsl_type_is_boolean(uni->type) && !copy_as_uint64 && !copy_to_float16) {
       unsigned size = sizeof(storage[0]) * components * count * size_mul;
 
       if (!memcmp(storage, values, size))
@@ -1448,10 +1468,10 @@ _mesa_uniform(GLint location, GLsizei count, const GLvoid *values,
       if (location == -1)
          return;
 
-      if (location >= (int)shProg->NumUniformRemapTable)
-         return;
+      struct range_entry *e =
+         util_range_remap(location, shProg->UniformRemapTable);
+      uni = e ? (struct gl_uniform_storage *)e->ptr : NULL;
 
-      uni = shProg->UniformRemapTable[location];
       if (!uni || uni == INACTIVE_UNIFORM_EXPLICIT_LOCATION)
          return;
 
@@ -1489,7 +1509,7 @@ _mesa_uniform(GLint location, GLsizei count, const GLvoid *values,
    bool ctx_flushed = false;
    gl_constant_value *storage;
    if (ctx->Const.PackedDriverUniformStorage &&
-       (uni->is_bindless || !uni->type->contains_opaque())) {
+       (uni->is_bindless || !glsl_contains_opaque(uni->type))) {
       for (unsigned s = 0; s < uni->num_driver_storage; s++) {
          unsigned dword_components = components;
 
@@ -1515,13 +1535,13 @@ _mesa_uniform(GLint location, GLsizei count, const GLvoid *values,
    /* Return early if possible. Bindless samplers need to be processed
     * because of the !sampler->bound codepath below.
     */
-   if (!ctx_flushed && !(uni->type->is_sampler() && uni->is_bindless))
+   if (!ctx_flushed && !(glsl_type_is_sampler(uni->type) && uni->is_bindless))
       return; /* no change in uniform values */
 
    /* If the uniform is a sampler, do the extra magic necessary to propagate
     * the changes through.
     */
-   if (uni->type->is_sampler()) {
+   if (glsl_type_is_sampler(uni->type)) {
       /* Note that samplers are the only uniforms that don't call
        * FLUSH_VERTICES above.
        */
@@ -1531,7 +1551,7 @@ _mesa_uniform(GLint location, GLsizei count, const GLvoid *values,
 
       shProg->SamplersValidated = GL_TRUE;
 
-      for (int i = 0; i < MESA_SHADER_STAGES; i++) {
+      for (int i = 0; i < MESA_SHADER_MESH_STAGES; i++) {
          struct gl_linked_shader *const sh = shProg->_LinkedShaders[i];
 
          /* If the shader stage doesn't use the sampler uniform, skip this. */
@@ -1587,8 +1607,8 @@ _mesa_uniform(GLint location, GLsizei count, const GLvoid *values,
    /* If the uniform is an image, update the mapping from image
     * uniforms to image units present in the shader data structure.
     */
-   if (uni->type->is_image()) {
-      for (int i = 0; i < MESA_SHADER_STAGES; i++) {
+   if (glsl_type_is_image(uni->type)) {
+      for (int i = 0; i < MESA_SHADER_MESH_STAGES; i++) {
          struct gl_linked_shader *sh = shProg->_LinkedShaders[i];
 
          /* If the shader stage doesn't use the image uniform, skip this. */
@@ -1614,7 +1634,7 @@ _mesa_uniform(GLint location, GLsizei count, const GLvoid *values,
          }
       }
 
-      ctx->NewDriverState |= ST_NEW_IMAGE_UNITS;
+      ST_SET_SHADER_STATES(ctx->NewDriverState, IMAGES);
    }
 }
 
@@ -1632,6 +1652,11 @@ copy_uniform_matrix_to_storage(struct gl_context *ctx,
 {
    const unsigned elements = components * vectors;
    const unsigned size = sizeof(storage[0]) * elements * count * size_mul;
+
+   if (flush && uni->unknown_src_ctx) {
+      _mesa_flush_vertices_for_uniforms(ctx, uni);
+      flush = false;
+   }
 
    if (uni->type->base_type == GLSL_TYPE_FLOAT16) {
       assert(ctx->Const.PackedDriverUniformStorage);
@@ -1854,14 +1879,14 @@ _mesa_uniform_matrix(GLint location, GLsizei count,
     * http://www.khronos.org/opengles/sdk/docs/man/xhtml/glUniform.xml
     */
    if (transpose) {
-      if (ctx->API == API_OPENGLES2 && ctx->Version < 30) {
+      if (_mesa_is_gles2(ctx) && ctx->Version < 30) {
          _mesa_error(ctx, GL_INVALID_VALUE,
                      "glUniformMatrix(matrix transpose is not GL_FALSE)");
          return;
       }
    }
 
-   if (!uni->type->is_matrix()) {
+   if (!glsl_type_is_matrix(uni->type)) {
       _mesa_error(ctx, GL_INVALID_OPERATION,
 		  "glUniformMatrix(non-matrix uniform)");
       return;
@@ -1870,7 +1895,7 @@ _mesa_uniform_matrix(GLint location, GLsizei count,
    assert(basicType == GLSL_TYPE_FLOAT || basicType == GLSL_TYPE_DOUBLE);
    const unsigned size_mul = basicType == GLSL_TYPE_DOUBLE ? 2 : 1;
 
-   assert(!uni->type->is_sampler());
+   assert(!glsl_type_is_sampler(uni->type));
    const unsigned vectors = uni->type->matrix_columns;
    const unsigned components = uni->type->vector_elements;
 
@@ -2018,7 +2043,10 @@ _mesa_uniform_handle(GLint location, GLsizei count, const GLvoid *values,
       if (location == -1)
          return;
 
-      uni = shProg->UniformRemapTable[location];
+      struct range_entry *e =
+         util_range_remap(location, shProg->UniformRemapTable);
+      uni = e ? (struct gl_uniform_storage *)e->ptr : NULL;
+
       if (!uni || uni == INACTIVE_UNIFORM_EXPLICIT_LOCATION)
          return;
 
@@ -2086,7 +2114,7 @@ _mesa_uniform_handle(GLint location, GLsizei count, const GLvoid *values,
             uni->driver_storage[s].data + (size_mul * offset * components);
          unsigned size = sizeof(uni->storage[0]) * components * count * size_mul;
 
-         if (!memcmp(storage, values, size))
+         if (!uni->unknown_src_ctx && !memcmp(storage, values, size))
             continue;
 
          if (!flushed) {
@@ -2101,7 +2129,7 @@ _mesa_uniform_handle(GLint location, GLsizei count, const GLvoid *values,
       void *storage = &uni->storage[size_mul * components * offset];
       unsigned size = sizeof(uni->storage[0]) * components * count * size_mul;
 
-      if (!memcmp(storage, values, size))
+      if (!uni->unknown_src_ctx && !memcmp(storage, values, size))
          return;
 
       _mesa_flush_vertices_for_uniforms(ctx, uni);
@@ -2109,11 +2137,11 @@ _mesa_uniform_handle(GLint location, GLsizei count, const GLvoid *values,
       _mesa_propagate_uniforms_to_driver_storage(uni, offset, count);
    }
 
-   if (uni->type->is_sampler()) {
+   if (glsl_type_is_sampler(uni->type)) {
       /* Mark this bindless sampler as not bound to a texture unit because
        * it refers to a texture handle.
        */
-      for (int i = 0; i < MESA_SHADER_STAGES; i++) {
+      for (int i = 0; i < MESA_SHADER_MESH_STAGES; i++) {
          struct gl_linked_shader *const sh = shProg->_LinkedShaders[i];
 
          /* If the shader stage doesn't use the sampler uniform, skip this. */
@@ -2132,11 +2160,11 @@ _mesa_uniform_handle(GLint location, GLsizei count, const GLvoid *values,
       }
    }
 
-   if (uni->type->is_image()) {
+   if (glsl_type_is_image(uni->type)) {
       /* Mark this bindless image as not bound to an image unit because it
        * refers to a texture handle.
        */
-      for (int i = 0; i < MESA_SHADER_STAGES; i++) {
+      for (int i = 0; i < MESA_SHADER_MESH_STAGES; i++) {
          struct gl_linked_shader *sh = shProg->_LinkedShaders[i];
 
          /* If the shader stage doesn't use the sampler uniform, skip this. */

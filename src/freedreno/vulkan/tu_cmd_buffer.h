@@ -15,30 +15,40 @@
 #include "tu_cs.h"
 #include "tu_descriptor_set.h"
 #include "tu_device.h"
+#include "tu_image.h"
 #include "tu_lrz.h"
 #include "tu_pass.h"
 #include "tu_pipeline.h"
+#include "tu_tile_config.h"
 
 enum tu_draw_state_group_id
 {
    TU_DRAW_STATE_PROGRAM_CONFIG,
-   TU_DRAW_STATE_PROGRAM,
-   TU_DRAW_STATE_PROGRAM_BINNING,
+   TU_DRAW_STATE_VS,
+   TU_DRAW_STATE_VS_BINNING,
+   TU_DRAW_STATE_HS,
+   TU_DRAW_STATE_DS,
+   TU_DRAW_STATE_GS,
+   TU_DRAW_STATE_GS_BINNING,
+   TU_DRAW_STATE_VPC,
+   TU_DRAW_STATE_FS,
    TU_DRAW_STATE_VB,
    TU_DRAW_STATE_CONST,
    TU_DRAW_STATE_DESC_SETS,
    TU_DRAW_STATE_DESC_SETS_LOAD,
    TU_DRAW_STATE_VS_PARAMS,
+   TU_DRAW_STATE_FS_PARAMS,
    TU_DRAW_STATE_INPUT_ATTACHMENTS_GMEM,
    TU_DRAW_STATE_INPUT_ATTACHMENTS_SYSMEM,
    TU_DRAW_STATE_LRZ_AND_DEPTH_PLANE,
    TU_DRAW_STATE_PRIM_MODE_GMEM,
-   TU_DRAW_STATE_PRIM_MODE_SYSMEM,
-   TU_DRAW_STATE_MSAA,
 
    /* dynamic state related draw states */
    TU_DRAW_STATE_DYNAMIC,
    TU_DRAW_STATE_COUNT = TU_DRAW_STATE_DYNAMIC + TU_DYNAMIC_STATE_COUNT,
+
+   /* autotune preemption delay tracking draw state */
+   TU_DRAW_STATE_AT_WRITE_RP_HASH = TU_DRAW_STATE_COUNT + 1,
 };
 
 struct tu_descriptor_state
@@ -46,29 +56,36 @@ struct tu_descriptor_state
    struct tu_descriptor_set *sets[MAX_SETS];
    struct tu_descriptor_set push_set;
    uint32_t dynamic_descriptors[MAX_DYNAMIC_BUFFERS_SIZE];
-   uint64_t set_iova[MAX_SETS + 1];
+   uint64_t set_iova[MAX_SETS];
    uint32_t max_sets_bound;
-   bool dynamic_bound;
+   uint32_t max_dynamic_offset_size;
 };
 
 enum tu_cmd_dirty_bits
 {
    TU_CMD_DIRTY_VERTEX_BUFFERS = BIT(0),
-   TU_CMD_DIRTY_VB_STRIDE = BIT(1),
-   TU_CMD_DIRTY_RAST = BIT(2),
-   TU_CMD_DIRTY_RB_DEPTH_CNTL = BIT(3),
-   TU_CMD_DIRTY_RB_STENCIL_CNTL = BIT(4),
-   TU_CMD_DIRTY_DESC_SETS = BIT(5),
-   TU_CMD_DIRTY_COMPUTE_DESC_SETS = BIT(6),
-   TU_CMD_DIRTY_SHADER_CONSTS = BIT(7),
-   TU_CMD_DIRTY_LRZ = BIT(8),
-   TU_CMD_DIRTY_VS_PARAMS = BIT(9),
-   TU_CMD_DIRTY_PC_RASTER_CNTL = BIT(10),
-   TU_CMD_DIRTY_VIEWPORTS = BIT(11),
-   TU_CMD_DIRTY_BLEND = BIT(12),
-   TU_CMD_DIRTY_PATCH_CONTROL_POINTS = BIT(13),
+   TU_CMD_DIRTY_DESC_SETS = BIT(1),
+   TU_CMD_DIRTY_COMPUTE_DESC_SETS = BIT(2),
+   TU_CMD_DIRTY_SHADER_CONSTS = BIT(3),
+   TU_CMD_DIRTY_LRZ = BIT(4),
+   TU_CMD_DIRTY_VS_PARAMS = BIT(5),
+   TU_CMD_DIRTY_TESS_PARAMS = BIT(6),
+   TU_CMD_DIRTY_SUBPASS = BIT(7),
+   TU_CMD_DIRTY_FDM = BIT(8),
+   TU_CMD_DIRTY_PER_VIEW_VIEWPORT = BIT(9),
+   TU_CMD_DIRTY_TES = BIT(10),
+   TU_CMD_DIRTY_PROGRAM = BIT(11),
+   TU_CMD_DIRTY_RAST_ORDER = BIT(12),
+   TU_CMD_DIRTY_FEEDBACK_LOOPS = BIT(13),
+   TU_CMD_DIRTY_FS = BIT(14),
+   TU_CMD_DIRTY_SHADING_RATE = BIT(15),
+   TU_CMD_DIRTY_DISABLE_FS = BIT(16),
+   TU_CMD_DIRTY_TCS = BIT(17),
+   TU_CMD_DIRTY_VS = BIT(18),
+   TU_CMD_DIRTY_RAST = BIT(19),
+
    /* all draw states were disabled and need to be re-enabled: */
-   TU_CMD_DIRTY_DRAW_STATE = BIT(14)
+   TU_CMD_DIRTY_DRAW_STATE = BIT(20)
 };
 
 /* There are only three cache domains we have to care about: the CCU, or
@@ -80,6 +97,7 @@ enum tu_cmd_dirty_bits
  */
 
 enum tu_cmd_access_mask {
+   TU_ACCESS_NONE = 0,
    TU_ACCESS_UCHE_READ = 1 << 0,
    TU_ACCESS_UCHE_WRITE = 1 << 1,
    TU_ACCESS_CCU_COLOR_READ = 1 << 2,
@@ -127,6 +145,25 @@ enum tu_cmd_access_mask {
     */
    TU_ACCESS_BINDLESS_DESCRIPTOR_READ = 1 << 13,
 
+   /* A write to a GMEM attachment made by CP_EVENT_WRITE::BLIT. */
+   TU_ACCESS_BLIT_WRITE_GMEM = 1 << 14,
+
+   /* Similar to UCHE_READ, but specifically for GMEM attachment reads. */
+   TU_ACCESS_UCHE_READ_GMEM = 1 << 15,
+
+   /* The CCHE is a write-through cache which sits behind UCHE, with multiple
+    * incoherent copies. Because it's write-through we only have to worry
+    * about invalidating it for reads. It's invalidated by "ccinv" in the
+    * shader and CP_CCHE_INVALIDATE in the command stream.
+    */
+   TU_ACCESS_CCHE_READ = 1 << 16,
+
+   TU_ACCESS_RTU_READ = 1 << 17,
+
+   /* An access through UCHE that must always be flushed/invalidated */
+   TU_ACCESS_UCHE_INCOHERENT_READ = 1 << 18,
+   TU_ACCESS_UCHE_INCOHERENT_WRITE = 1 << 19,
+
    TU_ACCESS_READ =
       TU_ACCESS_UCHE_READ |
       TU_ACCESS_CCU_COLOR_READ |
@@ -134,7 +171,9 @@ enum tu_cmd_access_mask {
       TU_ACCESS_CCU_COLOR_INCOHERENT_READ |
       TU_ACCESS_CCU_DEPTH_INCOHERENT_READ |
       TU_ACCESS_SYSMEM_READ |
-      TU_ACCESS_BINDLESS_DESCRIPTOR_READ,
+      TU_ACCESS_BINDLESS_DESCRIPTOR_READ |
+      TU_ACCESS_CCHE_READ |
+      TU_ACCESS_UCHE_INCOHERENT_READ,
 
    TU_ACCESS_WRITE =
       TU_ACCESS_UCHE_WRITE |
@@ -143,80 +182,68 @@ enum tu_cmd_access_mask {
       TU_ACCESS_CCU_DEPTH_WRITE |
       TU_ACCESS_CCU_DEPTH_INCOHERENT_WRITE |
       TU_ACCESS_SYSMEM_WRITE |
-      TU_ACCESS_CP_WRITE,
+      TU_ACCESS_CP_WRITE |
+      TU_ACCESS_UCHE_INCOHERENT_WRITE,
 
    TU_ACCESS_ALL =
       TU_ACCESS_READ |
       TU_ACCESS_WRITE,
 };
 
-/* Starting with a6xx, the pipeline is split into several "clusters" (really
- * pipeline stages). Each stage has its own pair of register banks and can
- * switch them independently, so that earlier stages can run ahead of later
- * ones. e.g. the FS of draw N and the VS of draw N + 1 can be executing at
- * the same time.
+/* From the driver's point of view, we only need to distinguish between things
+ * which won't start until a WFI is complete and things which additionally
+ * need a WAIT_FOR_ME.
  *
- * As a result of this, we need to insert a WFI when an earlier stage depends
- * on the result of a later stage. CP_DRAW_* and CP_BLIT will wait for any
- * pending WFI's to complete before starting, and usually before reading
- * indirect params even, so a WFI also acts as a full "pipeline stall".
- *
- * Note, the names of the stages come from CLUSTER_* in devcoredump. We
- * include all the stages for completeness, even ones which do not read/write
- * anything.
+ * TODO: This will get more complicated with concurrent binning.
  */
-
 enum tu_stage {
-   /* This doesn't correspond to a cluster, but we need it for tracking
-    * indirect draw parameter reads etc.
+   /* As a destination stage, this is for operations on the CP which don't
+    * wait for pending WFIs to complete and therefore need a CP_WAIT_FOR_ME.
+    * As a source stage, it is for things needing no waits. 
     */
-   TU_STAGE_CP,
+   TU_STAGE_BV_CP,
 
-   /* - Fetch index buffer
-    * - Fetch vertex attributes, dispatch VS
+   /* This is for operations executed on BV. */
+   TU_STAGE_BV,
+
+   /* This is for most operations, which WFI will wait to finish and will not
+    * start until any pending WFIs are finished.
     */
-   TU_STAGE_FE,
+   TU_STAGE_BR,
 
-   /* Execute all geometry stages (VS thru GS) */
-   TU_STAGE_SP_VS,
-
-   /* Write to VPC, do primitive assembly. */
-   TU_STAGE_PC_VS,
-
-   /* Rasterization. RB_DEPTH_BUFFER_BASE only exists in CLUSTER_PS according
-    * to devcoredump so presumably this stage stalls for TU_STAGE_PS when
-    * early depth testing is enabled before dispatching fragments? However
-    * GRAS reads and writes LRZ directly.
+   /* This is only used as a destination stage and is for things needing no
+    * waits on the GPU (e.g. host operations).
     */
-   TU_STAGE_GRAS,
-
-   /* Execute FS */
-   TU_STAGE_SP_PS,
-
-   /* - Fragment tests
-    * - Write color/depth
-    * - Streamout writes (???)
-    * - Varying interpolation (???)
-    */
-   TU_STAGE_PS,
+   TU_STAGE_BOTTOM,
 };
 
+enum tu_stage
+vk2tu_dst_stage(struct tu_device *dev,
+                VkPipelineStageFlags2 vk_stages);
+
 enum tu_cmd_flush_bits {
-   TU_CMD_FLAG_CCU_FLUSH_DEPTH = 1 << 0,
-   TU_CMD_FLAG_CCU_FLUSH_COLOR = 1 << 1,
+   TU_CMD_FLAG_CCU_CLEAN_DEPTH = 1 << 0,
+   TU_CMD_FLAG_CCU_CLEAN_COLOR = 1 << 1,
    TU_CMD_FLAG_CCU_INVALIDATE_DEPTH = 1 << 2,
    TU_CMD_FLAG_CCU_INVALIDATE_COLOR = 1 << 3,
-   TU_CMD_FLAG_CACHE_FLUSH = 1 << 4,
+   TU_CMD_FLAG_CACHE_CLEAN = 1 << 4,
    TU_CMD_FLAG_CACHE_INVALIDATE = 1 << 5,
-   TU_CMD_FLAG_WAIT_MEM_WRITES = 1 << 6,
-   TU_CMD_FLAG_WAIT_FOR_IDLE = 1 << 7,
-   TU_CMD_FLAG_WAIT_FOR_ME = 1 << 8,
-   TU_CMD_FLAG_BINDLESS_DESCRIPTOR_INVALIDATE = 1 << 9,
+   TU_CMD_FLAG_CCHE_INVALIDATE = 1 << 6,
+   TU_CMD_FLAG_WAIT_MEM_WRITES = 1 << 7,
+   TU_CMD_FLAG_WAIT_FOR_IDLE = 1 << 8,
+   TU_CMD_FLAG_WAIT_FOR_ME = 1 << 9,
+   TU_CMD_FLAG_BINDLESS_DESCRIPTOR_INVALIDATE = 1 << 10,
+   /* This is an unusual flush that isn't automatically executed if pending,
+    * as it isn't necessary. Therefore, it's not included in ALL_FLUSH.
+    */
+   TU_CMD_FLAG_BLIT_CACHE_CLEAN = 1 << 11,
+   TU_CMD_FLAG_RTU_INVALIDATE = 1 << 12,
+   TU_CMD_FLAG_WAIT_FOR_BR = 1 << 13,
 
-   TU_CMD_FLAG_ALL_FLUSH =
-      TU_CMD_FLAG_CCU_FLUSH_DEPTH |
-      TU_CMD_FLAG_CCU_FLUSH_COLOR |
-      TU_CMD_FLAG_CACHE_FLUSH |
+   TU_CMD_FLAG_ALL_CLEAN =
+      TU_CMD_FLAG_CCU_CLEAN_DEPTH |
+      TU_CMD_FLAG_CCU_CLEAN_COLOR |
+      TU_CMD_FLAG_CACHE_CLEAN |
       /* Treat the CP as a sort of "cache" which may need to be "flushed" via
        * waiting for writes to land with WAIT_FOR_MEM_WRITES.
        */
@@ -227,13 +254,15 @@ enum tu_cmd_flush_bits {
       TU_CMD_FLAG_CCU_INVALIDATE_COLOR |
       TU_CMD_FLAG_CACHE_INVALIDATE |
       TU_CMD_FLAG_BINDLESS_DESCRIPTOR_INVALIDATE |
+      TU_CMD_FLAG_CCHE_INVALIDATE |
       /* Treat CP_WAIT_FOR_ME as a "cache" that needs to be invalidated when a
        * a command that needs CP_WAIT_FOR_ME is executed. This means we may
        * insert an extra WAIT_FOR_ME before an indirect command requiring it
        * in case there was another command before the current command buffer
        * that it needs to wait for.
        */
-      TU_CMD_FLAG_WAIT_FOR_ME,
+      TU_CMD_FLAG_WAIT_FOR_ME |
+      TU_CMD_FLAG_RTU_INVALIDATE,
 };
 
 /* Changing the CCU from sysmem mode to gmem mode or vice-versa is pretty
@@ -252,22 +281,23 @@ struct tu_cache_state {
     * any users outside that cache domain, and caches which must be
     * invalidated eventually if there are any reads.
     */
-   enum tu_cmd_flush_bits pending_flush_bits;
+   BITMASK_ENUM(tu_cmd_flush_bits) pending_flush_bits;
    /* Pending flushes */
-   enum tu_cmd_flush_bits flush_bits;
+   BITMASK_ENUM(tu_cmd_flush_bits) flush_bits;
+   BITMASK_ENUM(tu_cmd_flush_bits) bv_flush_bits;
 };
 
 struct tu_vs_params {
    uint32_t vertex_offset;
    uint32_t first_instance;
    uint32_t draw_id;
+   bool empty;
 };
 
-struct tu_primitive_params {
+struct tu_tess_params {
    bool valid;
-   bool primitive_restart;
-   bool provoking_vtx_last;
-   bool tess_upper_left_domain_origin;
+   enum a6xx_tess_output output_upper_left, output_lower_left;
+   enum a6xx_tess_spacing spacing;
 };
 
 /* This should be for state that is set inside a renderpass and used at
@@ -280,8 +310,19 @@ struct tu_render_pass_state
    bool xfb_used;
    bool has_tess;
    bool has_prim_generated_query_in_rp;
+   bool has_vtx_stats_query_in_rp;
+   bool has_zpass_done_sample_count_write_in_rp;
    bool disable_gmem;
    bool sysmem_single_prim_mode;
+   bool lrz_disable_for_next_rp;
+
+   /* This is set if, at any point in the render pass, we were not able to
+    * duplicate the viewport per-view due to the user using multiple viewports
+    * and instead we used the state from view 0 to transform each viewport. If
+    * this happens at any point then all views must contain the same FDM
+    * fragment size.
+    */
+   bool shared_viewport;
 
    /* Track whether conditional predicate for COND_REG_EXEC is changed in draw_cs */
    bool draw_cs_writes_to_cond_pred;
@@ -311,64 +352,167 @@ struct tu_render_pass_state
     * just intended to be a rough estimate that is easy to calculate.
     */
    uint32_t drawcall_bandwidth_per_sample_sum;
+
+   const char *lrz_disable_reason;
+   uint32_t lrz_disabled_at_draw;
+   const char *lrz_write_disable_reason;
+   uint32_t lrz_write_disabled_at_draw;
+
+   const char *gmem_disable_reason;
+   const char *cb_disable_reason;
 };
+
+/* These are the states of the suspend/resume state machine. In addition to
+ * tracking whether we're in the middle of a chain of suspending and
+ * resuming passes that will be merged, we need to track whether the
+ * command buffer begins in the middle of such a chain, for when it gets
+ * merged with other command buffers. We call such a chain that begins
+ * before the command buffer starts a "pre-chain".
+ *
+ * Note that when this command buffer is finished, this state is untouched
+ * but it gains a different meaning. For example, if we finish in state
+ * SR_IN_CHAIN, we finished in the middle of a suspend/resume chain, so
+ * there's a suspend/resume chain that extends past the end of the command
+ * buffer. In this sense it's the "opposite" of SR_AFTER_PRE_CHAIN, which
+ * means that there's a suspend/resume chain that extends before the
+ * beginning.
+ */
+enum tu_suspend_resume_state
+{
+   /* Either there are no suspend/resume chains, or they are entirely
+    * contained in the current command buffer.
+    *
+    *   BeginCommandBuffer() <- start of current command buffer
+    *       ...
+    *       // we are here
+    */
+   SR_NONE = 0,
+
+   /* We are in the middle of a suspend/resume chain that starts before the
+    * current command buffer. This happens when the command buffer begins
+    * with a resuming render pass and all of the passes up to the current
+    * one are suspending. In this state, our part of the chain is not saved
+    * and is in the current draw_cs/state.
+    *
+    *   BeginRendering() ... EndRendering(suspending)
+    *   BeginCommandBuffer() <- start of current command buffer
+    *       BeginRendering(resuming) ... EndRendering(suspending)
+    *       BeginRendering(resuming) ... EndRendering(suspending)
+    *       ...
+    *       // we are here
+    */
+   SR_IN_PRE_CHAIN,
+
+   /* We are currently outside of any suspend/resume chains, but there is a
+    * chain starting before the current command buffer. It is saved in
+    * pre_chain.
+    *
+    *   BeginRendering() ... EndRendering(suspending)
+    *   BeginCommandBuffer() <- start of current command buffer
+    *       // This part is stashed in pre_chain
+    *       BeginRendering(resuming) ... EndRendering(suspending)
+    *       BeginRendering(resuming) ... EndRendering(suspending)
+    *       ...
+    *       BeginRendering(resuming) ... EndRendering() // end of chain
+    *       ...
+    *       // we are here
+    */
+   SR_AFTER_PRE_CHAIN,
+
+   /* We are in the middle of a suspend/resume chain and there is no chain
+    * starting before the current command buffer.
+    *
+    *   BeginCommandBuffer() <- start of current command buffer
+    *       ...
+    *       BeginRendering() ... EndRendering(suspending)
+    *       BeginRendering(resuming) ... EndRendering(suspending)
+    *       BeginRendering(resuming) ... EndRendering(suspending)
+    *       ...
+    *       // we are here
+    */
+   SR_IN_CHAIN,
+
+   /* We are in the middle of a suspend/resume chain and there is another,
+    * separate, chain starting before the current command buffer.
+    *
+    *   BeginRendering() ... EndRendering(suspending)
+    *   CommandBufferBegin() <- start of current command buffer
+    *       // This part is stashed in pre_chain
+    *       BeginRendering(resuming) ... EndRendering(suspending)
+    *       BeginRendering(resuming) ... EndRendering(suspending)
+    *       ...
+    *       BeginRendering(resuming) ... EndRendering() // end of chain
+    *       ...
+    *       BeginRendering() ... EndRendering(suspending)
+    *       BeginRendering(resuming) ... EndRendering(suspending)
+    *       BeginRendering(resuming) ... EndRendering(suspending)
+    *       ...
+    *       // we are here
+    */
+   SR_IN_CHAIN_AFTER_PRE_CHAIN,
+};
+
+typedef char tu_blake3_str[BLAKE3_HEX_LEN];
 
 struct tu_cmd_state
 {
    uint32_t dirty;
 
-   struct tu_pipeline *pipeline;
-   struct tu_pipeline *compute_pipeline;
+   struct tu_shader *shaders[MESA_SHADER_STAGES];
+
+   struct tu_program_state program;
 
    struct tu_render_pass_state rp;
 
-   /* Vertex buffers, viewports, and scissors
+   struct vk_render_pass_state vk_rp;
+   struct vk_multiview_state vk_mv;
+   struct vk_vertex_input_state vi;
+   struct vk_sample_locations_state sl;
+
+   struct tu_bandwidth bandwidth;
+
+   /* Vertex buffers
     * the states for these can be updated partially, so we need to save these
     * to be able to emit a complete draw state
     */
    struct {
       uint64_t base;
       uint32_t size;
-      uint32_t stride;
    } vb[MAX_VBS];
 
    uint32_t max_vbs_bound;
 
-   VkViewport viewport[MAX_VIEWPORTS];
-   VkRect2D scissor[MAX_SCISSORS];
-   uint32_t max_viewport, max_scissor;
+   bool has_fdm;
+   /* See tu_pipeline::per_view_viewport */
+   bool per_view_viewport;
+   /* See tu_pipeline::per_layer_viewport */
+   bool per_layer_viewport;
+   /* See tu_pipeline::fake_single_viewport */
+   bool fake_single_viewport;
 
-   /* for dynamic states that can't be emitted directly */
-   uint32_t dynamic_stencil_mask;
-   uint32_t dynamic_stencil_wrmask;
-   uint32_t dynamic_stencil_ref;
-   bool stencil_front_write;
-   bool stencil_back_write;
+   /* If per_layer_viewport is true, the maximum number of layers rendered to.
+    * We need to save this because we might not necessarily know the number of
+    * layers in some corner cases and we need to know this in order to know
+    * how many viewports to emit.
+    */
+   uint8_t max_fdm_layers;
 
-   uint32_t gras_su_cntl, gras_cl_cntl, rb_depth_cntl, rb_stencil_cntl;
-   uint32_t pc_raster_cntl, vpc_unknown_9107;
-   enum a6xx_polygon_mode polygon_mode;
-   uint32_t rb_mrt_control[MAX_RTS], rb_mrt_blend_control[MAX_RTS];
-   uint32_t rb_mrt_control_rop;
-   uint32_t rb_blend_cntl, sp_blend_cntl;
-   uint32_t pipeline_color_write_enable, blend_enable;
-   uint32_t color_write_enable;
-   bool logic_op_enabled;
-   bool rop_reads_dst;
-   bool alpha_to_coverage;
-   enum pc_di_primtype primtype;
-   bool primitive_restart_enable;
-   bool tess_upper_left_domain_origin;
-   bool provoking_vertex_last;
+   /* Set in CmdBeginRendering/CmdBeginRenderPass2, whether the FDM should be
+    * sampled per layer.
+    */
+   bool fdm_per_layer;
 
    /* saved states to re-emit in TU_CMD_DIRTY_DRAW_STATE case */
    struct tu_draw_state dynamic_state[TU_DYNAMIC_STATE_COUNT];
    struct tu_draw_state vertex_buffers;
    struct tu_draw_state shader_const;
    struct tu_draw_state desc_sets;
-   struct tu_draw_state msaa;
+   struct tu_draw_state load_state;
+   struct tu_draw_state compute_load_state;
+   struct tu_draw_state prim_order_gmem;
 
    struct tu_draw_state vs_params;
+   struct tu_draw_state fs_params;
 
    /* Index buffer */
    uint64_t index_va;
@@ -395,15 +539,18 @@ struct tu_cmd_state
    /* Decides which GMEM layout to use from the tu_pass, based on whether the CCU
     * might get used by tu_store_gmem_attachment().
     */
-   enum tu_gmem_layout gmem_layout;
+   tu_gmem_layout gmem_layout;
+   uint32_t gmem_layout_divisor;
 
    const struct tu_render_pass *pass;
    const struct tu_subpass *subpass;
-   const struct tu_framebuffer *framebuffer;
+   struct tu_framebuffer *framebuffer;
    const struct tu_tiling_config *tiling;
-   VkRect2D render_area;
+   VkRect2D render_areas[MAX_VIEWS];
+   bool per_layer_render_area;
 
    const struct tu_image_view **attachments;
+   VkClearValue *clear_values;
 
    /* State that in the dynamic case comes from VkRenderingInfo and needs to
     * be saved/restored when suspending. This holds the state for the last
@@ -413,23 +560,44 @@ struct tu_cmd_state
    struct {
       const struct tu_render_pass *pass;
       const struct tu_subpass *subpass;
-      const struct tu_framebuffer *framebuffer;
-      VkRect2D render_area;
+      struct tu_framebuffer *framebuffer;
+      VkRect2D render_areas[MAX_VIEWS];
+      bool per_layer_render_area;
+      bool fdm_subsampled;
       enum tu_gmem_layout gmem_layout;
+      uint32_t gmem_layout_divisor;
 
       const struct tu_image_view **attachments;
+      VkClearValue *clear_values;
 
       struct tu_lrz_state lrz;
    } suspended_pass;
 
+   bool fdm_enabled;
+   bool fdm_subsampled;
+
    bool tessfactor_addr_set;
    bool predication_active;
-   enum a5xx_line_mode line_mode;
-   VkSampleCountFlagBits samples;
    bool msaa_disable;
-   bool z_negative_one_to_one;
+   tu_lrz_blend_status lrz_blend_status;
+   bool disable_fs;
+   bool stencil_front_write;
+   bool stencil_back_write;
+   bool stencil_written_on_depth_fail;
+   bool stencil_written_based_on_depth_test;
+   bool pipeline_sysmem_single_prim_mode;
+   bool pipeline_has_tess;
+   bool pipeline_disable_gmem;
+   bool raster_order_attachment_access;
+   bool raster_order_attachment_access_valid;
+   bool blit_cache_cleaned;
+   VkImageAspectFlags pipeline_feedback_loops;
+   bool pipeline_writes_shading_rate;
+   bool pipeline_reads_shading_rate;
+   bool pipeline_accesses_smask;
 
-   unsigned patch_control_points;
+   bool pipeline_blend_lrz, pipeline_bandwidth, pipeline_disable_fs;
+   uint32_t pipeline_draw_states;
 
    /* VK_QUERY_PIPELINE_STATISTIC_CLIPPING_INVOCATIONS_BIT and
     * VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT are allowed to run simultaniously,
@@ -438,95 +606,15 @@ struct tu_cmd_state
    uint32_t prim_counters_running;
 
    bool prim_generated_query_running_before_rp;
+   bool vtx_stats_query_running_before_rp;
+   bool xfb_query_running_before_rp;
 
-   /* These are the states of the suspend/resume state machine. In addition to
-    * tracking whether we're in the middle of a chain of suspending and
-    * resuming passes that will be merged, we need to track whether the
-    * command buffer begins in the middle of such a chain, for when it gets
-    * merged with other command buffers. We call such a chain that begins
-    * before the command buffer starts a "pre-chain".
-    *
-    * Note that when this command buffer is finished, this state is untouched
-    * but it gains a different meaning. For example, if we finish in state
-    * SR_IN_CHAIN, we finished in the middle of a suspend/resume chain, so
-    * there's a suspend/resume chain that extends past the end of the command
-    * buffer. In this sense it's the "opposite" of SR_AFTER_PRE_CHAIN, which
-    * means that there's a suspend/resume chain that extends before the
-    * beginning.
-    */
-   enum {
-      /* Either there are no suspend/resume chains, or they are entirely
-       * contained in the current command buffer.
-       *
-       *   BeginCommandBuffer() <- start of current command buffer
-       *       ...
-       *       // we are here
-       */
-      SR_NONE = 0,
+   bool occlusion_query_may_be_running;
 
-      /* We are in the middle of a suspend/resume chain that starts before the
-       * current command buffer. This happens when the command buffer begins
-       * with a resuming render pass and all of the passes up to the current
-       * one are suspending. In this state, our part of the chain is not saved
-       * and is in the current draw_cs/state.
-       *
-       *   BeginRendering() ... EndRendering(suspending)
-       *   BeginCommandBuffer() <- start of current command buffer
-       *       BeginRendering(resuming) ... EndRendering(suspending)
-       *       BeginRendering(resuming) ... EndRendering(suspending)
-       *       ...
-       *       // we are here
-       */
-      SR_IN_PRE_CHAIN,
+   bool trace_draws_enabled;
+   enum tu_pipeline_type trace_draws_pipeline_type;
 
-      /* We are currently outside of any suspend/resume chains, but there is a
-       * chain starting before the current command buffer. It is saved in
-       * pre_chain.
-       *
-       *   BeginRendering() ... EndRendering(suspending)
-       *   BeginCommandBuffer() <- start of current command buffer
-       *       // This part is stashed in pre_chain
-       *       BeginRendering(resuming) ... EndRendering(suspending)
-       *       BeginRendering(resuming) ... EndRendering(suspending)
-       *       ...
-       *       BeginRendering(resuming) ... EndRendering() // end of chain
-       *       ...
-       *       // we are here
-       */
-      SR_AFTER_PRE_CHAIN,
-
-      /* We are in the middle of a suspend/resume chain and there is no chain
-       * starting before the current command buffer.
-       *
-       *   BeginCommandBuffer() <- start of current command buffer
-       *       ...
-       *       BeginRendering() ... EndRendering(suspending)
-       *       BeginRendering(resuming) ... EndRendering(suspending)
-       *       BeginRendering(resuming) ... EndRendering(suspending)
-       *       ...
-       *       // we are here
-       */
-      SR_IN_CHAIN,
-
-      /* We are in the middle of a suspend/resume chain and there is another,
-       * separate, chain starting before the current command buffer.
-       *
-       *   BeginRendering() ... EndRendering(suspending)
-       *   CommandBufferBegin() <- start of current command buffer
-       *       // This part is stashed in pre_chain
-       *       BeginRendering(resuming) ... EndRendering(suspending)
-       *       BeginRendering(resuming) ... EndRendering(suspending)
-       *       ...
-       *       BeginRendering(resuming) ... EndRendering() // end of chain
-       *       ...
-       *       BeginRendering() ... EndRendering(suspending)
-       *       BeginRendering(resuming) ... EndRendering(suspending)
-       *       BeginRendering(resuming) ... EndRendering(suspending)
-       *       ...
-       *       // we are here
-       */
-      SR_IN_CHAIN_AFTER_PRE_CHAIN,
-   } suspend_resume;
+   enum tu_suspend_resume_state suspend_resume;
 
    bool suspending, resuming;
 
@@ -535,10 +623,37 @@ struct tu_cmd_state
    struct tu_draw_state lrz_and_depth_plane_state;
 
    struct tu_vs_params last_vs_params;
+   bool last_draw_indexed;
 
-   struct tu_primitive_params last_prim_params;
+   struct tu_tess_params tess_params;
 
    uint64_t descriptor_buffer_iova[MAX_SETS];
+
+   uint32_t total_renderpasses;
+   uint32_t total_dispatches;
+
+   unsigned tile_render_pass_count;
+   bool renderpass_cb_disabled;
+};
+
+struct tu_vis_stream_patchpoint {
+   unsigned render_pass_idx;
+   uint32_t *data;
+   uint64_t iova;
+   uint32_t offset;
+};
+
+enum tu_cb_control_type {
+   TU_CB_CONTROL_TYPE_PATCHPOINT,
+   TU_CB_CONTROL_TYPE_BARRIER,
+   TU_CB_CONTROL_TYPE_CB_ENABLED,
+};
+
+struct tu_cb_control_point {
+   enum tu_cb_control_type type;
+   uint32_t *patchpoint;
+   uint32_t patch_value;
+   uint32_t original_value;
 };
 
 struct tu_cmd_buffer
@@ -547,12 +662,20 @@ struct tu_cmd_buffer
 
    struct tu_device *device;
 
-   struct u_trace trace;
    struct u_trace_iterator trace_renderpass_start;
-   struct u_trace_iterator trace_renderpass_end;
+   struct u_trace trace, rp_trace;
 
-   struct list_head renderpass_autotune_results;
-   struct tu_autotune_results_buffer* autotune_buffer;
+   tu_autotune::cmd_buf_ctx autotune_ctx;
+
+   void *patchpoints_ctx;
+   struct util_dynarray fdm_bin_patchpoints;
+
+   struct tu_vis_stream_patchpoint vis_stream_count_patchpoint;
+   struct util_dynarray vis_stream_patchpoints;
+   struct util_dynarray vis_stream_bos;
+   struct util_dynarray vis_stream_cs_bos;
+
+   struct util_dynarray cb_control_points;
 
    VkCommandBufferUsageFlags usage_flags;
 
@@ -561,19 +684,27 @@ struct tu_cmd_buffer
    struct tu_cmd_state state;
    uint32_t queue_family_index;
 
+   /* For TU_DEBUG_START(CHECK_CMD_BUFFER_STATUS) functionality. */
+   struct tu_bo *status_bo;
+
    uint32_t push_constants[MAX_PUSH_CONSTANTS_SIZE / 4];
    VkShaderStageFlags push_constant_stages;
    struct tu_descriptor_set meta_push_descriptors;
 
    struct tu_descriptor_state descriptors[MAX_BIND_POINTS];
 
-   struct tu_render_pass_attachment dynamic_rp_attachments[2 * (MAX_RTS + 1)];
+   struct tu_render_pass_attachment dynamic_rp_attachments[3 * (MAX_RTS + 1) + 2];
    struct tu_subpass_attachment dynamic_color_attachments[MAX_RTS];
+   struct tu_subpass_attachment dynamic_input_attachments[MAX_RTS + 1];
    struct tu_subpass_attachment dynamic_resolve_attachments[MAX_RTS + 1];
-   const struct tu_image_view *dynamic_attachments[2 * (MAX_RTS + 1)];
+   struct tu_subpass_attachment dynamic_unresolve_attachments[MAX_RTS + 1];
+   const struct tu_image_view *dynamic_attachments[3 * (MAX_RTS + 1) + 2];
+   VkClearValue dynamic_clear_values[3 * (MAX_RTS + 1)];
+   struct tu_image_view dynamic_msrtss_iviews[MAX_RTS + 1];
+   struct tu_image dynamic_msrtss_images[MAX_RTS + 1];
 
    struct tu_render_pass dynamic_pass;
-   struct tu_subpass dynamic_subpass;
+   struct tu_subpass dynamic_subpasses[2];
    struct tu_framebuffer dynamic_framebuffer;
 
    struct tu_cs cs;
@@ -595,14 +726,31 @@ struct tu_cmd_buffer
       struct tu_cs draw_cs;
       struct tu_cs draw_epilogue_cs;
 
-      struct u_trace_iterator trace_renderpass_start, trace_renderpass_end;
+      bool fdm_offset;
+      VkOffset2D fdm_offsets[MAX_VIEWS];
+
+      struct u_trace rp_trace;
 
       struct tu_render_pass_state state;
+
+      struct util_dynarray fdm_bin_patchpoints;
+      void *patchpoints_ctx;
    } pre_chain;
+
+   /* The current MSRTSS temporary buffer. */
+   struct tu_bo *msrtt_temporary;
+
+   struct util_dynarray msrtss_color_temporaries;
+   struct util_dynarray msrtss_depth_temporaries;
 
    uint32_t vsc_draw_strm_pitch;
    uint32_t vsc_prim_strm_pitch;
+   uint32_t vsc_draw_strm_offset, vsc_draw_strm_size_offset;
+   uint32_t vsc_prim_strm_offset, vsc_state_offset;
+   uint64_t vsc_size;
    bool vsc_initialized;
+
+   bool prev_fsr_is_null;
 };
 VK_DEFINE_HANDLE_CASTS(tu_cmd_buffer, vk.base, VkCommandBuffer,
                        VK_OBJECT_TYPE_COMMAND_BUFFER)
@@ -627,7 +775,8 @@ tu_attachment_gmem_offset_stencil(struct tu_cmd_buffer *cmd,
 {
    assert(cmd->state.gmem_layout < TU_GMEM_LAYOUT_COUNT);
    return att->gmem_offset_stencil[cmd->state.gmem_layout] +
-      layer * cmd->state.tiling->tile0.width * cmd->state.tiling->tile0.height;
+      layer * cmd->state.tiling->tile0.width * cmd->state.tiling->tile0.height *
+      att->samples;
 }
 
 void tu_render_pass_state_merge(struct tu_render_pass_state *dst,
@@ -636,8 +785,14 @@ void tu_render_pass_state_merge(struct tu_render_pass_state *dst,
 VkResult tu_cmd_buffer_begin(struct tu_cmd_buffer *cmd_buffer,
                              const VkCommandBufferBeginInfo *pBeginInfo);
 
+template <chip CHIP>
+void
+tu_emit_cache_flush(struct tu_cmd_buffer *cmd_buffer);
+
+template <chip CHIP>
 void tu_emit_cache_flush_renderpass(struct tu_cmd_buffer *cmd_buffer);
 
+template <chip CHIP>
 void tu_emit_cache_flush_ccu(struct tu_cmd_buffer *cmd_buffer,
                              struct tu_cs *cs,
                              enum tu_cmd_ccu_state ccu_state);
@@ -658,12 +813,40 @@ void
 tu_restore_suspended_pass(struct tu_cmd_buffer *cmd,
                           struct tu_cmd_buffer *suspended);
 
-void tu_cmd_render(struct tu_cmd_buffer *cmd);
+template <chip CHIP>
+void tu_cmd_render(struct tu_cmd_buffer *cmd, const VkOffset2D *fdm_offsets);
+
+void tu_dispatch_unaligned(VkCommandBuffer commandBuffer,
+                           uint32_t x, uint32_t y, uint32_t z);
+
+void tu_dispatch_unaligned_indirect(VkCommandBuffer commandBuffer,
+                                    VkDeviceAddress size_addr);
+
+void tu_write_buffer_cp(VkCommandBuffer commandBuffer,
+                        VkDeviceAddress addr,
+                        void *data, uint32_t size);
+
+void tu_flush_buffer_write_cp(VkCommandBuffer commandBuffer);
+
+enum fd_gpu_event : uint32_t;
+
+template <chip CHIP>
+void
+tu_emit_raw_event_write(struct tu_cmd_buffer *cmd,
+                        struct tu_cs *cs,
+                        enum vgt_event_type event,
+                        bool needs_seqno);
+
+template <chip CHIP>
+void
+tu_emit_event_write(struct tu_cmd_buffer *cmd,
+                    struct tu_cs *cs,
+                    enum fd_gpu_event event);
 
 void
-tu6_emit_event_write(struct tu_cmd_buffer *cmd,
-                     struct tu_cs *cs,
-                     enum vgt_event_type event);
+tu_flush_for_access(struct tu_cache_state *cache,
+                    enum tu_cmd_access_mask src_mask,
+                    enum tu_cmd_access_mask dst_mask);
 
 static inline struct tu_descriptor_state *
 tu_get_descriptors_state(struct tu_cmd_buffer *cmd_buffer,
@@ -672,12 +855,17 @@ tu_get_descriptors_state(struct tu_cmd_buffer *cmd_buffer,
    return &cmd_buffer->descriptors[bind_point];
 }
 
+template <chip CHIP>
 void tu6_emit_msaa(struct tu_cs *cs, VkSampleCountFlagBits samples,
                    bool msaa_disable);
 
+template <chip CHIP>
 void tu6_emit_window_scissor(struct tu_cs *cs, uint32_t x1, uint32_t y1, uint32_t x2, uint32_t y2);
 
 void tu6_emit_window_offset(struct tu_cs *cs, uint32_t x1, uint32_t y1);
+
+void tu6_emit_blit_scissor(struct tu_cmd_buffer *cmd, struct tu_cs *cs,
+                           unsigned view, bool align);
 
 void tu_disable_draw_states(struct tu_cmd_buffer *cmd, struct tu_cs *cs);
 
@@ -685,6 +873,147 @@ void tu6_apply_depth_bounds_workaround(struct tu_device *device,
                                        uint32_t *rb_depth_cntl);
 
 void
-update_stencil_mask(uint32_t *value, VkStencilFaceFlags face, uint32_t mask);
+tu_cs_emit_draw_state(struct tu_cs *cs, uint32_t id, struct tu_draw_state state);
+
+bool tu_enable_fdm_offset(struct tu_cmd_buffer *cmd);
+
+typedef void (*tu_fdm_bin_apply_t)(struct tu_cmd_buffer *cmd,
+                                   struct tu_cs *cs,
+                                   void *data,
+                                   VkOffset2D common_bin_offset,
+                                   const VkOffset2D *hw_viewport_offsets,
+                                   unsigned views,
+                                   const struct tu_tile_config *tile_config,
+                                   const VkRect2D *bins,
+                                   bool binning);
+
+enum tu_fdm_flags {
+   TU_FDM_NONE = 0,
+
+   /* Skip applying this patchpoint when binning */
+   TU_FDM_SKIP_BINNING = 1,
+};
+
+struct tu_fdm_bin_patchpoint {
+   uint64_t iova;
+   uint32_t size;
+   enum tu_fdm_flags flags;
+   void *data;
+   tu_fdm_bin_apply_t apply;
+};
+
+struct tu_vis_stream_patchpoint_cs {
+   struct tu_suballoc_bo cs_bo;
+   struct tu_suballoc_bo fence_bo;
+};
+
+void
+tu_barrier(struct tu_cmd_buffer *cmd,
+           uint32_t dep_count,
+           const VkDependencyInfo *dep_info,
+           bool no_sync);
+
+template <chip CHIP>
+void
+tu_write_event(struct tu_cmd_buffer *cmd, struct tu_event *event,
+               VkPipelineStageFlags2 stageMask, unsigned value);
+
+static inline void
+_tu_create_fdm_bin_patchpoint(struct tu_cmd_buffer *cmd,
+                              struct tu_cs *cs,
+                              unsigned size,
+                              enum tu_fdm_flags flags,
+                              tu_fdm_bin_apply_t apply,
+                              void *state,
+                              unsigned state_size)
+{
+   void *data = ralloc_size(cmd->patchpoints_ctx, state_size);
+   memcpy(data, state, state_size);
+   assert(cs->writeable);
+   tu_cs_reserve_space(cs, size);
+   struct tu_fdm_bin_patchpoint patch = {
+      .iova = tu_cs_get_cur_iova(cs),
+      .size = size,
+      .flags = flags,
+      .data = data,
+      .apply = apply,
+   };
+
+   /* Apply the "default" setup where there is no scaling. This is used if
+    * sysmem is required, and uses up the dwords that have been reserved.
+    */
+   unsigned num_views = MAX2(cmd->state.pass->num_views, 1);
+   struct tu_tile_config dummy_config = {};
+   VkOffset2D hw_viewport_offsets[num_views];
+   VkRect2D bins[num_views];
+   for (unsigned i = 0; i < num_views; i++) {
+      dummy_config.frag_areas[i] = (VkExtent2D) { 1, 1 };
+      bins[i] = (VkRect2D) {
+         { 0, 0 },
+         { MAX_VIEWPORT_SIZE, MAX_VIEWPORT_SIZE },
+      };
+      hw_viewport_offsets[i] = (VkOffset2D) { 0, 0 };
+   }
+   apply(cmd, cs, state, (VkOffset2D) {0, 0}, hw_viewport_offsets, num_views, &dummy_config, bins, false);
+   assert(tu_cs_get_cur_iova(cs) == patch.iova + patch.size * sizeof(uint32_t));
+
+   util_dynarray_append(&cmd->fdm_bin_patchpoints, patch);
+}
+
+#define tu_create_fdm_bin_patchpoint(cmd, cs, size, flags, apply, state) \
+   _tu_create_fdm_bin_patchpoint(cmd, cs, size, flags, apply, &state, sizeof(state))
+
+VkResult tu_init_bin_preamble(struct tu_device *device);
+
+template <chip CHIP>
+void tu_init_hw_rp(struct tu_cs *cs);
+
+void
+tu7_set_thread_br_patchpoint(struct tu_cmd_buffer *cmd,
+                             struct tu_cs *cs,
+                             bool force_disable_cb);
+
+void
+tu7_set_thread_both_patchpoint(struct tu_cmd_buffer *cmd,
+                               struct tu_cs *cs);
+
+/* For bin offsetting we want to do "Euclidean division," where the remainder
+ * (i.e. the offset of the bin) is always positive. Unfortunately C/C++
+ * remainder and division don't do this, so we have to implement it ourselves.
+ *
+ * For example, we should have:
+ *
+ * euclid_rem(-3, 4) = 1
+ * euclid_rem(-4, 4) = 0
+ * euclid_rem(-4, 4) = 3
+ */
+
+static inline int32_t
+euclid_rem(int32_t divisor, int32_t divisend)
+{
+   if (divisor >= 0)
+      return divisor % divisend;
+   int32_t tmp = divisend - (-divisor % divisend);
+   return tmp == divisend ? 0 : tmp;
+}
+
+/* Calculate how much the bins for a given view should be shifted to the left
+ * and upwards, given the application-provided FDM offset.
+ */
+static inline VkOffset2D
+tu_bin_offset(VkOffset2D fdm_offset, const struct tu_tiling_config *tiling)
+{
+   return (VkOffset2D) {
+      euclid_rem(-fdm_offset.x, tiling->tile0.width),
+      euclid_rem(-fdm_offset.y, tiling->tile0.height),
+   };
+}
+
+static inline uint32_t
+tu_fdm_num_layers(const struct tu_cmd_buffer *cmd)
+{
+   return cmd->state.pass->num_views ? cmd->state.pass->num_views : 
+      (cmd->state.fdm_per_layer ? cmd->state.framebuffer->layers : 1);
+}
 
 #endif /* TU_CMD_BUFFER_H */

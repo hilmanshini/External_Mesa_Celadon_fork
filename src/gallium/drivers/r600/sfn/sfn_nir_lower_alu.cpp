@@ -1,27 +1,7 @@
 /* -*- mesa-c++  -*-
- *
- * Copyright (c) 2022 Collabora LTD
- *
+ * Copyright 2022 Collabora LTD
  * Author: Gert Wollny <gert.wollny@collabora.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include "sfn_nir_lower_alu.h"
@@ -33,7 +13,7 @@ namespace r600 {
 class Lower2x16 : public NirLowerInstruction {
 private:
    bool filter(const nir_instr *instr) const override;
-   nir_ssa_def *lower(nir_instr *instr) override;
+   nir_def *lower(nir_instr *instr) override;
 };
 
 bool
@@ -51,26 +31,26 @@ Lower2x16::filter(const nir_instr *instr) const
    }
 }
 
-nir_ssa_def *
+nir_def *
 Lower2x16::lower(nir_instr *instr)
 {
    nir_alu_instr *alu = nir_instr_as_alu(instr);
 
    switch (alu->op) {
    case nir_op_unpack_half_2x16: {
-      nir_ssa_def *packed = nir_ssa_for_alu_src(b, alu, 0);
-      return nir_vec2(b,
-                      nir_unpack_half_2x16_split_x(b, packed),
-                      nir_unpack_half_2x16_split_y(b, packed));
+      nir_def *packed = nir_ssa_for_alu_src(b, alu, 0);
+      nir_def *lo = nir_u2u16(b, packed);
+      nir_def *hi = nir_u2u16(b, nir_ushr_imm(b, packed, 16));
+      return nir_vec2(b, nir_f2f32(b, lo), nir_f2f32(b, hi));
    }
    case nir_op_pack_half_2x16: {
-      nir_ssa_def *src_vec2 = nir_ssa_for_alu_src(b, alu, 0);
+      nir_def *src_vec2 = nir_ssa_for_alu_src(b, alu, 0);
       return nir_pack_half_2x16_split(b,
                                       nir_channel(b, src_vec2, 0),
                                       nir_channel(b, src_vec2, 1));
    }
    default:
-      unreachable("Lower2x16 filter doesn't filter correctly");
+      UNREACHABLE("Lower2x16 filter doesn't filter correctly");
    }
 }
 
@@ -83,7 +63,7 @@ public:
 
 private:
    bool filter(const nir_instr *instr) const override;
-   nir_ssa_def *lower(nir_instr *instr) override;
+   nir_def *lower(nir_instr *instr) override;
    amd_gfx_level m_gxf_level;
 };
 
@@ -103,7 +83,7 @@ LowerSinCos::filter(const nir_instr *instr) const
    }
 }
 
-nir_ssa_def *
+nir_def *
 LowerSinCos::lower(nir_instr *instr)
 {
    auto alu = nir_instr_as_alu(instr);
@@ -111,20 +91,61 @@ LowerSinCos::lower(nir_instr *instr)
    assert(alu->op == nir_op_fsin || alu->op == nir_op_fcos);
 
    auto fract = nir_ffract(b,
-                           nir_ffma(b,
-                                    nir_ssa_for_alu_src(b, alu, 0),
-                                    nir_imm_float(b, 0.15915494),
-                                    nir_imm_float(b, 0.5)));
+                           nir_ffma_weak_imm12(b,
+                                               nir_ssa_for_alu_src(b, alu, 0),
+                                               0.15915494,
+                                               0.5));
 
    auto normalized =
       m_gxf_level != R600
-         ? nir_fadd(b, fract, nir_imm_float(b, -0.5))
-         : nir_ffma(b, fract, nir_imm_float(b, 2.0f * M_PI), nir_imm_float(b, -M_PI));
+         ? nir_fadd_imm(b, fract, -0.5)
+         : nir_ffma_weak_imm12(b, fract, 2.0f * M_PI, -M_PI);
 
    if (alu->op == nir_op_fsin)
-      return nir_fsin_amd(b, normalized);
+      return nir_fsin_normalized_2_pi(b, normalized);
    else
-      return nir_fcos_amd(b, normalized);
+      return nir_fcos_normalized_2_pi(b, normalized);
+}
+
+class FixKcacheIndirectRead : public NirLowerInstruction {
+private:
+   bool filter(const nir_instr *instr) const override;
+   nir_def *lower(nir_instr *instr) override;
+};
+
+bool FixKcacheIndirectRead::filter(const nir_instr *instr) const
+{
+   if (instr->type != nir_instr_type_intrinsic)
+      return false;
+
+   auto intr = nir_instr_as_intrinsic(instr);
+   if (intr->intrinsic != nir_intrinsic_load_ubo)
+      return false;
+
+   return nir_src_as_const_value(intr->src[0]) == nullptr;
+}
+
+nir_def *FixKcacheIndirectRead::lower(nir_instr *instr)
+{
+   auto intr = nir_instr_as_intrinsic(instr);
+   assert(nir_src_as_const_value(intr->src[0]) == nullptr);
+
+   nir_def *result = &intr->def;
+   for (unsigned i = 14; i < b->shader->info.num_ubos; ++i) {
+      auto test_bufid = nir_imm_int(b, i);
+      auto direct_value =
+	    nir_load_ubo(b, intr->num_components,
+			 intr->def.bit_size,
+			 test_bufid,
+			 intr->src[1].ssa);
+      auto direct_load = nir_def_as_intrinsic(direct_value);
+      nir_intrinsic_copy_const_indices(direct_load, intr);
+      result = nir_bcsel(b,
+			 nir_ieq(b, test_bufid, intr->src[0].ssa),
+	                 direct_value,
+	                 result);
+   }
+   return result;
 }
 
 } // namespace r600
@@ -139,4 +160,11 @@ bool
 r600_nir_lower_trigen(nir_shader *shader, amd_gfx_level gfx_level)
 {
    return r600::LowerSinCos(gfx_level).run(shader);
+}
+
+bool
+r600_nir_fix_kcache_indirect_access(nir_shader *shader)
+{
+   return shader->info.num_ubos > 14 ?
+	    r600::FixKcacheIndirectRead().run(shader) : false;
 }

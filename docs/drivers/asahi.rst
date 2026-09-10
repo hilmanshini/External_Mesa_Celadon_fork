@@ -3,34 +3,14 @@ Asahi
 
 The Asahi driver aims to provide an OpenGL implementation for the Apple M1.
 
-Testing on macOS
------------------
-
-On macOS, the experimental Asahi driver may built with options:
-
-    -Dosmesa=true -Dglx=xlib -Dgallium-drivers=asahi,swrast
-
-To use, set the ``DYLD_LIBRARY_PATH`` environment variable:
-
-.. code-block:: console
-
-   DYLD_LIBRARY_PATH=/Users/nobody/mesa/build/src/gallium/targets/libgl-xlib/ glmark2 --reuse-context
-
-Only X11 apps are supported. XQuartz must be setup separately.
-
 Wrap (macOS only)
 -----------------
 
 Mesa includes a library that wraps the key IOKit entrypoints used in the macOS
 UABI for AGX. The wrapped routines print information about the kernel calls made
-and dump work submitted to the GPU using agxdecode.
-
-This library allows debugging Mesa, particularly around the undocumented macOS
-user-kernel interface. Logs from Mesa may compared to Metal to check that the
-UABI is being used correctly.
-
-Furthermore, it allows reverse-engineering the hardware, as glue to get at the
-"interesting" GPU memory.
+and dump work submitted to the GPU using agxdecode. This facilitates
+reverse-engineering the hardware, as glue to get at the "interesting" GPU
+memory.
 
 The library is only built if ``-Dtools=asahi`` is passed. It builds a single
 ``wrap.dylib`` file, which should be inserted into a process with the
@@ -52,38 +32,76 @@ below.
 Vertex shader
 `````````````
 
-A vertex shader (running on the Unified Shader Cores) outputs varyings with the
+A vertex shader (running on the :term:`Unified Shader Cores`) outputs varyings with the
 ``st_var`` instruction. ``st_var`` takes a *vertex output index* and a 32-bit
 value. The maximum number of *vertex outputs* is specified as the "output count"
-of the shader in the "Bind Vertex Pipeline" packet. The value may be interpreted
+of the shader in the "VDM State Vertex Outputs" structure. The value may be interpreted
 consist of a single 32-bit value or an aligned 16-bit register pair, depending
 on whether interpolation should happen at 32-bit or 16-bit. Vertex outputs are
 indexed starting from 0, with the *vertex position* always coming first, the
-32-bit user varyings coming next, then 16-bit user varyings, and finally *point
-size* at the end if present.
+32-bit user varyings coming next with perspective, flat, and linear interpolated
+varyings grouped in that order, then 16-bit user varyings with the same groupings,
+and finally *point size*, *layer/viewport*, and *clip distances* at the end if present. Note that
+*clip distances* are not accessible from the fragment shader; if the fragment
+shader needs to read the interpolated clip distance, the vertex shader must
+*also* write the clip distance values to a user varying for the fragment shader
+to interpolate. Also note there is no clip plane enable mask anywhere; that must
+lowered for APIs that require this (OpenGL but not Vulkan).
 
 .. list-table:: Ordering of vertex outputs with all outputs used
    :widths: 25 75
    :header-rows: 1
 
-   * - Index
+   * - Size (words)
      - Value
-   * - 0
-     - Vertex position
    * - 4
-     - 32-bit varying 0
+     - Vertex position
+   * - 1
+     - 32-bit smooth varying 0
    * -
      - ...
-   * - 4 + m
-     - 32-bit varying m
-   * - 4 + m + 1
-     - Packed pair of 16-bit varyings 0
+   * - 1
+     - 32-bit smooth varying m
+   * - 1
+     - 32-bit flat varying 0
    * -
      - ...
-   * - 4 + m + 1 + n
-     - Packed pair of 16-bit varyings n
-   * - 4 + m + 1 + n + 1
+   * - 1
+     - 32-bit flat varying n
+   * - 1
+     - 32-bit linear varying 0
+   * -
+     - ...
+   * - 1
+     - 32-bit linear varying o
+   * - 1
+     - Packed pair of 16-bit smooth varyings 0
+   * -
+     - ...
+   * - 1
+     - Packed pair of 16-bit smooth varyings p
+   * - 1
+     - Packed pair of 16-bit flat varyings 0
+   * -
+     - ...
+   * - 1
+     - Packed pair of 16-bit flat varyings q
+   * - 1
+     - Packed pair of 16-bit linear varyings 0
+   * -
+     - ...
+   * - 1
+     - Packed pair of 16-bit linear varyings r
+   * - 1
      - Point size
+   * - 1
+     - Layer/viewport
+   * - 1
+     - Clip distance for plane 0
+   * -
+     - ...
+   * - 1
+     - Clip distance for plane 16
 
 Remapping
 `````````
@@ -92,7 +110,7 @@ Vertex outputs are remapped to varying slots to be interpolated.
 The output of remapping consists of the following items: the *W* fragment
 coordinate, the *Z* fragment coordinate, user varyings in the vertex
 output order. *Z* may be omitted, but *W* may not be. This remapping is
-configured by the "Linkage" packet.
+configured by the "Output select" word.
 
 .. list-table:: Ordering of remapped slots
    :widths: 25 75
@@ -129,7 +147,7 @@ from varying slots. This preloading appears to occur in fixed function hardware,
 a simplification from PowerVR which requires a specialized program for the
 programmable data sequencer to do the preload.
 
-The "Bind fragment pipeline" packet points to coefficient register bindings,
+The "Fragment Shader" structure points to coefficient register bindings,
 preceded by a header. The header contains the number of 32-bit varying slots. As
 the *W* slot is always present, this field is always nonzero. Slots whose index
 is below this count are treated as 32-bit. The remaining slots are treated as
@@ -149,6 +167,12 @@ bindings should be generated outside of the compiler. For simple APIs where the
 bindings are fixed and known at compile-time, the bindings could be generated
 within the compiler.
 
+Mathematically, the value of the coefficient register is a vector in
+:math:`\mathbb{R}^3`. The X and Y components are the screen-space partial
+derivatives of the varying with respect to X and Y. The Z component is the
+interpolated value of the varying at the upper-left pixel in the 32x32 tile that
+the pixel belongs to.
+
 Fragment shader
 ```````````````
 
@@ -162,6 +186,10 @@ interpolation also requires the W component of the fragment coordinate, the
 coefficient register for W is passed as a second argument. As an example, if
 there's a single varying to interpolate, an instruction like ``iter r0, cf1, cf0``
 is used.
+
+It is occassionally useful to manipulate the raw coefficient registers, for
+example to implement interpolation modes not natively supported by the hardware.
+``ldcf`` is used for this purpose.
 
 Iterator
 ````````
@@ -181,6 +209,9 @@ Image layouts
 AGX supports several image layouts, described here. To work with image layouts
 in the drivers, use the ail library, located in ``src/asahi/layout``.
 
+Strided linear
+``````````````
+
 The simplest layout is **strided linear**. Pixels are stored in raster-order in
 memory with a software-controlled stride. Strided linear images are useful for
 working with modifier-unaware window systems, however performance will suffer.
@@ -189,8 +220,7 @@ Strided linear images have numerous limitations:
 - Strides must be a multiple of 16 bytes.
 - Strides must be nonzero. For 1D images where the stride is logically
   irrelevant, ail will internally select the minimal stride.
-- Only 1D and 2D images may be linear. In particular, no 3D or cubemaps.
-- Array texture may not be linear. No 2D arrays or cubemap arrays.
+- Only 1D, 2D, and 2D Array images may be linear. In particular, no 3D or cubemaps.
 - 2D images must not be mipmapped.
 - Block-compressed formats and multisampled images are unsupported. Elements of
   a strided linear image are simply pixels.
@@ -203,7 +233,10 @@ With these limitations, addressing into a strided linear image is as simple as
 
 In practice, this suffices for window system integration and little else.
 
-The most common uncompressed layout is **twiddled**. The image is divided into
+GPU-tiled
+`````````
+
+The most common uncompressed layout is **GPU-tiled**. The image is divided into
 power-of-two sized tiles. The tiles themselves are stored in raster-order.
 Within each tile, elements (pixels/blocks) are stored in Morton (Z) order.
 
@@ -278,6 +311,48 @@ first layer, simplifying layout calculations for both software and hardware.
 Although the padding is logically unnecessary, it wastes little space compared
 to the sizes of large mipmapped 3D textures.
 
+Twiddled
+````````
+
+In addition to GPU-tiled images, AGX also has a fully **twiddled** layout. The
+image is rounded up to power-of-two dimensions, then all elements are stored in
+Morton (Z) order.
+
+A twiddled image is equivalent to a GPU-tiled image with a single square
+power-of-two tile spanning the entire image. That means GPU-tiled and twiddled
+images may share address calculation code, as long as everything is parametrized
+in terms of the tile size.
+
+In general, twiddled images require more memory than GPU-tiled images due to the
+extra padding required. Because GPU tiles are page-sized, twiddling beyond that
+does not offer any cache locality benefit either. The twiddled layout is
+mostly vestigial at this point, but the PBE requires it for sparse mapping.
+
+Sparse page tables
+``````````````````
+
+The hardware has native support for sparse images. If an texture/PBE descriptor
+is configured in sparse mode, the specified address does not point to the image
+itself. Rather, it points to a **sparse page table**. The extra indirection
+enables on-device sparse binding (e.g. by updating the page table from a compute
+kernel).
+
+At the top level, the sparse page table is an array of **folios**. Each folio
+describes 256 pages. The folio itself has two halves. The first half is the page
+table itself, containing 4-byte "Sparse Block" data structures mapping image
+pages to GPU virtual addresses. The second half is probably sparse texture
+counters, again 4-bytes per page. Each folio therefore consumes :math:`256 \cdot
+4 \cdot 2 = 2 \mathrm{KiB}` in order to describe :math:`256 \cdot 16384 =
+4 \mathrm{MiB}`.
+
+In a layered (array or 3D) image, a given folio only describes a single layer.
+That implies extra padding between layers.
+
+Within a layer, the table works purely at an address level. It maps pages to
+pages, rather than tiles to tiles. It is not a spatial data structure in itself.
+Rather, it inherits the tiling of the image by virtue of the addresses mapped.
+This presumably simplifies the hardware implementation.
+
 drm-shim (Linux only)
 ---------------------
 
@@ -291,16 +366,62 @@ useful for exercising the compiler. To build, use options:
 
 Then run an OpenGL workload with environment variable:
 
-.. code-block:: console
+.. code-block:: sh
 
    LD_PRELOAD=~/mesa/build/src/asahi/drm-shim/libasahi_noop_drm_shim.so
 
 For example to compile a shader with shaderdb and print some statistics along
 with the IR:
 
-.. code-block:: console
+.. code-block:: sh
 
-   ~/shader-db$ AGX_MESA_DEBUG=shaders,shaderdb ASAHI_MESA_DEBUG=precompile LIBGL_DRIVERS_PATH=~/lib/dri/ LD_PRELOAD=~/mesa/build/src/asahi/drm-shim/libasahi_noop_drm_shim.so ./run shaders/glmark/1-12.shader_test
+   ~/shader-db$ AGX_MESA_DEBUG=shaders,shaderdb ASAHI_MESA_DEBUG=precompile LD_PRELOAD=~/mesa/build/src/asahi/drm-shim/libasahi_noop_drm_shim.so ./run shaders/glmark/1-12.shader_test
 
 The drm-shim implementation for Asahi is located in ``src/asahi/drm-shim``. The
 drm-shim implementation there should be updated as new UABI is added.
+
+Hardware glossary
+-----------------
+
+AGX is a tiled renderer descended from the PowerVR architecture. Some hardware
+concepts used in PowerVR GPUs appear in AGX.
+
+.. glossary:: :sorted:
+
+   VDM
+   Vertex Data Master
+      Dispatches vertex shaders.
+
+   PDM
+   Pixel Data Master
+      Dispatches pixel shaders.
+
+   CDM
+   Compute Data Master
+      Dispatches compute kernels.
+
+   USC
+   Unified Shader Cores
+      A unified shader core is a small CPU that runs shader code. The core is
+      unified because a single ISA is used for vertex, pixel and compute
+      shaders. This differs from older GPUs where the vertex, fragment and
+      compute have separate ISAs for shader stages.
+
+   PPP
+   Primitive Processing Pipeline
+      The Primitive Processing Pipeline is a hardware unit that does primitive
+      assembly. The PPP is between the :term:`VDM` and :term:`ISP`.
+
+   ISP
+   Image Synthesis Processor
+      The Image Synthesis Processor is responsible for the rasterization stage
+      of the rendering pipeline.
+
+   PBE
+   Pixel BackEnd
+      Hardware unit which writes to color attachments and images. Also the
+      name for a descriptor passed to :term:`PBE` instructions.
+
+   UVS
+   Unified Vertex Store
+      Hardware unit which buffers the outputs of the vertex shader (varyings).

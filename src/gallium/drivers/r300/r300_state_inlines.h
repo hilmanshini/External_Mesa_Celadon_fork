@@ -1,25 +1,8 @@
 /*
  * Copyright 2009 Joakim Sindholt <opensource@zhasha.com>
  *                Corbin Simpson <MostAwesomeDude@gmail.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ * SPDX-License-Identifier: MIT
+ */
 
 #ifndef R300_STATE_INLINES_H
 #define R300_STATE_INLINES_H
@@ -39,7 +22,7 @@ static inline int pack_float_16_6x(float f) {
 /* Blend state. */
 
 static inline uint32_t r300_translate_blend_function(int blend_func,
-                                                     boolean clamp)
+                                                     bool clamp)
 {
     switch (blend_func) {
     case PIPE_BLEND_ADD:
@@ -260,7 +243,7 @@ static inline uint32_t r300_translate_wrap(int wrap)
 }
 
 static inline uint32_t r300_translate_tex_filters(int min, int mag, int mip,
-                                                  boolean is_anisotropic)
+                                                  bool is_anisotropic)
 {
     uint32_t retval = 0;
 
@@ -350,6 +333,14 @@ r300_translate_vertex_data_type(enum pipe_format format) {
     if (desc->layout != UTIL_FORMAT_LAYOUT_PLAIN) {
         return R300_INVALID_FORMAT;
     }
+
+#if UTIL_ARCH_BIG_ENDIAN
+    /* On big-endian, the VAP has only a global swap mode, not per-attribute
+     * endian control. Keep TCL vertex attributes at 32-bit.
+     */
+    if (desc->channel[i].size < 32)
+        return R300_INVALID_FORMAT;
+#endif
 
     switch (desc->channel[i].type) {
         /* Half-floats, floats, doubles */

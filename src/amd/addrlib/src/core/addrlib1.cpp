@@ -1,25 +1,8 @@
 /*
 ************************************************************************************************************************
 *
-*  Copyright (C) 2007-2022 Advanced Micro Devices, Inc.  All rights reserved.
-*
-* Permission is hereby granted, free of charge, to any person obtaining a
-* copy of this software and associated documentation files (the "Software"),
-* to deal in the Software without restriction, including without limitation
-* the rights to use, copy, modify, merge, publish, distribute, sublicense,
-* and/or sell copies of the Software, and to permit persons to whom the
-* Software is furnished to do so, subject to the following conditions:
-*
-* The above copyright notice and this permission notice shall be included in
-* all copies or substantial portions of the Software.
-*
-* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
-* THE COPYRIGHT HOLDER(S) OR AUTHOR(S) BE LIABLE FOR ANY CLAIM, DAMAGES OR
-* OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
-* ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
-* OTHER DEALINGS IN THE SOFTWARE
+*  Copyright (C) 2007-2026 Advanced Micro Devices, Inc. All rights reserved.
+*  SPDX-License-Identifier: MIT
 *
 ***********************************************************************************************************************/
 
@@ -143,7 +126,7 @@ Lib* Lib::GetLib(
         ADDR_ASSERT_ALWAYS();
         hLib = NULL;
     }
-    return static_cast<Lib*>(hLib);
+    return static_cast<Lib*>(pAddrLib);
 }
 
 
@@ -2490,7 +2473,7 @@ UINT_64 Lib::HwlComputeXmaskAddrFromCoord(
     //
     macroTileIndexX = x / macroTileWidth;
     macroTileIndexY = y / macroTileHeight;
-    macroTileOffset = ((macroTileIndexY * macroTilesPerRow) + macroTileIndexX) * macroTileBytes;
+    macroTileOffset = (static_cast<UINT_64>(macroTileIndexY * macroTilesPerRow) + macroTileIndexX) * macroTileBytes;
 
     //
     // Compute the pixel offset within the macro tile.
@@ -2692,7 +2675,7 @@ VOID Lib::ComputeSurfaceCoordFromAddrMicroTiled(
     //
     sliceBits = static_cast<UINT_64>(pitch) * height * microTileThickness * bpp * numSamples;
 
-    rowBits   = (pitch / MicroTileWidth) * microTileBits;
+    rowBits   = static_cast<UINT_64>(pitch / MicroTileWidth) * microTileBits;
 
     //
     // Extract the slice index.
@@ -2995,6 +2978,7 @@ ADDR_E_RETURNCODE Lib::ComputeMicroTileEquation(
     // stackedDepthSlices is used for addressing mode that a tile block contains multiple slices,
     // which is not supported by our address lib
     pEquation->stackedDepthSlices = FALSE;
+    pEquation->numBitComponents   = 1;
 
     return retCode;
 }
@@ -3575,11 +3559,11 @@ BOOL_32 Lib::DegradeTo1D(
     if (degrade == FALSE)
     {
         // Only check width and height as slices are aligned to thickness
-        UINT_64 unalignedSize = width * height;
+        UINT_64 unalignedSize = static_cast<UINT_64>(width) * height;
 
         UINT_32 alignedPitch = PowTwoAlign(width, macroTilePitchAlign);
         UINT_32 alignedHeight = PowTwoAlign(height, macroTileHeightAlign);
-        UINT_64 alignedSize = alignedPitch * alignedHeight;
+        UINT_64 alignedSize = static_cast<UINT_64>(alignedPitch) * alignedHeight;
 
         // alignedSize > 1.5 * unalignedSize
         if (2 * alignedSize > 3 * unalignedSize)

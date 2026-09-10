@@ -1,24 +1,6 @@
 /*
- * Copyright © 2018 Timothy Arceri
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * Copyright 2018 Timothy Arceri
+ * SPDX-License-Identifier: MIT
  */
 
 #include "nir.h"
@@ -51,7 +33,7 @@ r600_clone_deref_array(nir_builder *b,
 
    dst_tail = r600_clone_deref_array(b, dst_tail, parent);
 
-   return nir_build_deref_array(b, dst_tail, nir_ssa_for_src(b, src_head->arr.index, 1));
+   return nir_build_deref_array(b, dst_tail, src_head->arr.index.ssa);
 }
 
 static bool
@@ -66,7 +48,7 @@ r600_variable_can_rewrite(nir_variable *var)
    if (glsl_get_bit_size(glsl_without_array(var->type)) != 32)
       return false;
 
-   /* We only check VSand attribute imputs */
+   /* We only check VSand attribute inputs */
    return (var->data.location >= VERT_ATTRIB_GENERIC0 &&
            var->data.location <= VERT_ATTRIB_GENERIC15);
 }
@@ -101,8 +83,8 @@ r600_io_access_same_var(const nir_instr *instr1, const nir_instr *instr2)
    nir_intrinsic_instr *intr1 = nir_instr_as_intrinsic(instr1);
    nir_intrinsic_instr *intr2 = nir_instr_as_intrinsic(instr2);
 
-   nir_variable *var1 = nir_deref_instr_get_variable(nir_src_as_deref(intr1->src[0]));
-   nir_variable *var2 = nir_deref_instr_get_variable(nir_src_as_deref(intr2->src[0]));
+   nir_variable *var1 = nir_intrinsic_get_var(intr1, 0);
+   nir_variable *var2 = nir_intrinsic_get_var(intr2, 0);
 
    /* We don't handle combining vars of different base types, so skip those */
    if (glsl_get_base_type(var1->type) != glsl_get_base_type(var2->type))
@@ -125,7 +107,7 @@ r600_vec_instr_stack_create(void *mem_ctx)
 static void
 r600_vec_instr_stack_push(struct util_dynarray *stack, nir_instr *instr)
 {
-   util_dynarray_append(stack, nir_instr *, instr);
+   util_dynarray_append(stack, instr);
 }
 
 static unsigned
@@ -146,31 +128,26 @@ r600_create_new_load(nir_builder *b,
 
    b->cursor = nir_before_instr(&intr->instr);
 
-   assert(intr->dest.is_ssa);
-
    nir_intrinsic_instr *new_intr = nir_intrinsic_instr_create(b->shader, intr->intrinsic);
-   nir_ssa_dest_init(
-      &new_intr->instr, &new_intr->dest, num_comps, intr->dest.ssa.bit_size, NULL);
+   nir_def_init(&new_intr->instr, &new_intr->def, num_comps,
+                intr->def.bit_size);
    new_intr->num_components = num_comps;
 
    nir_deref_instr *deref = nir_build_deref_var(b, var);
    deref = r600_clone_deref_array(b, deref, nir_src_as_deref(intr->src[0]));
 
-   new_intr->src[0] = nir_src_for_ssa(&deref->dest.ssa);
+   new_intr->src[0] = nir_src_for_ssa(&deref->def);
 
    if (intr->intrinsic == nir_intrinsic_interp_deref_at_offset ||
        intr->intrinsic == nir_intrinsic_interp_deref_at_sample)
-      nir_src_copy(&new_intr->src[1], &intr->src[1], &new_intr->instr);
+      new_intr->src[1] = nir_src_for_ssa(intr->src[1].ssa);
 
    nir_builder_instr_insert(b, &new_intr->instr);
 
    for (unsigned i = 0; i < old_num_comps; ++i)
       channels[i] = comp - var->data.location_frac + i;
-   nir_ssa_def *load = nir_swizzle(b, &new_intr->dest.ssa, channels, old_num_comps);
-   nir_ssa_def_rewrite_uses(&intr->dest.ssa, load);
-
-   /* Remove the old load intrinsic */
-   nir_instr_remove(&intr->instr);
+   nir_def *load = nir_swizzle(b, &new_intr->def, channels, old_num_comps);
+   nir_def_replace(&intr->def, load);
 }
 
 static bool
@@ -185,7 +162,7 @@ r600_vec_instr_stack_pop(nir_builder *b,
    assert(last->type == nir_instr_type_intrinsic);
 
    nir_intrinsic_instr *intr = nir_instr_as_intrinsic(last);
-   nir_variable *var = nir_deref_instr_get_variable(nir_src_as_deref(intr->src[0]));
+   nir_variable *var = nir_intrinsic_get_var(intr, 0);
    unsigned loc = r600_correct_location(var);
 
    nir_variable *new_var;
@@ -229,7 +206,7 @@ r600_hash_instr(const nir_instr *instr)
    assert(instr->type == nir_instr_type_intrinsic);
 
    nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-   nir_variable *var = nir_deref_instr_get_variable(nir_src_as_deref(intr->src[0]));
+   nir_variable *var = nir_intrinsic_get_var(intr, 0);
 
    uint32_t hash = 0;
 
@@ -428,8 +405,7 @@ r600_create_new_io_vars(nir_shader *shader,
 static bool
 r600_vectorize_io_impl(nir_function_impl *impl)
 {
-   nir_builder b;
-   nir_builder_init(&b, impl);
+   nir_builder b = nir_builder_create(impl);
 
    nir_metadata_require(impl, nir_metadata_dominance);
 
@@ -442,11 +418,7 @@ r600_vectorize_io_impl(nir_function_impl *impl)
    bool progress =
       r600_vectorize_block(&b, nir_start_block(impl), instr_set, updated_vars);
 
-   if (progress) {
-      nir_metadata_preserve(impl, nir_metadata_block_index | nir_metadata_dominance);
-   } else {
-      nir_metadata_preserve(impl, nir_metadata_all);
-   }
+   nir_progress(progress, impl, nir_metadata_control_flow);
 
    r600_vec_instr_set_destroy(instr_set);
    return false;
@@ -460,10 +432,9 @@ r600_vectorize_vs_inputs(nir_shader *shader)
    if (shader->info.stage != MESA_SHADER_VERTEX)
       return false;
 
-   nir_foreach_function(function, shader)
+   nir_foreach_function_impl(impl, shader)
    {
-      if (function->impl)
-         progress |= r600_vectorize_io_impl(function->impl);
+      progress |= r600_vectorize_io_impl(impl);
    }
 
    return progress;

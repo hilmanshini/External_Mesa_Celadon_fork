@@ -43,14 +43,14 @@ static bool debug = false;
  * for usage on an unlinked instruction stream.
  */
 bool
-do_dead_code(exec_list *instructions)
+do_dead_code(ir_exec_list *instructions)
 {
    ir_variable_refcount_visitor v;
    bool progress = false;
 
    v.run(instructions);
 
-   hash_table_foreach(v.ht, e) {
+   hash_table_foreach(&v.ht, e) {
       ir_variable_refcount_entry *entry = (ir_variable_refcount_entry *)e->data;
 
       /* Since each assignment is a reference, the refereneced count must be
@@ -74,20 +74,6 @@ do_dead_code(exec_list *instructions)
 	  || !entry->declaration)
 	 continue;
 
-      /* Section 7.4.1 (Shader Interface Matching) of the OpenGL 4.5
-       * (Core Profile) spec says:
-       *
-       *    "With separable program objects, interfaces between shader
-       *    stages may involve the outputs from one program object and the
-       *    inputs from a second program object.  For such interfaces, it is
-       *    not possible to detect mismatches at link time, because the
-       *    programs are linked separately. When each such program is
-       *    linked, all inputs or outputs interfacing with another program
-       *    stage are treated as active."
-       */
-      if (entry->var->data.always_active_io)
-         continue;
-
       if (!entry->assign_list.is_empty()) {
 	 /* Remove all the dead assignments to the variable we found.
 	  * Don't do so if it's a shader or function output, though.
@@ -99,7 +85,7 @@ do_dead_code(exec_list *instructions)
 
             while (!entry->assign_list.is_empty()) {
                struct assignment_entry *assignment_entry =
-                  exec_node_data(struct assignment_entry,
+                  ir_exec_node_data(struct assignment_entry,
                                  entry->assign_list.get_head_raw(), link);
 
 	       assignment_entry->assign->remove();
@@ -110,7 +96,6 @@ do_dead_code(exec_list *instructions)
                }
 
                assignment_entry->link.remove();
-               free(assignment_entry);
             }
             progress = true;
 	 }
@@ -154,7 +139,7 @@ do_dead_code(exec_list *instructions)
                }
             }
 
-            if (entry->var->type->is_subroutine())
+            if (glsl_type_is_subroutine(entry->var->type))
                continue;
          }
 
@@ -179,14 +164,14 @@ do_dead_code(exec_list *instructions)
  * with global scope.
  */
 bool
-do_dead_code_unlinked(exec_list *instructions)
+do_dead_code_unlinked(ir_exec_list *instructions)
 {
    bool progress = false;
 
-   foreach_in_list(ir_instruction, ir, instructions) {
+   ir_foreach_in_list(ir_instruction, ir, instructions) {
       ir_function *f = ir->as_function();
       if (f) {
-	 foreach_in_list(ir_function_signature, sig, &f->signatures) {
+	 ir_foreach_in_list(ir_function_signature, sig, &f->signatures) {
 	    if (do_dead_code(&sig->body))
 	       progress = true;
 	 }

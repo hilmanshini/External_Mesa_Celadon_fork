@@ -37,15 +37,15 @@ TEST_F(InstrTest, test_alu_uni_op_mov)
    AluInstr alu(op1_mov,
                 new Register(128, 2, pin_none),
                 new Register(129, 0, pin_chan),
-                {alu_write});
+                AluInstr::write);
 
    EXPECT_TRUE(alu.has_alu_flag(alu_write));
 
    EXPECT_FALSE(alu.has_alu_flag(alu_last_instr));
    EXPECT_FALSE(alu.end_group());
    EXPECT_FALSE(alu.has_alu_flag(alu_op3));
-   EXPECT_FALSE(alu.has_alu_flag(alu_src0_abs));
-   EXPECT_FALSE(alu.has_alu_flag(alu_src0_neg));
+   EXPECT_FALSE(alu.has_source_mod(0, AluInstr::mod_abs));
+   EXPECT_FALSE(alu.has_source_mod(0, AluInstr::mod_neg));
 
    EXPECT_EQ(alu.opcode(), op1_mov);
 
@@ -69,11 +69,11 @@ TEST_F(InstrTest, test_alu_uni_op_mov)
    EXPECT_FALSE(alu.psrc(1));
    EXPECT_FALSE(alu.psrc(2));
 
-   alu.set_alu_flag(alu_src0_abs);
-   EXPECT_TRUE(alu.has_alu_flag(alu_src0_abs));
+   alu.set_source_mod(0, AluInstr::mod_abs);;
+   EXPECT_TRUE(alu.has_source_mod(0, AluInstr::mod_abs));
 
-   alu.set_alu_flag(alu_src0_neg);
-   EXPECT_TRUE(alu.has_alu_flag(alu_src0_neg));
+   alu.set_source_mod(0, AluInstr::mod_neg);
+   EXPECT_TRUE(alu.has_source_mod(0, AluInstr::mod_neg));
 }
 
 TEST_F(InstrTest, test_alu_op2)
@@ -89,9 +89,9 @@ TEST_F(InstrTest, test_alu_op2)
    EXPECT_TRUE(alu.has_alu_flag(alu_last_instr));
    EXPECT_FALSE(alu.has_alu_flag(alu_op3));
 
-   EXPECT_FALSE(alu.has_alu_flag(alu_src0_neg));
-   EXPECT_FALSE(alu.has_alu_flag(alu_src1_neg));
-   EXPECT_FALSE(alu.has_alu_flag(alu_src2_neg));
+   EXPECT_FALSE(alu.has_source_mod(0, AluInstr::mod_neg));
+   EXPECT_FALSE(alu.has_source_mod(1, AluInstr::mod_neg));
+   EXPECT_FALSE(alu.has_source_mod(2, AluInstr::mod_neg));
 
    EXPECT_FALSE(alu.has_alu_flag(alu_src0_rel));
    EXPECT_FALSE(alu.has_alu_flag(alu_src1_rel));
@@ -187,14 +187,14 @@ TEST_F(InstrTest, test_alu_op1_comp)
    auto r129y = new Register(129, 1, pin_none);
    auto r130x = new Register(130, 0, pin_none);
 
-   AluInstr alu1(op1_mov, r128z, r129x, {alu_write});
-   EXPECT_NE(alu1, AluInstr(op1_mov, r128y, r129x, {alu_write}));
-   EXPECT_NE(alu1, AluInstr(op1_mov, r128z, r129xc, {alu_write}));
-   EXPECT_NE(alu1, AluInstr(op1_mov, r128z, r129y, {alu_write}));
-   EXPECT_NE(alu1, AluInstr(op1_mov, r128z, r130x, {alu_write}));
+   AluInstr alu1(op1_mov, r128z, r129x, AluInstr::write);
+   EXPECT_NE(alu1, AluInstr(op1_mov, r128y, r129x, AluInstr::write));
+   EXPECT_NE(alu1, AluInstr(op1_mov, r128z, r129xc, AluInstr::write));
+   EXPECT_NE(alu1, AluInstr(op1_mov, r128z, r129y, AluInstr::write));
+   EXPECT_NE(alu1, AluInstr(op1_mov, r128z, r130x, AluInstr::write));
    EXPECT_NE(alu1, AluInstr(op1_mov, r128z, r129x, {alu_write, alu_last_instr}));
-   EXPECT_NE(alu1, AluInstr(op1_flt_to_int, r128z, r129x, {alu_write}));
-   EXPECT_NE(alu1, AluInstr(op1_mov, r128zc, r129x, {alu_write}));
+   EXPECT_NE(alu1, AluInstr(op1_flt_to_int, r128z, r129x, AluInstr::write));
+   EXPECT_NE(alu1, AluInstr(op1_mov, r128zc, r129x, AluInstr::write));
 
    EXPECT_EQ(alu1, alu1);
 }
@@ -205,14 +205,17 @@ TEST_F(InstrTest, test_alu_op2_comp)
    auto r128y = new Register(128, 1, pin_none);
    auto r128z = new Register(128, 2, pin_none);
 
-   AluInstr alu1(op2_add, r128z, r128x, r128y, {alu_write});
+   AluInstr alu1(op2_add, r128z, r128x, r128y, AluInstr::write);
 
    EXPECT_NE(
-      alu1, AluInstr(op2_add, r128z, r128x, new Register(129, 2, pin_none), {alu_write}));
+      alu1,
+      AluInstr(op2_add, r128z, r128x, new Register(129, 2, pin_none), AluInstr::write));
    EXPECT_NE(
-      alu1, AluInstr(op2_add, r128z, r128x, new Register(128, 0, pin_none), {alu_write}));
+      alu1,
+      AluInstr(op2_add, r128z, r128x, new Register(128, 0, pin_none), AluInstr::write));
    EXPECT_NE(
-      alu1, AluInstr(op2_add, r128z, r128x, new Register(128, 1, pin_chan), {alu_write}));
+      alu1,
+      AluInstr(op2_add, r128z, r128x, new Register(128, 1, pin_chan), AluInstr::write));
 }
 
 TEST_F(InstrTest, test_alu_op3_comp)
@@ -221,20 +224,29 @@ TEST_F(InstrTest, test_alu_op3_comp)
    auto r128y = new Register(128, 1, pin_none);
    auto r128z = new Register(128, 2, pin_none);
 
-   AluInstr alu1(op3_muladd, r128z, r128x, r128y, r128y, {alu_write});
+   AluInstr alu1(op3_muladd, r128z, r128x, r128y, r128y, AluInstr::write);
 
-   EXPECT_NE(
-      alu1,
-      AluInstr(
-         op3_muladd, r128z, r128x, r128y, new Register(129, 2, pin_none), {alu_write}));
-   EXPECT_NE(
-      alu1,
-      AluInstr(
-         op3_muladd, r128z, r128x, r128y, new Register(128, 0, pin_none), {alu_write}));
-   EXPECT_NE(
-      alu1,
-      AluInstr(
-         op3_muladd, r128z, r128x, r128y, new Register(128, 1, pin_chan), {alu_write}));
+   EXPECT_NE(alu1,
+             AluInstr(op3_muladd,
+                      r128z,
+                      r128x,
+                      r128y,
+                      new Register(129, 2, pin_none),
+                      AluInstr::write));
+   EXPECT_NE(alu1,
+             AluInstr(op3_muladd,
+                      r128z,
+                      r128x,
+                      r128y,
+                      new Register(128, 0, pin_none),
+                      AluInstr::write));
+   EXPECT_NE(alu1,
+             AluInstr(op3_muladd,
+                      r128z,
+                      r128x,
+                      r128y,
+                      new Register(128, 1, pin_chan),
+                      AluInstr::write));
 }
 
 TEST_F(InstrTest, test_alu_op3_ne)
@@ -258,7 +270,7 @@ TEST_F(InstrTest, test_alu_op3_ne)
              AluInstr(op3_cnde, R130x, R130y, R130z, R131w, {alu_write, alu_last_instr}));
    EXPECT_NE(alu,
              AluInstr(op3_cnde, R130x, R130y, R131z, R130z, {alu_write, alu_last_instr}));
-   EXPECT_NE(alu, AluInstr(op3_cnde, R130x, R130y, R131z, R131w, {alu_write}));
+   EXPECT_NE(alu, AluInstr(op3_cnde, R130x, R130y, R131z, R131w, AluInstr::write));
 
    AluInstr alu_cf_changes = alu;
    alu_cf_changes.set_cf_type(cf_alu_push_before);
@@ -309,9 +321,6 @@ TEST_F(InstrTest, test_alu_dot4_grouped)
    auto R131w = new Register(131, 3, pin_none);
 
    auto R132x = new Register(132, 0, pin_chan);
-   auto R132y = new Register(132, 1, pin_chan);
-   auto R132z = new Register(132, 2, pin_chan);
-   auto R132w = new Register(132, 3, pin_chan);
 
    AluInstr::SrcValues src({R130x, R130y, R130z, R130w, R131x, R131y, R131z, R131w});
 
@@ -321,26 +330,27 @@ TEST_F(InstrTest, test_alu_dot4_grouped)
    EXPECT_EQ(alu, alu);
 
    ValueFactory vf;
-   auto group = alu.split(vf);
+   auto group = new AluGroup();
+   bool result = alu.split(*group);
    group->fix_last_flag();
-   ASSERT_TRUE(group);
+   ASSERT_TRUE(result);
 
    auto i = group->begin();
    EXPECT_NE(i, group->end());
    ASSERT_TRUE(*i);
-   check(**i, AluInstr(op2_dot4_ieee, R132x, R130x, R130y, {alu_write}));
+   check(**i, AluInstr(op2_dot4_ieee, R132x, R130x, R130y, AluInstr::write));
    ++i;
    EXPECT_NE(i, group->end());
    ASSERT_TRUE(*i);
-   check(**i, AluInstr(op2_dot4_ieee, R132y, R130z, R130w, {}));
+   check(**i, AluInstr(op2_dot4_ieee, 1, {R130z, R130w}, AluInstr::empty));
    ++i;
    EXPECT_NE(i, group->end());
    ASSERT_TRUE(*i);
-   check(**i, AluInstr(op2_dot4_ieee, R132z, R131x, R131y, {}));
+   check(**i, AluInstr(op2_dot4_ieee, 2, {R131x, R131y}, AluInstr::empty));
    ++i;
    EXPECT_NE(i, group->end());
    ASSERT_TRUE(*i);
-   check(**i, AluInstr(op2_dot4_ieee, R132w, R131z, R131w, {alu_last_instr}));
+   check(**i, AluInstr(op2_dot4_ieee, 3, {R131z, R131w}, {alu_last_instr}));
    ++i;
    EXPECT_NE(i, group->end());
    ASSERT_FALSE(*i);
@@ -401,7 +411,7 @@ TEST_F(InstrTest, test_alu_write_no_dest)
 TEST_F(InstrTest, test_tex_basic)
 {
    TexInstr tex(
-      TexInstr::sample, RegisterVec4(129), {0, 1, 2, 3}, RegisterVec4(130), 1, 17);
+      TexInstr::sample, RegisterVec4(129), {0, 1, 2, 3}, RegisterVec4(130), 17, nullptr, 1);
 
    EXPECT_EQ(tex.opcode(), TexInstr::sample);
 
@@ -414,8 +424,8 @@ TEST_F(InstrTest, test_tex_basic)
       EXPECT_EQ(tex.dest_swizzle(i), i);
    }
 
-   EXPECT_EQ(tex.resource_base(), 1);
    EXPECT_EQ(tex.resource_id(), 17);
+   EXPECT_EQ(tex.sampler_id(), 1);
 
    EXPECT_TRUE(tex.end_group());
 
@@ -474,7 +484,7 @@ TEST_F(InstrTest, test_tex_basic)
 TEST_F(InstrTest, test_tex_gather4)
 {
    TexInstr tex(
-      TexInstr::gather4, RegisterVec4(131), {0, 1, 2, 3}, RegisterVec4(132), 2, 19);
+      TexInstr::gather4, RegisterVec4(131), {0, 1, 2, 3}, RegisterVec4(132), 2, nullptr, 19);
 
    EXPECT_EQ(tex.opcode(), TexInstr::gather4);
 
@@ -487,8 +497,8 @@ TEST_F(InstrTest, test_tex_gather4)
       EXPECT_EQ(tex.dest_swizzle(i), i);
    }
 
-   EXPECT_EQ(tex.resource_base(), 2);
-   EXPECT_EQ(tex.resource_id(), 19);
+   EXPECT_EQ(tex.resource_id(), 2);
+   EXPECT_EQ(tex.sampler_id(), 19);
 
    for (int i = 0; i < 3; ++i)
       EXPECT_EQ(tex.get_offset(i), 0);
@@ -505,38 +515,38 @@ TEST_F(InstrTest, test_tex_gather4)
 TEST_F(InstrTest, test_tex_neq)
 {
    TexInstr tex_ref(
-      TexInstr::sample, RegisterVec4(129), {0, 1, 2, 3}, RegisterVec4(130), 1, 17);
+      TexInstr::sample, RegisterVec4(129), {0, 1, 2, 3}, RegisterVec4(130), 1, nullptr, 17);
    EXPECT_EQ(tex_ref, tex_ref);
 
    EXPECT_NE(
       tex_ref,
       TexInstr(
-         TexInstr::sample_c, RegisterVec4(129), {0, 1, 2, 3}, RegisterVec4(130), 1, 17));
+         TexInstr::sample_c, RegisterVec4(129), {0, 1, 2, 3}, RegisterVec4(130), 1, nullptr, 17));
    EXPECT_NE(
       tex_ref,
       TexInstr(
-         TexInstr::sample, RegisterVec4(130), {0, 1, 2, 3}, RegisterVec4(130), 1, 17));
+         TexInstr::sample, RegisterVec4(130), {0, 1, 2, 3}, RegisterVec4(130), 1, nullptr, 17));
    EXPECT_NE(
       tex_ref,
       TexInstr(
-         TexInstr::sample, RegisterVec4(130), {0, 1, 2, 3}, RegisterVec4(130), 1, 17));
+         TexInstr::sample, RegisterVec4(130), {0, 1, 2, 3}, RegisterVec4(130), 1, nullptr, 17));
 
    EXPECT_NE(
       tex_ref,
       TexInstr(
-         TexInstr::sample, RegisterVec4(129), {7, 1, 2, 3}, RegisterVec4(130), 1, 17));
+         TexInstr::sample, RegisterVec4(129), {7, 1, 2, 3}, RegisterVec4(130), 1, nullptr, 17));
    EXPECT_NE(
       tex_ref,
       TexInstr(
-         TexInstr::sample, RegisterVec4(129), {0, 7, 2, 3}, RegisterVec4(130), 1, 17));
+         TexInstr::sample, RegisterVec4(129), {0, 7, 2, 3}, RegisterVec4(130), 1, nullptr, 17));
    EXPECT_NE(
       tex_ref,
       TexInstr(
-         TexInstr::sample, RegisterVec4(129), {0, 1, 7, 3}, RegisterVec4(130), 1, 17));
+         TexInstr::sample, RegisterVec4(129), {0, 1, 7, 3}, RegisterVec4(130), 1, nullptr, 17));
    EXPECT_NE(
       tex_ref,
       TexInstr(
-         TexInstr::sample, RegisterVec4(129), {0, 1, 2, 7}, RegisterVec4(130), 1, 17));
+         TexInstr::sample, RegisterVec4(129), {0, 1, 2, 7}, RegisterVec4(130), 1, nullptr, 17));
 
    EXPECT_NE(tex_ref,
              TexInstr(TexInstr::sample,
@@ -544,6 +554,7 @@ TEST_F(InstrTest, test_tex_neq)
                       {0, 1, 2, 3},
                       RegisterVec4(130, false, {7, 1, 2, 3}),
                       1,
+                      nullptr,
                       17));
    EXPECT_NE(tex_ref,
              TexInstr(TexInstr::sample,
@@ -551,6 +562,7 @@ TEST_F(InstrTest, test_tex_neq)
                       {0, 1, 2, 3},
                       RegisterVec4(130, false, {0, 7, 2, 3}),
                       1,
+                      nullptr,
                       17));
    EXPECT_NE(tex_ref,
              TexInstr(TexInstr::sample,
@@ -558,6 +570,7 @@ TEST_F(InstrTest, test_tex_neq)
                       {0, 1, 2, 3},
                       RegisterVec4(130, false, {0, 1, 7, 3}),
                       1,
+                      nullptr,
                       17));
    EXPECT_NE(tex_ref,
              TexInstr(TexInstr::sample,
@@ -565,16 +578,17 @@ TEST_F(InstrTest, test_tex_neq)
                       {0, 1, 2, 3},
                       RegisterVec4(130, false, {0, 1, 2, 7}),
                       1,
+                      nullptr,
                       17));
 
    EXPECT_NE(
       tex_ref,
       TexInstr(
-         TexInstr::sample, RegisterVec4(129), {0, 1, 2, 3}, RegisterVec4(130), 2, 17));
+         TexInstr::sample, RegisterVec4(129), {0, 1, 2, 3}, RegisterVec4(130), 2, nullptr, 17));
    EXPECT_NE(
       tex_ref,
       TexInstr(
-         TexInstr::sample, RegisterVec4(129), {0, 1, 2, 3}, RegisterVec4(130), 1, 18));
+         TexInstr::sample, RegisterVec4(129), {0, 1, 2, 3}, RegisterVec4(130), 1, nullptr, 18));
 
    /*
    auto tex_with_sampler_offset = tex_ref;
@@ -672,7 +686,7 @@ TEST_F(InstrTest, test_fetch_basic)
    EXPECT_EQ(fetch.src(), Register(201, 2, pin_none));
    EXPECT_EQ(fetch.src_offset(), 0);
 
-   EXPECT_EQ(fetch.resource_base(), 1);
+   EXPECT_EQ(fetch.resource_id(), 1);
    EXPECT_FALSE(fetch.resource_offset());
 
    EXPECT_EQ(fetch.fetch_type(), vertex_data);
@@ -879,7 +893,7 @@ TEST_F(InstrTest, test_fetch_basic2)
    EXPECT_EQ(fetch.src(), Register(202, 3, pin_none));
    EXPECT_EQ(fetch.src_offset(), 1);
 
-   EXPECT_EQ(fetch.resource_base(), 3);
+   EXPECT_EQ(fetch.resource_id(), 3);
    EXPECT_EQ(*fetch.resource_offset(), Register(300, 1, pin_none));
 
    EXPECT_EQ(fetch.fetch_type(), no_index_offset);

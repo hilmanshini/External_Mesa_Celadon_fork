@@ -1,24 +1,7 @@
 /*
  * Copyright 2008 Corbin Simpson <MostAwesomeDude@gmail.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ * SPDX-License-Identifier: MIT
+ */
 
 #ifndef R300_CONTEXT_H
 #define R300_CONTEXT_H
@@ -30,12 +13,14 @@
 #include "util/u_blitter.h"
 
 #include "pipe/p_context.h"
+#include "util/u_framebuffer.h"
 #include "util/u_inlines.h"
 #include "util/u_transfer.h"
 
 #include "r300_defines.h"
 #include "r300_screen.h"
 #include "compiler/radeon_regalloc.h"
+#include "compiler/radeon_code.h"
 
 struct u_upload_mgr;
 struct r300_context;
@@ -55,6 +40,18 @@ enum colormask_swizzle {
     COLORMASK_NUM_SWIZZLES
 };
 
+static inline bool r300_prim_is_lines(unsigned prim)
+{
+    switch (prim) {
+    case MESA_PRIM_LINES:
+    case MESA_PRIM_LINE_LOOP:
+    case MESA_PRIM_LINE_STRIP:
+        return true;
+    default:
+        return false;
+    }
+}
+
 struct r300_atom {
     /* Name, for debugging. */
     const char* name;
@@ -65,9 +62,9 @@ struct r300_atom {
     /* Upper bound on number of dwords to emit. */
     unsigned size;
     /* Whether this atom should be emitted. */
-    boolean dirty;
+    bool dirty;
     /* Whether this atom may be emitted with state == NULL. */
-    boolean allow_null_state;
+    bool allow_null_state;
 };
 
 struct r300_aa_state {
@@ -80,6 +77,7 @@ struct r300_blend_state {
     struct pipe_blend_state state;
 
     uint32_t cb_clamp[COLORMASK_NUM_SWIZZLES][8];
+    uint32_t cb_clamp_masked_write[COLORMASK_NUM_SWIZZLES][8];
     uint32_t cb_noclamp[8];
     uint32_t cb_noclamp_noalpha[8];
     uint32_t cb_no_readwrite[8];
@@ -114,9 +112,9 @@ struct r300_dsa_state {
     uint32_t alpha_function;
 
     /* Whether a two-sided stencil is enabled. */
-    boolean two_sided;
+    bool two_sided;
     /* Whether a fallback should be used for a two-sided stencil ref value. */
-    boolean two_sided_stencil_ref;
+    bool two_sided_stencil_ref;
 };
 
 struct r300_hyperz_state {
@@ -155,10 +153,13 @@ struct r300_rs_state {
     unsigned cull_mode_index;
 
     /* Whether polygon offset is enabled. */
-    boolean polygon_offset_enable;
+    bool polygon_offset_enable;
 
     /* This is emitted in the draw function. */
     uint32_t color_control;         /* R300_GA_COLOR_CONTROL: 0x4278 */
+
+    float max_point_size;
+    float line_width;
 };
 
 struct r300_rs_block {
@@ -218,6 +219,13 @@ struct r300_texture_sampler_state {
     uint32_t border_color; /* R300_TX_BORDER_COLOR: 0x45c0 */
 };
 
+struct r300_guardband_state {
+    float vert_clip;
+    float vert_disc;
+    float horz_clip;
+    float horz_disc;
+};
+
 struct r300_textures_state {
     /* Textures. */
     struct r300_sampler_view *sampler_views[16];
@@ -270,7 +278,7 @@ struct r300_constant_buffer {
     /* Buffer of constants */
     uint32_t *ptr;
     /* Remapping table. */
-    unsigned *remap_table;
+    struct const_remap *remap_table;
     /* const buffer base */
     uint32_t buffer_base;
 };
@@ -291,17 +299,17 @@ struct r300_query {
      * after end_query and flush. */
     unsigned num_results;
     /* if begin has been emitted */
-    boolean begin_emitted;
+    bool begin_emitted;
 
     /* The buffer where query results are stored. */
-    struct pb_buffer *buf;
+    struct pb_buffer_lean *buf;
 };
 
 struct r300_surface {
     struct pipe_surface base;
 
     /* Winsys buffer backing the texture. */
-    struct pb_buffer *buf;
+    struct pb_buffer_lean *buf;
 
     enum radeon_bo_domain domain;
 
@@ -320,7 +328,7 @@ struct r300_surface {
     uint32_t cbzb_format;           /* ZB_FORMAT. */
 
     /* Whether the CBZB clear is allowed on the surface. */
-    boolean cbzb_allowed;
+    bool cbzb_allowed;
 
     unsigned colormask_swizzle;
 };
@@ -364,17 +372,17 @@ struct r300_texture_desc {
 
     /* Whether this texture has non-power-of-two dimensions.
      * It can be either a regular texture or a rectangle one. */
-    boolean is_npot;
+    bool is_npot;
 
     /* This flag says that hardware must use the stride for addressing
      * instead of the width. */
-    boolean uses_stride_addressing;
+    bool uses_stride_addressing;
 
     /* Whether CBZB fast color clear is allowed on the miplevel. */
-    boolean cbzb_allowed[R300_MAX_TEXTURE_LEVELS];
+    bool cbzb_allowed[R300_MAX_TEXTURE_LEVELS];
 
     /* Zbuffer compression info for each miplevel. */
-    boolean zcomp8x8[R300_MAX_TEXTURE_LEVELS];
+    bool zcomp8x8[R300_MAX_TEXTURE_LEVELS];
     /* If zero, then disable Z compression/HiZ. */
     unsigned zmask_dwords[R300_MAX_TEXTURE_LEVELS];
     unsigned hiz_dwords[R300_MAX_TEXTURE_LEVELS];
@@ -392,7 +400,7 @@ struct r300_resource
     struct pipe_resource b;
 
     /* Winsys buffer backing this resource. */
-    struct pb_buffer *buf;
+    struct pb_buffer_lean *buf;
     enum radeon_bo_domain domain;
 
     /* Constant buffers and SWTCL vertex and index buffers are in user
@@ -456,7 +464,7 @@ struct r300_context {
     /* Draw module. Used mostly for SW TCL. */
     struct draw_context* draw;
     /* Vertex buffer for SW TCL. */
-    struct pb_buffer *vbo;
+    struct pb_buffer_lean *vbo;
     /* Offset and size into the SW TCL VBO. */
     size_t draw_vbo_offset;
 
@@ -480,6 +488,8 @@ struct r300_context {
     struct r300_query *blitter_saved_query;
     /* Query list. */
     struct r300_query query_list;
+
+    PIPE_FB_SURFACES; //STOP USING THIS
 
     /* Various CSO state objects. */
 
@@ -512,6 +522,8 @@ struct r300_context {
     struct r300_atom scissor_state;
     /* Sample mask. */
     struct r300_atom sample_mask;
+    /* Guard band configuration. */
+    struct r300_atom guardband_state;
     /* Invariant state. This must be emitted to get the engine started. */
     struct r300_atom invariant_state;
     /* Viewport state. */
@@ -558,6 +570,7 @@ struct r300_context {
 
     struct pipe_stencil_ref stencil_ref;
     struct pipe_viewport_state viewport;
+    struct pipe_scissor_state viewport_scissor;
 
     /* Stream locations for SWTCL. */
     int stream_loc_notcl[16];
@@ -565,31 +578,50 @@ struct r300_context {
     /* Flag indicating whether or not the HW is dirty. */
     uint32_t dirty_hw;
     /* Whether polygon offset is enabled. */
-    boolean polygon_offset_enabled;
+    bool polygon_offset_enabled;
     /* Z buffer bit depth. */
     uint32_t zbuffer_bpp;
     /* Whether rendering is conditional and should be skipped. */
-    boolean skip_rendering;
+    bool skip_rendering;
     /* The flag above saved by blitter. */
     unsigned char blitter_saved_skip_rendering;
     /* Point sprites texcoord index,  1 bit per texcoord */
     int sprite_coord_enable;
     /* Whether we are drawing points, to disable sprite coord if not */
-    boolean is_point;
+    bool is_point;
+    bool scissor_enabled;
     /* Whether two-sided color selection is enabled (AKA light_twoside). */
-    boolean two_sided_color;
-    boolean flatshade;
-    boolean clip_halfz;
+    bool two_sided_color;
+    bool flatshade;
+    bool clip_halfz;
     /* Whether fast color clear is enabled. */
-    boolean cbzb_clear;
+    bool cbzb_clear;
     /* Whether fragment shader needs to be validated. */
     enum r300_fs_validity_status fs_status;
     /* Framebuffer multi-write. */
-    boolean fb_multiwrite;
+    bool fb_multiwrite;
     unsigned num_samples;
-    boolean msaa_enable;
-    boolean alpha_to_one;
-    boolean alpha_to_coverage;
+    bool msaa_enable;
+    bool alpha_to_one;
+    bool alpha_to_coverage;
+
+    /* The number of pixels outside the viewport that are not culled by the clipper.
+     * Normally, the clipper clips everything outside the viewport, however, points and lines
+     * can have vertices outside the viewport, but their edges can be inside the viewport. Those
+     * shouldn't be culled. The problem is that the register setting (VAP_GB_*_DISC_ADJ) that
+     * controls the discard distance, which depends on the point size and line width, applies to
+     * all primitive types, and we would have to set 0 distance for triangles and non-zero for
+     * points and lines whenever the primitive type changes, which would add overhead and cause
+     * context rolls.
+     *
+     * To reduce that, whenever the discard distance changes for points and lines, we keep it
+     * at that higher value up to a certain small number for all primitive types including all
+     * points and lines within a specific size. This is slightly inefficient, but it eliminates
+     * a lot of guardband state updates and context register changes.
+     */
+    float current_clip_discard_distance;
+    float min_clip_discard_distance_watermark;
+    unsigned current_rast_prim;
 
     void *dsa_decompress_zmask;
 
@@ -606,30 +638,30 @@ struct r300_context {
     int vs_const_base;
 
     /* Vertex array state info */
-    boolean vertex_arrays_dirty;
-    boolean vertex_arrays_indexed;
+    bool vertex_arrays_dirty;
+    bool vertex_arrays_indexed;
     int vertex_arrays_offset;
     int vertex_arrays_instance_id;
-    boolean instancing_enabled;
+    bool instancing_enabled;
 
     /* Hyper-Z stats. */
-    boolean hyperz_enabled;     /* Whether it owns Hyper-Z access. */
+    bool hyperz_enabled;     /* Whether it owns Hyper-Z access. */
     int64_t hyperz_time_of_last_flush; /* Time of the last flush with Z clear. */
     unsigned num_z_clears;      /* Since the last flush. */
 
     /* ZMask state. */
-    boolean zmask_in_use;       /* Whether ZMASK is enabled. */
-    boolean zmask_decompress;   /* Whether ZMASK is being decompressed. */
+    bool zmask_in_use;       /* Whether ZMASK is enabled. */
+    bool zmask_decompress;   /* Whether ZMASK is being decompressed. */
     struct pipe_surface *locked_zbuffer; /* Unbound zbuffer which still has data in ZMASK. */
 
     /* HiZ state. */
-    boolean hiz_in_use;         /* Whether HIZ is enabled. */
+    bool hiz_in_use;         /* Whether HIZ is enabled. */
     enum r300_hiz_func hiz_func; /* HiZ function. Can be either MIN or MAX. */
     uint32_t hiz_clear_value;   /* HiZ clear value. */
 
     /* CMASK state. */
-    boolean cmask_access;
-    boolean cmask_in_use;
+    bool cmask_access;
+    bool cmask_in_use;
     uint32_t color_clear_value; /* RGBA8 or RGBA1010102 */
     uint32_t color_clear_value_ar; /* RGBA16F */
     uint32_t color_clear_value_gb; /* RGBA16F */
@@ -681,7 +713,7 @@ static inline struct r300_vertex_shader *r300_vs(struct r300_context *r300)
 static inline void r300_mark_atom_dirty(struct r300_context *r300,
                                         struct r300_atom *atom)
 {
-    atom->dirty = TRUE;
+    atom->dirty = true;
 
     if (!r300->first_dirty) {
         r300->first_dirty = atom;
@@ -695,15 +727,15 @@ static inline void r300_mark_atom_dirty(struct r300_context *r300,
 }
 
 static inline struct pipe_surface *
-r300_get_nonnull_cb(struct pipe_framebuffer_state *fb, unsigned i)
+r300_get_nonnull_cb(struct r300_context *r300, struct pipe_framebuffer_state *fb, unsigned i)
 {
-    if (fb->cbufs[i])
-        return fb->cbufs[i];
+    if (r300->fb_cbufs[i])
+        return r300->fb_cbufs[i];
 
     /* The i-th framebuffer is NULL, return any non-NULL one. */
     for (i = 0; i < fb->nr_cbufs; i++)
-        if (fb->cbufs[i])
-            return fb->cbufs[i];
+        if (r300->fb_cbufs[i])
+            return r300->fb_cbufs[i];
 
     return NULL;
 }
@@ -719,6 +751,9 @@ void r300_init_query_functions(struct r300_context* r300);
 void r300_init_render_functions(struct r300_context *r300);
 void r300_init_state_functions(struct r300_context* r300);
 void r300_init_resource_functions(struct r300_context* r300);
+
+void r300_update_guardband_state(struct r300_context *r300);
+void r300_set_clip_discard_distance(struct r300_context *r300, float distance);
 
 /* r300_blit.c */
 void r300_decompress_zmask(struct r300_context *r300);
@@ -740,11 +775,18 @@ void r300_resume_query(struct r300_context *r300,
 void r300_stop_query(struct r300_context *r300);
 
 /* r300_render_translate.c */
+void r300_rebuild_elts_to_uint_userptr(struct pipe_context *context,
+                                       const struct pipe_draw_info *info,
+                                       unsigned add_transfer_flags,
+                                       int index_bias,
+                                       unsigned start, unsigned count,
+                                       void *out);
 void r300_translate_index_buffer(struct r300_context *r300,
                                  const struct pipe_draw_info *info,
                                  struct pipe_resource **out_index_buffer,
-                                 unsigned *index_size, unsigned index_offset,
-                                 unsigned *start, unsigned count);
+                                 unsigned *index_size, int index_offset,
+                                 unsigned *start, unsigned count,
+                                 const uint8_t **export_ptr);
 
 /* r300_render_stencilref.c */
 void r300_plug_in_stencil_ref_fallback(struct r300_context *r300);
@@ -757,7 +799,7 @@ void r300_blitter_draw_rectangle(struct blitter_context *blitter,
                                  int x1, int y1, int x2, int y2,
                                  float depth, unsigned num_instances,
                                  enum blitter_attrib_type type,
-                                 const union blitter_attrib *attrib);
+                                 const struct blitter_attrib *attrib);
 
 /* r300_state.c */
 enum r300_fb_state_change {
@@ -769,6 +811,8 @@ enum r300_fb_state_change {
 
 void r300_mark_fb_state_dirty(struct r300_context *r300,
                               enum r300_fb_state_change change);
+void r300_mark_vs_code_dirty(struct r300_context *r300);
+void r300_bind_vertex_shader_variant(struct r300_context *r300);
 void r300_mark_fs_code_dirty(struct r300_context *r300);
 
 struct pipe_sampler_view *
@@ -778,6 +822,9 @@ r300_create_sampler_view_custom(struct pipe_context *pipe,
                          unsigned width0_override,
                          unsigned height0_override);
 
+void
+r300_framebuffer_init(struct pipe_context *pctx, const struct pipe_framebuffer_state *fb, struct pipe_surface **cbufs, struct pipe_surface **zsbuf);
+
 /* r300_state_derived.c */
 void r300_update_derived_state(struct r300_context* r300);
 
@@ -785,7 +832,7 @@ void r300_update_derived_state(struct r300_context* r300);
 void r500_dump_rs_block(struct r300_rs_block *rs);
 
 
-static inline boolean CTX_DBG_ON(struct r300_context * ctx, unsigned flags)
+static inline bool CTX_DBG_ON(struct r300_context * ctx, unsigned flags)
 {
     return SCREEN_DBG_ON(ctx->screen, flags);
 }

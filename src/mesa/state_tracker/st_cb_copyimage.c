@@ -29,7 +29,7 @@
 #include "state_tracker/st_texture.h"
 #include "state_tracker/st_util.h"
 
-#include "util/u_box.h"
+#include "util/box.h"
 #include "util/format/u_format.h"
 #include "util/u_inlines.h"
 
@@ -282,7 +282,10 @@ blit(struct pipe_context *pipe,
    blit.src.box = *src_box;
    u_box_3d(dstx, dsty, dstz, src_box->width, src_box->height,
             src_box->depth, &blit.dst.box);
-   blit.mask = PIPE_MASK_RGBA;
+   if (util_format_is_depth_or_stencil(dst_format))
+      blit.mask = PIPE_MASK_ZS;
+   else
+      blit.mask = PIPE_MASK_RGBA;
    blit.filter = PIPE_TEX_FILTER_NEAREST;
 
    pipe->blit(pipe, &blit);
@@ -509,8 +512,14 @@ copy_image(struct pipe_context *pipe,
    if (src->format == dst->format ||
        util_format_is_compressed(src->format) ||
        util_format_is_compressed(dst->format)) {
-      pipe->resource_copy_region(pipe, dst, dst_level, dstx, dsty, dstz,
-                                 src, src_level, src_box);
+
+      if (src->nr_samples <= 1 && dst->nr_samples <= 1) {
+         pipe->resource_copy_region(pipe, dst, dst_level, dstx, dsty, dstz,
+                                    src, src_level, src_box);
+      } else {
+         blit(pipe, dst, dst->format, dst_level, dstx, dsty, dstz,
+              src, src->format, src_level, src_box);
+      }
       return;
    }
 
@@ -667,7 +676,7 @@ st_CopyImageSubData(struct gl_context *ctx,
                     struct gl_texture_image *dst_image,
                     struct gl_renderbuffer *dst_renderbuffer,
                     int dst_x, int dst_y, int dst_z,
-                    int src_width, int src_height)
+                    int src_width, int src_height, int src_depth)
 {
    struct st_context *st = st_context(ctx);
    struct pipe_context *pipe = st->pipe;
@@ -709,13 +718,15 @@ st_CopyImageSubData(struct gl_context *ctx,
       dst_level = 0;
    }
 
-   u_box_2d_zslice(src_x, src_y, src_z, src_width, src_height, &box);
+   u_box_3d(src_x, src_y, src_z, src_width, src_height, src_depth, &box);
 
    if ((src_image && st_compressed_format_fallback(st, src_image->TexFormat)) ||
        (dst_image && st_compressed_format_fallback(st, dst_image->TexFormat))) {
-      fallback_copy_image(st, dst_image, dst_res, dst_x, dst_y, orig_dst_z,
-                          src_image, src_res, src_x, src_y, orig_src_z,
-                          src_width, src_height);
+      for (int i = 0; i < src_depth; i++) {
+         fallback_copy_image(st, dst_image, dst_res, dst_x, dst_y, orig_dst_z + i,
+                             src_image, src_res, src_x, src_y, orig_src_z + i,
+                             src_width, src_height);
+      }
    } else {
       copy_image(pipe, dst_res, dst_level, dst_x, dst_y, dst_z,
                  src_res, src_level, &box);

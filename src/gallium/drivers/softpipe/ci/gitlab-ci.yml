@@ -1,36 +1,33 @@
-.softpipe-test:
-  variables:
-    GPU_VERSION: softpipe
-    LIBGL_ALWAYS_SOFTWARE: "true"
-    FLAKES_CHANNEL: "#mesa-swrast-ci"
-    GALLIUM_DRIVER: "softpipe"
-
-.softpipe-deqp-test:
-  extends:
-    - .test-gl
-    - .deqp-test
-    - .softpipe-test
-    # this must be last to avoid breaking dependency rules
-    - .softpipe-rules
-  variables:
-    DEQP_EXPECTED_RENDERER: softpipe
+include:
+  - local: 'src/gallium/drivers/softpipe/ci/gitlab-ci-inc.yml'
 
 softpipe:
-  tags:
-    - mesa-swrast
   variables:
     DEQP_SUITE: softpipe
-  extends: .softpipe-deqp-test
-  script:
-    - LD_LIBRARY_PATH=`pwd`/install/lib xvfb-run --server-args='-noreset' install/deqp-runner.sh
+    DEQP_FRACTION: 4
+  timeout: 15m
+  extends:
+    - .softpipe-deqp-test
+    - .test-piglit
+  script: |
+    . "$SCRIPTS_DIR"/setup-test-env.sh
+    export LD_LIBRARY_PATH=$CI_PROJECT_DIR/install/lib
+    export LIBGL_DRIVERS_PATH=$CI_PROJECT_DIR/install/lib/dri
+    section_start weston "weston: prepare"
+    . "$CI_PROJECT_DIR/install/common/weston.sh"
+    section_end weston
+    $CI_PROJECT_DIR/install/deqp-runner.sh
 
 softpipe-asan-gles31:
   variables:
+    DEQP_SUITE: softpipe-asan
     GPU_VERSION: softpipe-asan
     DEQP_FRACTION: 10
-    DEQP_VER: gles31
-    DEQP_RUNNER_OPTIONS: "--env LD_PRELOAD=libasan.so.6"
+    DEQP_FORCE_ASAN: 1
+    S3_ARTIFACT_NAME: mesa-x86_64-asan-debugoptimized
+  timeout: 10m
   extends: .softpipe-deqp-test
   needs:
-    - debian/x86_test-gl
-    - debian-testing-asan
+    - job: debian/x86_64_test-gl
+      optional: true
+    - job: debian-x86_64-asan

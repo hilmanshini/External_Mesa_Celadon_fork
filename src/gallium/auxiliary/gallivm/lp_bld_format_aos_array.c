@@ -26,18 +26,13 @@
  **************************************************************************/
 
 #include "lp_bld_const.h"
-#include "lp_bld_struct.h"
 #include "lp_bld_format.h"
-#include "lp_bld_debug.h"
 #include "lp_bld_type.h"
 #include "lp_bld_conv.h"
 #include "lp_bld_pack.h"
 #include "lp_bld_intr.h"
-#include "lp_bld_gather.h"
 
-#include "util/u_memory.h"
 #include "util/format/u_format.h"
-#include "pipe/p_state.h"
 
 
 
@@ -61,7 +56,7 @@ lp_build_fetch_rgba_aos_array(struct gallivm_state *gallivm,
    LLVMTypeRef src_vec_type;
    LLVMValueRef ptr, res = NULL;
    struct lp_type src_type;
-   boolean pure_integer = format_desc->channel[0].pure_integer;
+   bool pure_integer = format_desc->channel[0].pure_integer;
    struct lp_type tmp_type;
 
    lp_type_from_format_desc(&src_type, format_desc);

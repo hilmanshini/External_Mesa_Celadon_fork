@@ -1,27 +1,9 @@
-/**********************************************************
- * Copyright 2008-2009 VMware, Inc.  All rights reserved.
- *
- * Permission is hereby granted, free of charge, to any person
- * obtaining a copy of this software and associated documentation
- * files (the "Software"), to deal in the Software without
- * restriction, including without limitation the rights to use, copy,
- * modify, merge, publish, distribute, sublicense, and/or sell copies
- * of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be
- * included in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- *
- **********************************************************/
+/*
+ * Copyright (c) 2008-2024 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc.
+ * and/or its subsidiaries.
+ * SPDX-License-Identifier: MIT
+ */
 
 #include "pipe/p_defines.h"
 #include "util/u_bitmask.h"
@@ -146,14 +128,14 @@ emit_rss_vgpu9(struct svga_context *svga, uint64_t dirty)
       if (!curr->stencil[0].enabled) {
          /* Stencil disabled
           */
-         EMIT_RS(svga, FALSE, STENCILENABLE);
-         EMIT_RS(svga, FALSE, STENCILENABLE2SIDED);
+         EMIT_RS(svga, false, STENCILENABLE);
+         EMIT_RS(svga, false, STENCILENABLE2SIDED);
       }
       else if (curr->stencil[0].enabled && !curr->stencil[1].enabled) {
          /* Regular stencil
           */
-         EMIT_RS(svga, TRUE, STENCILENABLE);
-         EMIT_RS(svga, FALSE, STENCILENABLE2SIDED);
+         EMIT_RS(svga, true, STENCILENABLE);
+         EMIT_RS(svga, false, STENCILENABLE2SIDED);
 
          EMIT_RS(svga, curr->stencil[0].func,  STENCILFUNC);
          EMIT_RS(svga, curr->stencil[0].fail,  STENCILFAIL);
@@ -181,8 +163,8 @@ emit_rss_vgpu9(struct svga_context *svga, uint64_t dirty)
 
          /* Twoside stencil
           */
-         EMIT_RS(svga, TRUE, STENCILENABLE);
-         EMIT_RS(svga, TRUE, STENCILENABLE2SIDED);
+         EMIT_RS(svga, true, STENCILENABLE);
+         EMIT_RS(svga, true, STENCILENABLE2SIDED);
 
          EMIT_RS(svga, curr->stencil[cw].func,  STENCILFUNC);
          EMIT_RS(svga, curr->stencil[cw].fail,  STENCILFAIL);
@@ -265,7 +247,7 @@ emit_rss_vgpu9(struct svga_context *svga, uint64_t dirty)
        * pipeline is active.
        */
       if (!svga->state.sw.need_pipeline &&
-          svga->curr.framebuffer.zsbuf)
+          svga->curr.framebuffer.base.zsbuf.texture)
       {
          slope = curr->slopescaledepthbias;
          bias  = svga->curr.depthscale * curr->depthbias;
@@ -278,8 +260,8 @@ emit_rss_vgpu9(struct svga_context *svga, uint64_t dirty)
    if (dirty & SVGA_NEW_FRAME_BUFFER) {
       /* XXX: we only look at the first color buffer's sRGB state */
       float gamma = 1.0f;
-      if (svga->curr.framebuffer.cbufs[0] &&
-          util_format_is_srgb(svga->curr.framebuffer.cbufs[0]->format)) {
+      if (svga->curr.framebuffer.base.cbufs[0].texture &&
+          util_format_is_srgb(svga->curr.framebuffer.base.cbufs[0].format)) {
          gamma = 2.2f;
       }
       EMIT_RS_FLOAT(svga, gamma, OUTPUTGAMMA);
@@ -458,7 +440,7 @@ emit_rss_vgpu10(struct svga_context *svga, uint64_t dirty)
             svga->state.hw_draw.depth_stencil_id = ds->id;
             svga->state.hw_draw.stencil_ref = 0;
          }
-         svga->state.hw_draw.rasterizer_discard = TRUE;
+         svga->state.hw_draw.rasterizer_discard = true;
       }
    } else {
       if ((dirty & (SVGA_NEW_DEPTH_STENCIL_ALPHA | SVGA_NEW_STENCIL_REF)) ||
@@ -483,7 +465,7 @@ emit_rss_vgpu10(struct svga_context *svga, uint64_t dirty)
                    SVGA_NEW_FRAME_BUFFER)) {
          struct svga_rasterizer_state *rast = svga->curr.rast;
 
-         if (svga->curr.reduced_prim == PIPE_PRIM_POINTS &&
+         if (svga->curr.reduced_prim == MESA_PRIM_POINTS &&
              svga->curr.gs && svga->curr.gs->wide_point) {
 
             /* If we are drawing a point sprite, we will need to
@@ -497,11 +479,11 @@ emit_rss_vgpu10(struct svga_context *svga, uint64_t dirty)
          /* In the case of no-attachment framebuffer, the sample count will be
           * specified in forcedSampleCount in the RasterizerState_v2 object.
           */
-         if ((svga->curr.framebuffer.nr_cbufs == 0) &&
-             (svga->curr.framebuffer.zsbuf == NULL)) {
+         if ((svga->curr.framebuffer.base.nr_cbufs == 0) &&
+             (svga->curr.framebuffer.base.zsbuf.texture == NULL)) {
             rastId =
                get_alt_rasterizer_state_id(svga, rast,
-                                           svga->curr.framebuffer.samples);
+                                           svga->curr.framebuffer.base.samples);
 
             if (rastId == SVGA3D_INVALID_ID)
                return PIPE_ERROR;
@@ -515,7 +497,7 @@ emit_rss_vgpu10(struct svga_context *svga, uint64_t dirty)
             svga->state.hw_draw.rasterizer_id = rastId;
          }
       }
-      svga->state.hw_draw.rasterizer_discard = FALSE;
+      svga->state.hw_draw.rasterizer_discard = false;
    }
    return PIPE_OK;
 }

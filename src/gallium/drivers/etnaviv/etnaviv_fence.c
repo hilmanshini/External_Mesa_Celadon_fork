@@ -45,7 +45,7 @@ struct pipe_fence_handle {
 static void
 etna_fence_destroy(struct pipe_fence_handle *fence)
 {
-   if (fence->fence_fd != -1)
+   if (fence->fence_fd >= 0)
       close(fence->fence_fd);
    FREE(fence);
 }
@@ -65,8 +65,8 @@ static bool
 etna_screen_fence_finish(struct pipe_screen *pscreen, struct pipe_context *ctx,
                          struct pipe_fence_handle *fence, uint64_t timeout)
 {
-   if (fence->fence_fd != -1)
-	return !sync_wait(fence->fence_fd, timeout / 1000000);
+   if (fence->fence_fd >= 0)
+      return !sync_wait(fence->fence_fd, timeout / 1000000);
 
    if (etna_pipe_wait_ns(fence->screen->pipe, fence->timestamp, timeout))
       return false;
@@ -85,11 +85,13 @@ etna_create_fence_fd(struct pipe_context *pctx,
 
 void
 etna_fence_server_sync(struct pipe_context *pctx,
-                       struct pipe_fence_handle *pfence)
+                       struct pipe_fence_handle *pfence,
+                       uint64_t value)
 {
    struct etna_context *ctx = etna_context(pctx);
+   assert(!value);
 
-   if (pfence->fence_fd != -1)
+   if (pfence->fence_fd >= 0)
       sync_accumulate("etnaviv", &ctx->in_fence_fd, pfence->fence_fd);
 }
 

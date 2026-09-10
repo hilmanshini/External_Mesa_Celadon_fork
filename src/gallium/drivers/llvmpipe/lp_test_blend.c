@@ -75,7 +75,7 @@ write_tsv_row(FILE *fp,
               const struct pipe_blend_state *blend,
               struct lp_type type,
               double cycles,
-              boolean success)
+              bool success)
 {
    fprintf(fp, "%s\t", success ? "pass" : "fail");
 
@@ -95,12 +95,12 @@ write_tsv_row(FILE *fp,
 
    fprintf(fp,
            "%s\t%s\t%s\t%s\t%s\t%s\n",
-           util_str_blend_func(blend->rt[0].rgb_func, TRUE),
-           util_str_blend_factor(blend->rt[0].rgb_src_factor, TRUE),
-           util_str_blend_factor(blend->rt[0].rgb_dst_factor, TRUE),
-           util_str_blend_func(blend->rt[0].alpha_func, TRUE),
-           util_str_blend_factor(blend->rt[0].alpha_src_factor, TRUE),
-           util_str_blend_factor(blend->rt[0].alpha_dst_factor, TRUE));
+           util_str_blend_func(blend->rt[0].rgb_func, true),
+           util_str_blend_factor(blend->rt[0].rgb_src_factor, true),
+           util_str_blend_factor(blend->rt[0].rgb_dst_factor, true),
+           util_str_blend_func(blend->rt[0].alpha_func, true),
+           util_str_blend_factor(blend->rt[0].alpha_src_factor, true),
+           util_str_blend_factor(blend->rt[0].alpha_dst_factor, true));
 
    fflush(fp);
 }
@@ -119,12 +119,12 @@ dump_blend_type(FILE *fp,
 
    fprintf(fp,
            " %s=%s %s=%s %s=%s %s=%s %s=%s %s=%s",
-           "rgb_func",         util_str_blend_func(blend->rt[0].rgb_func, TRUE),
-           "rgb_src_factor",   util_str_blend_factor(blend->rt[0].rgb_src_factor, TRUE),
-           "rgb_dst_factor",   util_str_blend_factor(blend->rt[0].rgb_dst_factor, TRUE),
-           "alpha_func",       util_str_blend_func(blend->rt[0].alpha_func, TRUE),
-           "alpha_src_factor", util_str_blend_factor(blend->rt[0].alpha_src_factor, TRUE),
-           "alpha_dst_factor", util_str_blend_factor(blend->rt[0].alpha_dst_factor, TRUE));
+           "rgb_func",         util_str_blend_func(blend->rt[0].rgb_func, true),
+           "rgb_src_factor",   util_str_blend_factor(blend->rt[0].rgb_src_factor, true),
+           "rgb_dst_factor",   util_str_blend_factor(blend->rt[0].rgb_dst_factor, true),
+           "alpha_func",       util_str_blend_func(blend->rt[0].alpha_func, true),
+           "alpha_src_factor", util_str_blend_factor(blend->rt[0].alpha_src_factor, true),
+           "alpha_dst_factor", util_str_blend_factor(blend->rt[0].alpha_dst_factor, true));
 
    fprintf(fp, " ...\n");
    fflush(fp);
@@ -431,17 +431,17 @@ compute_blend_ref(const struct pipe_blend_state *blend,
 
 
 UTIL_ALIGN_STACK
-static boolean
+static bool
 test_one(unsigned verbose,
          FILE *fp,
          const struct pipe_blend_state *blend,
          struct lp_type type)
 {
-   LLVMContextRef context;
+   lp_context_ref context;
    struct gallivm_state *gallivm;
    LLVMValueRef func = NULL;
    blend_test_ptr_t blend_test_ptr;
-   boolean success;
+   bool success;
    const unsigned n = LP_TEST_NUM_SAMPLES;
    int64_t cycles[LP_TEST_NUM_SAMPLES];
    double cycles_avg = 0.0;
@@ -451,21 +451,18 @@ test_one(unsigned verbose,
    if (verbose >= 1)
       dump_blend_type(stdout, blend, type);
 
-   context = LLVMContextCreate();
-#if LLVM_VERSION_MAJOR >= 15
-   LLVMContextSetOpaquePointers(context, false);
-#endif
-   gallivm = gallivm_create("test_module", context, NULL);
+   lp_context_create(&context);
+   gallivm = gallivm_create("test_module", &context, NULL);
 
    func = add_blend_test(gallivm, blend, type);
 
    gallivm_compile_module(gallivm);
 
-   blend_test_ptr = (blend_test_ptr_t)gallivm_jit_function(gallivm, func);
+   blend_test_ptr = (blend_test_ptr_t)gallivm_jit_function(gallivm, func, "test");
 
    gallivm_free_ir(gallivm);
 
-   success = TRUE;
+   success = true;
 
    {
       uint8_t *src, *src1, *dst, *con, *res, *ref;
@@ -510,7 +507,7 @@ test_one(unsigned verbose,
          cycles[i] = end_counter - start_counter;
 
          if (!compare_vec(type, res, ref)) {
-            success = FALSE;
+            success = false;
 
             if (verbose < 1)
                dump_blend_type(stderr, blend, type);
@@ -584,7 +581,7 @@ test_one(unsigned verbose,
       write_tsv_row(fp, blend, type, cycles_avg, success);
 
    gallivm_destroy(gallivm);
-   LLVMContextDispose(context);
+   lp_context_destroy(&context);
 
    return success;
 }
@@ -625,9 +622,9 @@ blend_funcs[] = {
 
 
 const struct lp_type blend_types[] = {
-   /* float, fixed,  sign,  norm, width, len */
-   {   TRUE, FALSE,  TRUE, FALSE,    32,   4 }, /* f32 x 4 */
-   {  FALSE, FALSE, FALSE,  TRUE,     8,  16 }, /* u8n x 16 */
+   /* float, fixed,  sign,  norm, sz preserve, nan preserve, width, len */
+   {   true, false,  true, false, false,       false,        32,   4 }, /* f32 x 4 */
+   {  false, false, false,  true, false,       false,         8,  16 }, /* u8n x 16 */
 };
 
 
@@ -636,7 +633,7 @@ const unsigned num_factors = ARRAY_SIZE(blend_factors);
 const unsigned num_types = ARRAY_SIZE(blend_types);
 
 
-boolean
+bool
 test_all(unsigned verbose, FILE *fp)
 {
    const unsigned *rgb_func;
@@ -647,7 +644,7 @@ test_all(unsigned verbose, FILE *fp)
    const unsigned *alpha_dst_factor;
    struct pipe_blend_state blend;
    const struct lp_type *type;
-   boolean success = TRUE;
+   bool success = true;
 
    for (rgb_func = blend_funcs; rgb_func < &blend_funcs[num_funcs]; ++rgb_func) {
       for (alpha_func = blend_funcs; alpha_func < &blend_funcs[num_funcs]; ++alpha_func) {
@@ -672,7 +669,7 @@ test_all(unsigned verbose, FILE *fp)
                         blend.rt[0].colormask         = PIPE_MASK_RGBA;
 
                         if (!test_one(verbose, fp, &blend, *type))
-                          success = FALSE;
+                          success = false;
 
                      }
                   }
@@ -686,7 +683,7 @@ test_all(unsigned verbose, FILE *fp)
 }
 
 
-boolean
+bool
 test_some(unsigned verbose, FILE *fp,
           unsigned long n)
 {
@@ -698,7 +695,7 @@ test_some(unsigned verbose, FILE *fp,
    const unsigned *alpha_dst_factor;
    struct pipe_blend_state blend;
    const struct lp_type *type;
-   boolean success = TRUE;
+   bool success = true;
 
    for (unsigned long i = 0; i < n; ++i) {
       rgb_func = &blend_funcs[rand() % num_funcs];
@@ -727,16 +724,16 @@ test_some(unsigned verbose, FILE *fp,
       blend.rt[0].colormask         = PIPE_MASK_RGBA;
 
       if (!test_one(verbose, fp, &blend, *type))
-         success = FALSE;
+         success = false;
    }
 
    return success;
 }
 
 
-boolean
+bool
 test_single(unsigned verbose, FILE *fp)
 {
    printf("no test_single()");
-   return TRUE;
+   return true;
 }

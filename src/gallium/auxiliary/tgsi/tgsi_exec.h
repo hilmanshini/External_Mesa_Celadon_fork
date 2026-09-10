@@ -29,7 +29,7 @@
 #ifndef TGSI_EXEC_H
 #define TGSI_EXEC_H
 
-#include "pipe/p_compiler.h"
+#include "util/compiler.h"
 #include "pipe/p_state.h"
 #include "pipe/p_shader_tokens.h"
 
@@ -75,8 +75,8 @@ union tgsi_exec_channel
 {
    alignas(16)
    float    f[TGSI_QUAD_SIZE];
-   int      i[TGSI_QUAD_SIZE];
-   unsigned u[TGSI_QUAD_SIZE];
+   int32_t  i[TGSI_QUAD_SIZE];
+   uint32_t u[TGSI_QUAD_SIZE];
 };
 
 /**
@@ -247,20 +247,25 @@ struct tgsi_sampler
 /** function call/activation record */
 struct tgsi_call_record
 {
-   uint CondStackTop;
-   uint LoopStackTop;
-   uint ContStackTop;
+   unsigned CondStackTop;
+   unsigned LoopStackTop;
+   unsigned ContStackTop;
    int SwitchStackTop;
    int BreakStackTop;
-   uint ReturnAddr;
+   unsigned ReturnAddr;
 };
 
+/* should match draw_buffer_info */
+struct tgsi_exec_consts_info {
+   const void *ptr;
+   unsigned size;
+};
 
 /* Switch-case block state. */
 struct tgsi_switch_record {
-   uint mask;                          /**< execution mask */
+   unsigned mask;                          /**< execution mask */
    union tgsi_exec_channel selector;   /**< a value case statements are compared to */
-   uint defaultMask;                   /**< non-execute mask for default case */
+   unsigned defaultMask;                   /**< non-execute mask for default case */
 };
 
 
@@ -317,7 +322,7 @@ struct tgsi_exec_machine
    unsigned ConstsSize[PIPE_MAX_CONSTANT_BUFFERS];
 
    const struct tgsi_token       *Tokens;   /**< Declarations, instructions */
-   enum pipe_shader_type         ShaderType; /**< PIPE_SHADER_x */
+   mesa_shader_stage         ShaderType; /**< PIPE_SHADER_x */
 
    /* GEOMETRY processor only. */
    /* Number of vertices emitted per emitted primitive. */
@@ -342,14 +347,14 @@ struct tgsi_exec_machine
    unsigned                      LocalMemSize;
 
    /* See GLSL 4.50 specification for definition of helper invocations */
-   uint NonHelperMask;  /**< non-helpers */
+   unsigned NonHelperMask;  /**< non-helpers */
    /* Conditional execution masks */
-   uint CondMask;  /**< For IF/ELSE/ENDIF */
-   uint LoopMask;  /**< For BGNLOOP/ENDLOOP */
-   uint ContMask;  /**< For loop CONT statements */
-   uint FuncMask;  /**< For function calls */
-   uint ExecMask;  /**< = CondMask & LoopMask */
-   uint KillMask;  /**< Mask of channels killed in the current shader execution */
+   unsigned CondMask;  /**< For IF/ELSE/ENDIF */
+   unsigned LoopMask;  /**< For BGNLOOP/ENDLOOP */
+   unsigned ContMask;  /**< For loop CONT statements */
+   unsigned FuncMask;  /**< For function calls */
+   unsigned ExecMask;  /**< = CondMask & LoopMask */
+   unsigned KillMask;  /**< Mask of channels killed in the current shader execution */
 
    /* Current switch-case state. */
    struct tgsi_switch_record Switch;
@@ -358,19 +363,19 @@ struct tgsi_exec_machine
    enum tgsi_break_type BreakType;
 
    /** Condition mask stack (for nested conditionals) */
-   uint CondStack[TGSI_EXEC_MAX_COND_NESTING];
+   unsigned CondStack[TGSI_EXEC_MAX_COND_NESTING];
    int CondStackTop;
 
    /** Loop mask stack (for nested loops) */
-   uint LoopStack[TGSI_EXEC_MAX_LOOP_NESTING];
+   unsigned LoopStack[TGSI_EXEC_MAX_LOOP_NESTING];
    int LoopStackTop;
 
    /** Loop label stack */
-   uint LoopLabelStack[TGSI_EXEC_MAX_LOOP_NESTING];
+   unsigned LoopLabelStack[TGSI_EXEC_MAX_LOOP_NESTING];
    int LoopLabelStackTop;
 
    /** Loop continue mask stack (see comments in tgsi_exec.c) */
-   uint ContStack[TGSI_EXEC_MAX_LOOP_NESTING];
+   unsigned ContStack[TGSI_EXEC_MAX_LOOP_NESTING];
    int ContStackTop;
 
    /** Switch case stack */
@@ -381,7 +386,7 @@ struct tgsi_exec_machine
    int BreakStackTop;
 
    /** Function execution mask stack (for executing subroutine code) */
-   uint FuncStack[TGSI_EXEC_MAX_CALL_NESTING];
+   unsigned FuncStack[TGSI_EXEC_MAX_CALL_NESTING];
    int FuncStackTop;
 
    /** Function call stack for saving/restoring the program counter */
@@ -389,21 +394,21 @@ struct tgsi_exec_machine
    int CallStackTop;
 
    struct tgsi_full_instruction *Instructions;
-   uint NumInstructions;
+   unsigned NumInstructions;
 
    struct tgsi_full_declaration *Declarations;
-   uint NumDeclarations;
+   unsigned NumDeclarations;
 
    struct tgsi_declaration_sampler_view
       SamplerViews[PIPE_MAX_SHADER_SAMPLER_VIEWS];
 
-   boolean UsedGeometryShader;
+   bool UsedGeometryShader;
 
    int pc;
 };
 
 struct tgsi_exec_machine *
-tgsi_exec_machine_create(enum pipe_shader_type shader_type);
+tgsi_exec_machine_create(mesa_shader_stage shader_type);
 
 void
 tgsi_exec_machine_destroy(struct tgsi_exec_machine *mach);
@@ -422,83 +427,36 @@ tgsi_exec_machine_run(
    struct tgsi_exec_machine *mach, int start_pc );
 
 
-void
-tgsi_exec_machine_free_data(struct tgsi_exec_machine *mach);
-
-
 extern void
 tgsi_exec_set_constant_buffers(struct tgsi_exec_machine *mach,
                                unsigned num_bufs,
-                               const void **bufs,
-                               const unsigned *buf_sizes);
+                               const struct tgsi_exec_consts_info *bufs);
 
-
-static inline int
-tgsi_exec_get_shader_param(enum pipe_shader_cap param)
+static inline void
+tgsi_exec_init_shader_caps(struct pipe_shader_caps *caps)
 {
-   switch(param) {
-   case PIPE_SHADER_CAP_MAX_INSTRUCTIONS:
-   case PIPE_SHADER_CAP_MAX_ALU_INSTRUCTIONS:
-   case PIPE_SHADER_CAP_MAX_TEX_INSTRUCTIONS:
-   case PIPE_SHADER_CAP_MAX_TEX_INDIRECTIONS:
-      return INT_MAX;
-   case PIPE_SHADER_CAP_MAX_CONTROL_FLOW_DEPTH:
-      return TGSI_EXEC_MAX_NESTING;
-   case PIPE_SHADER_CAP_MAX_INPUTS:
-      return TGSI_EXEC_MAX_INPUT_ATTRIBS;
-   case PIPE_SHADER_CAP_MAX_OUTPUTS:
-      return 32;
-   case PIPE_SHADER_CAP_MAX_CONST_BUFFER0_SIZE:
-      return TGSI_EXEC_MAX_CONST_BUFFER_SIZE;
-   case PIPE_SHADER_CAP_MAX_CONST_BUFFERS:
-      return PIPE_MAX_CONSTANT_BUFFERS;
-   case PIPE_SHADER_CAP_MAX_TEMPS:
-      return TGSI_EXEC_NUM_TEMPS;
-   case PIPE_SHADER_CAP_CONT_SUPPORTED:
-      return 1;
-   case PIPE_SHADER_CAP_INDIRECT_INPUT_ADDR:
-   case PIPE_SHADER_CAP_INDIRECT_OUTPUT_ADDR:
-   case PIPE_SHADER_CAP_INDIRECT_TEMP_ADDR:
-   case PIPE_SHADER_CAP_INDIRECT_CONST_ADDR:
-      return 1;
-   case PIPE_SHADER_CAP_SUBROUTINES:
-      return 1;
-   case PIPE_SHADER_CAP_INTEGERS:
-      return 1;
-   case PIPE_SHADER_CAP_INT64_ATOMICS:
-   case PIPE_SHADER_CAP_FP16:
-   case PIPE_SHADER_CAP_FP16_DERIVATIVES:
-   case PIPE_SHADER_CAP_FP16_CONST_BUFFERS:
-   case PIPE_SHADER_CAP_INT16:
-   case PIPE_SHADER_CAP_GLSL_16BIT_CONSTS:
-      return 0;
-   case PIPE_SHADER_CAP_MAX_TEXTURE_SAMPLERS:
-      return PIPE_MAX_SAMPLERS;
-   case PIPE_SHADER_CAP_MAX_SAMPLER_VIEWS:
-      return PIPE_MAX_SHADER_SAMPLER_VIEWS;
-   case PIPE_SHADER_CAP_PREFERRED_IR:
-      return PIPE_SHADER_IR_TGSI;
-   case PIPE_SHADER_CAP_SUPPORTED_IRS:
-      return 1 << PIPE_SHADER_IR_TGSI;
-   case PIPE_SHADER_CAP_TGSI_SQRT_SUPPORTED:
-      return 1;
-   case PIPE_SHADER_CAP_DFRACEXP_DLDEXP_SUPPORTED:
-   case PIPE_SHADER_CAP_LDEXP_SUPPORTED:
-   case PIPE_SHADER_CAP_TGSI_ANY_INOUT_DECL_RANGE:
-      return 1;
-   case PIPE_SHADER_CAP_DROUND_SUPPORTED:
-   case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTERS:
-   case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTER_BUFFERS:
-      return 0;
-   case PIPE_SHADER_CAP_MAX_SHADER_BUFFERS:
-      return PIPE_MAX_SHADER_BUFFERS;
-   case PIPE_SHADER_CAP_MAX_SHADER_IMAGES:
-      return PIPE_MAX_SHADER_IMAGES;
-   }
-   /* if we get here, we missed a shader cap above (and should have seen
-    * a compiler warning.)
-    */
-   return 0;
+   caps->max_instructions =
+   caps->max_alu_instructions =
+   caps->max_tex_instructions =
+   caps->max_tex_indirections = INT_MAX;
+   caps->max_control_flow_depth = TGSI_EXEC_MAX_NESTING;
+   caps->max_inputs = TGSI_EXEC_MAX_INPUT_ATTRIBS;
+   caps->max_outputs = 32;
+   caps->max_const_buffer0_size = TGSI_EXEC_MAX_CONST_BUFFER_SIZE;
+   caps->max_const_buffers = PIPE_MAX_CONSTANT_BUFFERS;
+   caps->max_temps = TGSI_EXEC_NUM_TEMPS;
+   caps->cont_supported = true;
+   caps->indirect_temp_addr = true;
+   caps->indirect_const_addr = true;
+   caps->subroutines = true;
+   caps->integers = true;
+   caps->max_texture_samplers = PIPE_MAX_SAMPLERS;
+   caps->max_sampler_views = PIPE_MAX_SHADER_SAMPLER_VIEWS;
+   caps->supported_irs = 1 << PIPE_SHADER_IR_TGSI;
+   caps->tgsi_sqrt_supported = true;
+   caps->tgsi_any_inout_decl_range = true;
+   caps->max_shader_buffers = PIPE_MAX_SHADER_BUFFERS;
+   caps->max_shader_images = PIPE_MAX_SHADER_IMAGES;
 }
 
 #if defined __cplusplus

@@ -1,44 +1,37 @@
-/* _nir_foreach_dest() needs to be ALWAYS_INLINE so that it can inline the
+/* _nir_foreach_def() needs to be ALWAYS_INLINE so that it can inline the
  * callback if it was declared with ALWAYS_INLINE.
  */
 static ALWAYS_INLINE bool
-_nir_foreach_dest(nir_instr *instr, nir_foreach_dest_cb cb, void *state)
+_nir_foreach_def(nir_instr *instr, nir_foreach_def_cb cb, void *state)
 {
    switch (instr->type) {
    case nir_instr_type_alu:
-      return cb(&nir_instr_as_alu(instr)->dest.dest, state);
+      return cb(&nir_instr_as_alu(instr)->def, state);
    case nir_instr_type_deref:
-      return cb(&nir_instr_as_deref(instr)->dest, state);
+      return cb(&nir_instr_as_deref(instr)->def, state);
    case nir_instr_type_intrinsic: {
       nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
       if (nir_intrinsic_infos[intrin->intrinsic].has_dest)
-         return cb(&intrin->dest, state);
+         return cb(&intrin->def, state);
       return true;
    }
    case nir_instr_type_tex:
-      return cb(&nir_instr_as_tex(instr)->dest, state);
+      return cb(&nir_instr_as_tex(instr)->def, state);
    case nir_instr_type_phi:
-      return cb(&nir_instr_as_phi(instr)->dest, state);
-   case nir_instr_type_parallel_copy: {
-      nir_foreach_parallel_copy_entry(entry, nir_instr_as_parallel_copy(instr)) {
-         if (!cb(&entry->dest, state))
-            return false;
-      }
-      return true;
-   }
-
+      return cb(&nir_instr_as_phi(instr)->def, state);
    case nir_instr_type_load_const:
-   case nir_instr_type_ssa_undef:
+      return cb(&nir_instr_as_load_const(instr)->def, state);
+   case nir_instr_type_undef:
+      return cb(&nir_instr_as_undef(instr)->def, state);
+
    case nir_instr_type_call:
+   case nir_instr_type_cmat_call:
    case nir_instr_type_jump:
-      break;
+      return true;
 
    default:
-      unreachable("Invalid instruction type");
-      break;
+      UNREACHABLE("Invalid instruction type");
    }
-
-   return true;
 }
 
 static ALWAYS_INLINE bool
@@ -46,31 +39,13 @@ _nir_visit_src(nir_src *src, nir_foreach_src_cb cb, void *state)
 {
    if (!cb(src, state))
       return false;
-   if (!src->is_ssa && src->reg.indirect)
-      return cb(src->reg.indirect, state);
-   return true;
-}
-
-typedef struct {
-   void *state;
-   nir_foreach_src_cb cb;
-} _nir_visit_dest_indirect_state;
-
-static ALWAYS_INLINE bool
-_nir_visit_dest_indirect(nir_dest *dest, void *_state)
-{
-   _nir_visit_dest_indirect_state *state = (_nir_visit_dest_indirect_state *) _state;
-
-   if (!dest->is_ssa && dest->reg.indirect)
-      return state->cb(dest->reg.indirect, state->state);
-
    return true;
 }
 
 static inline bool
-nir_foreach_dest(nir_instr *instr, nir_foreach_dest_cb cb, void *state)
+nir_foreach_def(nir_instr *instr, nir_foreach_def_cb cb, void *state)
 {
-   return _nir_foreach_dest(instr, cb, state);
+   return _nir_foreach_def(instr, cb, state);
 }
 
 static inline bool
@@ -118,6 +93,8 @@ nir_foreach_src(nir_instr *instr, nir_foreach_src_cb cb, void *state)
    }
    case nir_instr_type_call: {
       nir_call_instr *call = nir_instr_as_call(instr);
+      if (call->indirect_callee.ssa && !_nir_visit_src(&call->indirect_callee, cb, state))
+         return false;
       for (unsigned i = 0; i < call->num_params; i++) {
          if (!_nir_visit_src(&call->params[i], cb, state))
             return false;
@@ -132,14 +109,6 @@ nir_foreach_src(nir_instr *instr, nir_foreach_src_cb cb, void *state)
       }
       break;
    }
-   case nir_instr_type_parallel_copy: {
-      nir_parallel_copy_instr *pc = nir_instr_as_parallel_copy(instr);
-      nir_foreach_parallel_copy_entry(entry, pc) {
-         if (!_nir_visit_src(&entry->src, cb, state))
-            return false;
-      }
-      break;
-   }
    case nir_instr_type_jump: {
       nir_jump_instr *jump = nir_instr_as_jump(instr);
 
@@ -147,18 +116,22 @@ nir_foreach_src(nir_instr *instr, nir_foreach_src_cb cb, void *state)
          return false;
       return true;
    }
-
+   case nir_instr_type_cmat_call: {
+      nir_cmat_call_instr *call = nir_instr_as_cmat_call(instr);
+      for (unsigned i = 0; i < call->num_params; i++) {
+         if (!_nir_visit_src(&call->params[i], cb, state))
+            return false;
+      }
+      break;
+   }
    case nir_instr_type_load_const:
-   case nir_instr_type_ssa_undef:
+   case nir_instr_type_undef:
       return true;
 
    default:
-      unreachable("Invalid instruction type");
+      UNREACHABLE("Invalid instruction type");
       break;
    }
 
-   _nir_visit_dest_indirect_state dest_state;
-   dest_state.state = state;
-   dest_state.cb = cb;
-   return _nir_foreach_dest(instr, _nir_visit_dest_indirect, &dest_state);
+   return true;
 }

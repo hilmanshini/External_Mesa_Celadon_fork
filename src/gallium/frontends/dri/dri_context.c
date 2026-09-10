@@ -38,6 +38,7 @@
 #include "pipe-loader/pipe_loader.h"
 #include "state_tracker/st_context.h"
 
+#include "util/u_cpu_detect.h"
 #include "util/u_memory.h"
 #include "util/u_debug.h"
 
@@ -47,7 +48,8 @@ dri_create_context(struct dri_screen *screen,
                    const struct __DriverContextConfig *ctx_config,
                    unsigned *error,
                    struct dri_context *sharedContextPrivate,
-                   void *loaderPrivate)
+                   void *loaderPrivate,
+                   bool thread_safe)
 {
    struct dri_context *ctx = NULL;
    struct st_context *st_share = NULL;
@@ -59,8 +61,6 @@ dri_create_context(struct dri_screen *screen,
       __DRIVER_CONTEXT_ATTRIB_PRIORITY |
       __DRIVER_CONTEXT_ATTRIB_RELEASE_BEHAVIOR |
       __DRIVER_CONTEXT_ATTRIB_NO_ERROR;
-   const __DRIbackgroundCallableExtension *backgroundCallable =
-      screen->dri2.backgroundCallable;
    const struct driOptionCache *optionCache = &screen->dev->option_cache;
 
    /* This is effectively doing error checking for GLX context creation (by both
@@ -135,6 +135,9 @@ dri_create_context(struct dri_screen *screen,
       case __DRI_CTX_PRIORITY_HIGH:
          attribs.context_flags |= PIPE_CONTEXT_HIGH_PRIORITY;
          break;
+      case __DRI_CTX_PRIORITY_REALTIME:
+         attribs.context_flags |= PIPE_CONTEXT_REALTIME_PRIORITY;
+         break;
       default:
          break;
       }
@@ -168,7 +171,7 @@ dri_create_context(struct dri_screen *screen,
    if (debug_get_bool_option("MESA_NO_ERROR", false) ||
        driQueryOptionb(&screen->dev->option_cache, "mesa_no_error"))
 #if !defined(_WIN32)
-      if (geteuid() == getuid())
+      if (__normal_user())
 #endif
          attribs.flags |= ST_CONTEXT_FLAG_NO_ERROR;
 
@@ -193,27 +196,44 @@ dri_create_context(struct dri_screen *screen,
    ctx->st->frontend_context = (void *) ctx;
 
    if (ctx->st->cso_context) {
-      ctx->pp = pp_init(ctx->st->pipe, screen->pp_enabled, ctx->st->cso_context,
-                        ctx->st, st_context_invalidate_state);
       ctx->hud = hud_create(ctx->st->cso_context,
                             share_ctx ? share_ctx->hud : NULL,
                             ctx->st, st_context_invalidate_state);
    }
 
-   /* Do this last. */
-   if (driQueryOptionb(&screen->dev->option_cache, "mesa_glthread")) {
-      bool safe = true;
+   /* order of precedence (least to most):
+    * - driver setting
+    * - app setting
+    * - user setting
+    */
+   bool enable_glthread = driQueryOptionb(&screen->dev->option_cache, "mesa_glthread_driver");
 
-      /* This is only needed by X11/DRI2, which can be unsafe. */
-      if (backgroundCallable &&
-          backgroundCallable->base.version >= 2 &&
-          backgroundCallable->isThreadSafe &&
-          !backgroundCallable->isThreadSafe(loaderPrivate))
-         safe = false;
+   /* always disable glthread by default if fewer than 5 "big" CPUs are active */
+   unsigned nr_big_cpus = util_get_cpu_caps()->nr_big_cpus;
+   if (util_get_cpu_caps()->nr_cpus < 4 || (nr_big_cpus && nr_big_cpus < 5))
+      enable_glthread = false;
 
-      if (safe)
-         _mesa_glthread_init(ctx->st->ctx);
+   int app_enable_glthread = driQueryOptioni(&screen->dev->option_cache, "mesa_glthread_app_profile");
+   if (app_enable_glthread != -1) {
+      /* if set (not -1), apply the app setting */
+      enable_glthread = app_enable_glthread == 1;
    }
+   if (os_get_option("mesa_glthread")) {
+      /* only apply the env var if set */
+      bool user_enable_glthread = debug_get_bool_option("mesa_glthread", false);
+      if (user_enable_glthread != enable_glthread) {
+         /* print warning to mimic old behavior */
+         fprintf(stderr, "ATTENTION: default value of option mesa_glthread overridden by environment.\n");
+      }
+      enable_glthread = user_enable_glthread;
+   }
+
+   if (!thread_safe)
+      enable_glthread = false;
+
+   /* Do this last. */
+   if (enable_glthread)
+      _mesa_glthread_init(ctx->st->ctx);
 
    *error = __DRI_CTX_ERROR_SUCCESS;
    return ctx;
@@ -238,9 +258,6 @@ dri_destroy_context(struct dri_context *ctx)
       hud_destroy(ctx->hud, ctx->st->cso_context);
    }
 
-   if (ctx->pp)
-      pp_free(ctx->pp);
-
    /* No particular reason to wait for command completion before
     * destroying a context, but we flush the context here
     * to avoid having to add code elsewhere to cope with flushing a
@@ -252,7 +269,7 @@ dri_destroy_context(struct dri_context *ctx)
 }
 
 /* This is called inside MakeCurrent to unbind the context. */
-GLboolean
+bool
 dri_unbind_context(struct dri_context *ctx)
 {
    /* dri_util.c ensures cPriv is not null */
@@ -283,7 +300,7 @@ dri_unbind_context(struct dri_context *ctx)
    return GL_TRUE;
 }
 
-GLboolean
+bool
 dri_make_current(struct dri_context *ctx,
 		 struct dri_drawable *draw,
 		 struct dri_drawable *read)
@@ -321,11 +338,6 @@ dri_make_current(struct dri_context *ctx,
    }
 
    st_api_make_current(ctx->st, &draw->base, &read->base);
-
-   /* This is ok to call here. If they are already init, it's a no-op. */
-   if (ctx->pp && draw->textures[ST_ATTACHMENT_BACK_LEFT])
-      pp_init_fbos(ctx->pp, draw->textures[ST_ATTACHMENT_BACK_LEFT]->width0,
-                   draw->textures[ST_ATTACHMENT_BACK_LEFT]->height0);
 
    return GL_TRUE;
 }

@@ -43,13 +43,18 @@ assert sys.version_info >= (3, 6)
 #
 lst_enum_include = [
     "pipe_texture_target",
-    "pipe_shader_cap",
     "pipe_shader_ir",
-    "pipe_cap",
-    "pipe_capf",
-    "pipe_compute_cap",
+    "pipe_map_flags",
+    "pipe_video_cap",
+    "pipe_video_profile",
+    "pipe_video_entrypoint",
+    "pipe_video_vpp_orientation",
+    "pipe_video_vpp_blend_mode",
     "pipe_resource_param",
     "pipe_fd_type",
+    "pipe_blendfactor",
+    "pipe_blend_func",
+    "pipe_logicop",
 ]
 
 
@@ -87,10 +92,11 @@ def pkk_get_argparser():
         "example: %(prog)s ../../include/pipe/p_defines.h -C tr_util.c -H tr_util.h"
         )
 
-    optparser.add_argument("in_file",
+    optparser.add_argument("in_files",
         type=str,
-        metavar="infile",
-        help="path to input header file p_defines.h (or '-' for stdin)")
+        metavar="infiles",
+        nargs="+",
+        help="path to input header files (or '-' for stdin)")
 
     optparser.add_argument("-C",
         type=str,
@@ -102,13 +108,7 @@ def pkk_get_argparser():
         type=str,
         metavar="outfile",
         dest="out_header",
-        help="output C header file")
-
-    optparser.add_argument("-I",
-        type=str,
-        metavar="include",
-        dest="include_file",
-        help="include file / path used for C source output")
+        help="output H header file (the basename will be use to include the header in the C source file)")
 
     return optparser
 
@@ -123,11 +123,26 @@ class PKKHeaderParser:
         self.mdata = []
         self.start = 0
         self.name = None
+        self.in_multiline_comment = False
 
     def error(self, msg):
         pkk_fatal(f"{self.filename}:{self.nline} : {msg}")
 
-    def parse_line(self, sline):
+    def parse_line(self, sline: str):
+        start = sline.find('/*')
+        end = sline.find('*/')
+        if not self.in_multiline_comment and start >= 0:
+            if end >= 0:
+                assert end > start
+                sline = sline[:start] + sline[end + 2:]
+            else:
+                sline = sline[:start]
+                self.in_multiline_comment = True
+        elif self.in_multiline_comment and end >= 0:
+            self.in_multiline_comment = False
+            sline = sline[end + 2:]
+        elif self.in_multiline_comment:
+            return
         # A kingdom for Py3.8 := operator ...
         smatch = re.match(r'^enum\s+([A-Za-z0-9_]+)\s+.*;', sline)
         if smatch:
@@ -192,6 +207,7 @@ def pkk_output_header(fh):
 
 
         #include "pipe/p_defines.h"
+        #include "pipe/p_video_enums.h"
 
 
         #ifdef __cplusplus
@@ -213,9 +229,6 @@ def pkk_output_header(fh):
 
 
 def pkk_output_source(fh):
-    if pkk_cfg.include_file == None:
-        pkk_fatal("Output C source enabled, but include file is not set (-I option).")
-
     print(textwrap.dedent("""\
         /*
          * File generated with {program}, please do not edit manually.
@@ -223,7 +236,7 @@ def pkk_output_source(fh):
         #include "{include_file}"
         """).format(
             program=pkk_progname,
-            include_file=pkk_cfg.include_file,
+            include_file=os.path.basename(pkk_cfg.out_header),
             ), file=fh)
 
     for name in lst_enum_include:
@@ -257,18 +270,20 @@ if __name__ == "__main__":
     optparser = pkk_get_argparser()
     pkk_cfg = optparser.parse_args()
 
-    ### Parse input
-    hdrparser = PKKHeaderParser(pkk_cfg.in_file)
+    ### Parse input files
+    enums = {}
+    for file in pkk_cfg.in_files:
+        hdrparser = PKKHeaderParser(file)
 
-    try:
-        if pkk_cfg.in_file != "-":
-            with open(pkk_cfg.in_file, "r", encoding="UTF-8") as fh:
-                enums = hdrparser.parse_file(fh)
-        else:
-            enums = hdrparser.parse_file(sys.stdin)
-
-    except OSError as e:
-        pkk_fatal(str(e))
+        try:
+            if file != "-":
+                with open(file, "r", encoding="UTF-8") as fh:
+                    enums.update(hdrparser.parse_file(fh))
+            else:
+                enums.update(hdrparser.parse_file(sys.stdin))
+                break
+        except OSError as e:
+            pkk_fatal(str(e))
 
     ### Check if any of the required enums are missing
     errors = False

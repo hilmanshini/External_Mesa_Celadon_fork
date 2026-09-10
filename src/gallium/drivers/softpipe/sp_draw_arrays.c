@@ -82,7 +82,7 @@ softpipe_draw_vbo(struct pipe_context *pipe,
       return;
 
    if (indirect && indirect->buffer) {
-      util_draw_indirect(pipe, info, indirect);
+      util_draw_indirect(pipe, info, drawid_offset, indirect);
       return;
    }
 
@@ -117,17 +117,17 @@ softpipe_draw_vbo(struct pipe_context *pipe,
       }
 
       draw_set_indexes(draw,
-                       (ubyte *) mapped_indices,
+                       (uint8_t *) mapped_indices,
                        info->index_size, available_space);
    }
 
    if (softpipe_screen(sp->pipe.screen)->use_llvm) {
       softpipe_prepare_vertex_sampling(sp,
-                                       sp->num_sampler_views[PIPE_SHADER_VERTEX],
-                                       sp->sampler_views[PIPE_SHADER_VERTEX]);
+                                       sp->num_sampler_views[MESA_SHADER_VERTEX],
+                                       sp->sampler_views[MESA_SHADER_VERTEX]);
       softpipe_prepare_geometry_sampling(sp,
-                                         sp->num_sampler_views[PIPE_SHADER_GEOMETRY],
-                                         sp->sampler_views[PIPE_SHADER_GEOMETRY]);
+                                         sp->num_sampler_views[MESA_SHADER_GEOMETRY],
+                                         sp->sampler_views[MESA_SHADER_GEOMETRY]);
    }
 
    if (sp->gs && !sp->gs->shader.tokens) {
@@ -164,5 +164,5 @@ softpipe_draw_vbo(struct pipe_context *pipe,
    draw_flush(draw);
 
    /* Note: leave drawing surfaces mapped */
-   sp->dirty_render_cache = TRUE;
+   sp->dirty_render_cache = true;
 }

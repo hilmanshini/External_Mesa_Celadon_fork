@@ -21,12 +21,13 @@
  * IN THE SOFTWARE.
  */
 
-#include "v3dv_private.h"
+#include "v3dv_device.h"
+#include "common/v3d_util.h"
 
 #include <errno.h>
 #include <sys/mman.h>
 
-#include "drm-uapi/v3d_drm.h"
+#include "util/perf/cpu_trace.h"
 #include "util/u_memory.h"
 
 /* Default max size of the bo cache, in MB.
@@ -48,10 +49,10 @@ bo_dump_stats(struct v3dv_device *device)
 {
    struct v3dv_bo_cache *cache = &device->bo_cache;
 
-   fprintf(stderr, "  BOs allocated:   %d\n", device->bo_count);
-   fprintf(stderr, "  BOs size:        %dkb\n", device->bo_size / 1024);
-   fprintf(stderr, "  BOs cached:      %d\n", cache->cache_count);
-   fprintf(stderr, "  BOs cached size: %dkb\n", cache->cache_size / 1024);
+   mesa_logi("  BOs allocated:   %d\n", device->bo_count);
+   mesa_logi("  BOs size:        %dkb\n", device->bo_size / 1024);
+   mesa_logi("  BOs cached:      %d\n", cache->cache_count);
+   mesa_logi("  BOs cached size: %dkb\n", cache->cache_size / 1024);
 
    if (!list_is_empty(&cache->time_list)) {
       struct v3dv_bo *first = list_first_entry(&cache->time_list,
@@ -61,15 +62,12 @@ bo_dump_stats(struct v3dv_device *device)
                                             struct v3dv_bo,
                                             time_list);
 
-      fprintf(stderr, "  oldest cache time: %ld\n",
-              (long)first->free_time);
-      fprintf(stderr, "  newest cache time: %ld\n",
-              (long)last->free_time);
+      mesa_logi("  oldest cache time: %ld\n", (long)first->free_time);
+      mesa_logi("  newest cache time: %ld\n", (long)last->free_time);
 
       struct timespec time;
       clock_gettime(CLOCK_MONOTONIC, &time);
-      fprintf(stderr, "  now:               %lld\n",
-              (long long)time.tv_sec);
+      mesa_logi("  now:               %lld\n", (long long)time.tv_sec);
    }
 
    if (cache->size_list_size) {
@@ -78,7 +76,7 @@ bo_dump_stats(struct v3dv_device *device)
          if (list_is_empty(&cache->size_list[i]))
             empty_size_list++;
       }
-      fprintf(stderr, "  Empty size_list lists: %d\n", empty_size_list);
+      mesa_logi("  Empty size_list lists: %d\n", empty_size_list);
    }
 }
 
@@ -140,10 +138,8 @@ bo_free(struct v3dv_device *device,
       device->bo_size -= bo->size;
 
       if (dump_stats) {
-         fprintf(stderr, "Freed %s%s%dkb:\n",
-                 bo->name ? bo->name : "",
-                 bo->name ? " " : "",
-                 bo->size / 1024);
+         mesa_logi("Freed %s%s%dkb:\n", bo->name ? bo->name : "",
+                   bo->name ? " " : "", bo->size / 1024);
          bo_dump_stats(device);
       }
    }
@@ -162,9 +158,9 @@ bo_free(struct v3dv_device *device,
    struct drm_gem_close c;
    memset(&c, 0, sizeof(c));
    c.handle = handle;
-   int ret = v3dv_ioctl(device->pdevice->render_fd, DRM_IOCTL_GEM_CLOSE, &c);
+   int ret = v3d_ioctl(device->pdevice->render_fd, DRM_IOCTL_GEM_CLOSE, &c);
    if (ret != 0)
-      fprintf(stderr, "close object %d: %s\n", handle, strerror(errno));
+      mesa_loge("close object %d: %s\n", handle, strerror(errno));
 
    return ret == 0;
 }
@@ -193,6 +189,9 @@ v3dv_bo_init(struct v3dv_bo *bo,
              uint32_t size,
              uint32_t offset,
              const char *name,
+             uint64_t report_id,
+             VkObjectType obj_type,
+             uint64_t obj_handle,
              bool private)
 {
    p_atomic_set(&bo->refcnt, 1);
@@ -206,6 +205,11 @@ v3dv_bo_init(struct v3dv_bo *bo,
    bo->private = private;
    bo->dumb_handle = -1;
    bo->is_import = false;
+   bo->is_self_import = false;
+   bo->cl_branch_offset = 0xffffffff;
+   bo->report_id = report_id;
+   bo->report_obj_type = obj_type;
+   bo->report_obj_handle = obj_handle;
    list_inithead(&bo->list_link);
 }
 
@@ -214,9 +218,19 @@ v3dv_bo_init_import(struct v3dv_bo *bo,
                     uint32_t handle,
                     uint32_t size,
                     uint32_t offset,
+                    VkObjectType obj_type,
+                    uint64_t obj_handle,
                     bool private)
 {
-   v3dv_bo_init(bo, handle, size, offset, "import", private);
+   if (bo->refcnt > 0) {
+      p_atomic_inc(&bo->refcnt);
+      bo->is_import = true;
+      bo->is_self_import = true;
+      return;
+   }
+
+   v3dv_bo_init(bo, handle, size, offset, "import", handle,
+                obj_type, obj_handle, private);
    bo->is_import = true;
 }
 
@@ -224,44 +238,55 @@ struct v3dv_bo *
 v3dv_bo_alloc(struct v3dv_device *device,
               uint32_t size,
               const char *name,
-              bool private)
+              bool private,
+              VkObjectType obj_type,
+              uint64_t obj_handle)
 {
    struct v3dv_bo *bo;
 
    const uint32_t page_align = 4096; /* Always allocate full pages */
    size = align(size, page_align);
+   uint64_t report_id = (uint64_t)p_atomic_inc_return(&device->bo_report_id);
 
    if (private) {
       bo = bo_from_cache(device, size, name);
       if (bo) {
          if (dump_stats) {
-            fprintf(stderr, "Allocated %s %dkb from cache:\n",
-                    name, size / 1024);
+            mesa_logi("Allocated %s %dkb from cache:\n", name, size / 1024);
             bo_dump_stats(device);
          }
+         bo->report_obj_type = obj_type;
+         bo->report_obj_handle = obj_handle;
+         bo->report_id = (report_id << 32) | bo->handle;
+         v3dv_emit_device_memory_report(&device->vk, VK_SUCCESS,
+                                       true, /* is_alloc */
+                                       false, /* is_import */
+                                       bo->report_id, bo->size,
+                                       obj_type, obj_handle);
          return bo;
       }
    }
 
- retry:
-   ;
-
-   bool cleared_and_retried = false;
    struct drm_v3d_create_bo create = {
       .size = size
    };
 
-   int ret = v3dv_ioctl(device->pdevice->render_fd,
-                        DRM_IOCTL_V3D_CREATE_BO, &create);
+   int ret;
+retry:
+   ret = v3d_ioctl(device->pdevice->render_fd,
+                   DRM_IOCTL_V3D_CREATE_BO, &create);
    if (ret != 0) {
-      if (!list_is_empty(&device->bo_cache.time_list) &&
-          !cleared_and_retried) {
-         cleared_and_retried = true;
+      if (!list_is_empty(&device->bo_cache.time_list)) {
          bo_cache_free_all(device, true);
          goto retry;
       }
 
-      fprintf(stderr, "Failed to allocate device memory for BO\n");
+      mesa_loge("Failed to allocate device memory for BO\n");
+      v3dv_emit_device_memory_report(&device->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                                     true, /* is_alloc */
+                                     false, /* is_import */
+                                     0, /* mem_obj_id */
+                                     size, obj_type, obj_handle);
       return NULL;
    }
 
@@ -271,15 +296,29 @@ v3dv_bo_alloc(struct v3dv_device *device,
    bo = v3dv_device_lookup_bo(device->pdevice, create.handle);
    assert(bo && bo->handle == 0);
 
-   v3dv_bo_init(bo, create.handle, size, create.offset, name, private);
+   /* Private BOs may be recycled from the cache, so bo->handle
+    * alone would not be a valid report_id.
+    */
+   if (private)
+      report_id = (report_id << 32) | create.handle;
+   else
+      report_id = create.handle;
+
+   v3dv_bo_init(bo, create.handle, size, create.offset, name,
+                report_id, obj_type, obj_handle, private);
 
    device->bo_count++;
    device->bo_size += bo->size;
    if (dump_stats) {
-      fprintf(stderr, "Allocated %s %dkb:\n", name, size / 1024);
+      mesa_logi("Allocated %s %dkb:\n", name, size / 1024);
       bo_dump_stats(device);
    }
 
+   v3dv_emit_device_memory_report(&device->vk, VK_SUCCESS,
+                                  true, /* is_alloc */
+                                  false, /* is_import */
+                                  report_id, bo->size,
+                                  obj_type, obj_handle);
    return bo;
 }
 
@@ -296,18 +335,18 @@ v3dv_bo_map_unsynchronized(struct v3dv_device *device,
    struct drm_v3d_mmap_bo map;
    memset(&map, 0, sizeof(map));
    map.handle = bo->handle;
-   int ret = v3dv_ioctl(device->pdevice->render_fd,
-                        DRM_IOCTL_V3D_MMAP_BO, &map);
+   int ret = v3d_ioctl(device->pdevice->render_fd,
+                       DRM_IOCTL_V3D_MMAP_BO, &map);
    if (ret != 0) {
-      fprintf(stderr, "map ioctl failure\n");
+      mesa_loge("map ioctl failure\n");
       return false;
    }
 
    bo->map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED,
                   device->pdevice->render_fd, map.offset);
    if (bo->map == MAP_FAILED) {
-      fprintf(stderr, "mmap of bo %d (offset 0x%016llx, size %d) failed\n",
-              bo->handle, (long long)map.offset, (uint32_t)bo->size);
+      mesa_loge("mmap of bo %d (offset 0x%016llx, size %d) failed\n",
+                bo->handle, (long long)map.offset, (uint32_t)bo->size);
       return false;
    }
    VG(VALGRIND_MALLOCLIKE_BLOCK(bo->map, bo->size, 0, false));
@@ -322,12 +361,13 @@ v3dv_bo_wait(struct v3dv_device *device,
              struct v3dv_bo *bo,
              uint64_t timeout_ns)
 {
+   MESA_TRACE_FUNC();
    struct drm_v3d_wait_bo wait = {
       .handle = bo->handle,
       .timeout_ns = timeout_ns,
    };
-   return v3dv_ioctl(device->pdevice->render_fd,
-                     DRM_IOCTL_V3D_WAIT_BO, &wait) == 0;
+   return v3d_ioctl(device->pdevice->render_fd,
+                    DRM_IOCTL_V3D_WAIT_BO, &wait) == 0;
 }
 
 bool
@@ -339,9 +379,9 @@ v3dv_bo_map(struct v3dv_device *device, struct v3dv_bo *bo, uint32_t size)
    if (!ok)
       return false;
 
-   ok = v3dv_bo_wait(device, bo, PIPE_TIMEOUT_INFINITE);
+   ok = v3dv_bo_wait(device, bo, OS_TIMEOUT_INFINITE);
    if (!ok) {
-      fprintf(stderr, "memory wait for map failed\n");
+      mesa_loge("memory wait for map failed\n");
       return false;
    }
 
@@ -359,7 +399,7 @@ v3dv_bo_unmap(struct v3dv_device *device, struct v3dv_bo *bo)
    bo->map_size = 0;
 }
 
-static boolean
+static bool
 reallocate_size_list(struct v3dv_bo_cache *cache,
                      struct v3dv_device *device,
                      uint32_t size)
@@ -369,7 +409,7 @@ reallocate_size_list(struct v3dv_bo_cache *cache,
                VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
 
    if (!new_list) {
-      fprintf(stderr, "Failed to allocate host memory for cache bo list\n");
+      mesa_loge("Failed to allocate host memory for cache bo list\n");
       return false;
    }
    struct list_head *old_list = cache->size_list;
@@ -409,19 +449,21 @@ v3dv_bo_cache_init(struct v3dv_device *device)
     */
    device->bo_cache.size_list_size = 0;
 
-   const char *max_cache_size_str = getenv("V3DV_MAX_BO_CACHE_SIZE");
+   const char *max_cache_size_str = os_get_option("V3DV_MAX_BO_CACHE_SIZE");
    if (max_cache_size_str == NULL)
       device->bo_cache.max_cache_size = DEFAULT_MAX_BO_CACHE_SIZE;
    else
       device->bo_cache.max_cache_size = atoll(max_cache_size_str);
 
    if (dump_stats) {
-      fprintf(stderr, "MAX BO CACHE SIZE: %iMB\n", device->bo_cache.max_cache_size);
+      mesa_logi("MAX BO CACHE SIZE: %iMB\n", device->bo_cache.max_cache_size);
    }
 
+   mtx_lock(&device->bo_cache.lock);
    device->bo_cache.max_cache_size *= 1024 * 1024;
    device->bo_cache.cache_count = 0;
    device->bo_cache.cache_size = 0;
+   mtx_unlock(&device->bo_cache.lock);
 }
 
 void
@@ -431,7 +473,7 @@ v3dv_bo_cache_destroy(struct v3dv_device *device)
    vk_free(&device->vk.alloc, device->bo_cache.size_list);
 
    if (dump_stats) {
-      fprintf(stderr, "BO stats after screen destroy:\n");
+      mesa_loge("BO stats after screen destroy:\n");
       bo_dump_stats(device);
    }
 }
@@ -449,7 +491,7 @@ free_stale_bos(struct v3dv_device *device,
       /* If it's more than a second old, free it. */
       if (time - bo->free_time > 2) {
          if (dump_stats && !freed_any) {
-            fprintf(stderr, "Freeing stale BOs:\n");
+            mesa_logi("Freeing stale BOs:\n");
             bo_dump_stats(device);
             freed_any = true;
          }
@@ -462,17 +504,31 @@ free_stale_bos(struct v3dv_device *device,
    }
 
    if (dump_stats && freed_any) {
-      fprintf(stderr, "Freed stale BOs:\n");
+      mesa_logi("Freed stale BOs:\n");
       bo_dump_stats(device);
    }
 }
 
 bool
 v3dv_bo_free(struct v3dv_device *device,
-             struct v3dv_bo *bo)
+             struct v3dv_bo *bo,
+             uint64_t mem_report_obj_handle)
 {
    if (!bo)
       return true;
+
+   /* Since we attach memory report info to the BO, when we consider
+    * memory import/export we can end up with more than one VkDeviceMemory
+    * object sharing the same BO reference. In that case we need to make
+    * sure when we free the BO it reports the right VkDeviceMemory object.
+    * (the last one to actually unref the memory).
+    */
+   mem_report_obj_handle = mem_report_obj_handle ?
+                           mem_report_obj_handle : bo->report_obj_handle;
+   v3dv_emit_device_memory_report(&device->vk, VK_SUCCESS,
+                                  false, /* is_alloc */
+                                  bo->is_import, bo->report_id, bo->size,
+                                  bo->report_obj_type, mem_report_obj_handle);
 
    if (!p_atomic_dec_zero(&bo->refcnt))
       return true;
@@ -521,8 +577,7 @@ v3dv_bo_free(struct v3dv_device *device,
    cache->cache_size += bo->size;
 
    if (dump_stats) {
-      fprintf(stderr, "Freed %s %dkb to cache:\n",
-              bo->name, bo->size / 1024);
+      mesa_logi("Freed %s %dkb to cache:\n", bo->name, bo->size / 1024);
       bo_dump_stats(device);
    }
    bo->name = NULL;

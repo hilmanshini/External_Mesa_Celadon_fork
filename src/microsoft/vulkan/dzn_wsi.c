@@ -39,12 +39,12 @@ dzn_wsi_get_d3d12_command_queue(VkDevice dev)
    return device->swapchain_queue->cmdqueue;
 }
 
-static VkQueue
+static struct vk_queue *
 dzn_wsi_get_blit_queue(VkDevice dev)
 {
    VK_FROM_HANDLE(dzn_device, device, dev);
 
-   return dzn_queue_to_handle(device->swapchain_queue);
+   return &device->swapchain_queue->vk;
 }
 
 static bool
@@ -68,8 +68,8 @@ dzn_wsi_create_image_memory(VkDevice dev, void *resource,
       return VK_ERROR_OUT_OF_HOST_MEMORY;
 
    vk_object_base_init(&device->vk, &mem->base, VK_OBJECT_TYPE_DEVICE_MEMORY);
-   mem->swapchain_res = resource;
-   ID3D12Resource_AddRef(mem->swapchain_res);
+   mem->dedicated_res = resource;
+   ID3D12Resource_AddRef(mem->dedicated_res);
 
    *out = dzn_device_memory_to_handle(mem);
    return VK_SUCCESS;
@@ -97,7 +97,8 @@ dzn_wsi_init(struct dzn_physical_device *physical_device)
                             dzn_physical_device_to_handle(physical_device),
                             dzn_wsi_proc_addr,
                             &physical_device->vk.instance->alloc,
-                            -1, NULL, sw);
+                            -1, NULL,
+                            &(struct wsi_device_options){.sw_device = sw});
 
    if (result != VK_SUCCESS)
       return result;

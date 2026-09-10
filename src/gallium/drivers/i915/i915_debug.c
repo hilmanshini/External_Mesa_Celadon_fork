@@ -210,13 +210,13 @@ debug_variable_length_prim(struct debug_stream *stream)
    const char *prim = get_prim_name(ptr[0]);
    unsigned i, len;
 
-   ushort *idx = (ushort *)(ptr + 1);
+   uint16_t *idx = (uint16_t *)(ptr + 1);
    for (i = 0; idx[i] != 0xffff; i++)
       ;
 
    len = 1 + (i + 2) / 2;
 
-   mesa_logi("3DPRIM, %s variable length %d indicies (%d dwords):", prim, i,
+   mesa_logi("3DPRIM, %s variable length %d indices (%d dwords):", prim, i,
              len);
    for (i = 0; i < len; i++)
       mesa_logi("\t0x%08x", ptr[i]);

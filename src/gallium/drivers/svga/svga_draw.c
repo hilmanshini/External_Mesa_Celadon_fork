@@ -1,29 +1,11 @@
-/**********************************************************
- * Copyright 2008-2009 VMware, Inc.  All rights reserved.
- *
- * Permission is hereby granted, free of charge, to any person
- * obtaining a copy of this software and associated documentation
- * files (the "Software"), to deal in the Software without
- * restriction, including without limitation the rights to use, copy,
- * modify, merge, publish, distribute, sublicense, and/or sell copies
- * of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be
- * included in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- *
- **********************************************************/
+/*
+ * Copyright (c) 2008-2024 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc.
+ * and/or its subsidiaries.
+ * SPDX-License-Identifier: MIT
+ */
 
-#include "pipe/p_compiler.h"
+#include "util/compiler.h"
 #include "util/u_inlines.h"
 #include "pipe/p_defines.h"
 #include "util/u_helpers.h"
@@ -68,7 +50,7 @@ svga_hwtnl_destroy(struct svga_hwtnl *hwtnl)
 {
    unsigned i, j;
 
-   for (i = 0; i < PIPE_PRIM_MAX; i++) {
+   for (i = 0; i < MESA_PRIM_COUNT; i++) {
       for (j = 0; j < IDX_CACHE_MAX; j++) {
          pipe_resource_reference(&hwtnl->index_cache[i][j].buffer, NULL);
       }
@@ -86,7 +68,7 @@ svga_hwtnl_destroy(struct svga_hwtnl *hwtnl)
 
 void
 svga_hwtnl_set_flatshade(struct svga_hwtnl *hwtnl,
-                         boolean flatshade, boolean flatshade_first)
+                         bool flatshade, bool flatshade_first)
 {
    struct svga_screen *svgascreen = svga_screen(hwtnl->svga->pipe.screen);
 
@@ -157,33 +139,33 @@ svga_hwtnl_vertex_buffers(struct svga_hwtnl *hwtnl,
  * Determine whether the specified buffer is referred in the primitive queue,
  * for which no commands have been written yet.
  */
-boolean
+bool
 svga_hwtnl_is_buffer_referred(struct svga_hwtnl *hwtnl,
                               struct pipe_resource *buffer)
 {
    unsigned i;
 
    if (svga_buffer_is_user_buffer(buffer)) {
-      return FALSE;
+      return false;
    }
 
    if (!hwtnl->cmd.prim_count) {
-      return FALSE;
+      return false;
    }
 
    for (i = 0; i < hwtnl->cmd.vbuf_count; ++i) {
       if (hwtnl->cmd.vbufs[i].buffer.resource == buffer) {
-         return TRUE;
+         return true;
       }
    }
 
    for (i = 0; i < hwtnl->cmd.prim_count; ++i) {
       if (hwtnl->cmd.prim_ib[i] == buffer) {
-         return TRUE;
+         return true;
       }
    }
 
-   return FALSE;
+   return false;
 }
 
 
@@ -271,7 +253,7 @@ draw_vgpu9(struct svga_hwtnl *hwtnl)
 
    SVGA_DBG(DEBUG_DMA, "draw to sid %p, %d prims\n",
             svga->curr.framebuffer.cbufs[0] ?
-            svga_surface(svga->curr.framebuffer.cbufs[0])->handle : NULL,
+            svga->curr.framebuffer.cbufs[0]->handle : NULL,
             hwtnl->cmd.prim_count);
 
    ret = SVGA3D_BeginDrawPrimitives(swc,
@@ -351,17 +333,17 @@ enum pipe_error
 svga_validate_sampler_resources(struct svga_context *svga,
                                 enum svga_pipe_type pipe_type)
 {
-   enum pipe_shader_type shader, first_shader, last_shader;
+   mesa_shader_stage shader, first_shader, last_shader;
 
    assert(svga_have_vgpu10(svga));
 
    if (pipe_type == SVGA_PIPE_GRAPHICS) {
-      first_shader = PIPE_SHADER_VERTEX;
-      last_shader = PIPE_SHADER_COMPUTE;
+      first_shader = MESA_SHADER_VERTEX;
+      last_shader = MESA_SHADER_COMPUTE;
    }
    else {
       assert(svga_have_gl43(svga));
-      first_shader = PIPE_SHADER_COMPUTE;
+      first_shader = MESA_SHADER_COMPUTE;
       last_shader = first_shader+1;
    }
 
@@ -393,7 +375,7 @@ svga_validate_sampler_resources(struct svga_context *svga,
          }
       }
 
-      if (shader == PIPE_SHADER_FRAGMENT &&
+      if (shader == MESA_SHADER_FRAGMENT &&
           svga->curr.rast->templ.poly_stipple_enable) {
          const unsigned unit =
             svga_fs_variant(svga->state.hw_draw.fs)->pstipple_sampler_unit;
@@ -419,7 +401,7 @@ svga_validate_sampler_resources(struct svga_context *svga,
          }
       }
    }
-   svga->rebind.flags.texture_samplers = FALSE;
+   svga->rebind.flags.texture_samplers = false;
 
    return PIPE_OK;
 }
@@ -434,17 +416,17 @@ enum pipe_error
 svga_validate_constant_buffers(struct svga_context *svga,
                                enum svga_pipe_type pipe_type)
 {
-   enum pipe_shader_type shader, first_shader, last_shader;
+   mesa_shader_stage shader, first_shader, last_shader;
 
    assert(svga_have_vgpu10(svga));
 
    if (pipe_type == SVGA_PIPE_GRAPHICS) {
-      first_shader = PIPE_SHADER_VERTEX;
-      last_shader = PIPE_SHADER_COMPUTE;
+      first_shader = MESA_SHADER_VERTEX;
+      last_shader = MESA_SHADER_COMPUTE;
    }
    else {
       assert(svga_have_gl43(svga));
-      first_shader = PIPE_SHADER_COMPUTE;
+      first_shader = MESA_SHADER_COMPUTE;
       last_shader = first_shader + 1;
    }
 
@@ -503,7 +485,7 @@ svga_validate_constant_buffers(struct svga_context *svga,
       unsigned enabled_rawbufs = svga->state.hw_draw.enabled_rawbufs[shader] & ~1u;
       while (enabled_rawbufs) {
          unsigned i = u_bit_scan(&enabled_rawbufs);
-         buffer = svga_buffer(svga->curr.constbufs[shader][i].buffer);
+         buffer = svga_buffer(svga->state.hw_draw.rawbufs[shader][i].buffer);
 
          assert(buffer != NULL);
          handle = svga_buffer_handle(svga, &buffer->b,
@@ -519,7 +501,7 @@ svga_validate_constant_buffers(struct svga_context *svga,
          }
       }
    }
-   svga->rebind.flags.constbufs = FALSE;
+   svga->rebind.flags.constbufs = false;
 
    return PIPE_OK;
 }
@@ -534,18 +516,18 @@ enum pipe_error
 svga_validate_image_views(struct svga_context *svga,
                           enum svga_pipe_type pipe_type)
 {
-   enum pipe_shader_type shader, first_shader, last_shader;
+   mesa_shader_stage shader, first_shader, last_shader;
    bool rebind = svga->rebind.flags.images;
    enum pipe_error ret;
 
    assert(svga_have_gl43(svga));
 
    if (pipe_type == SVGA_PIPE_GRAPHICS) {
-      first_shader = PIPE_SHADER_VERTEX;
-      last_shader = PIPE_SHADER_COMPUTE;
+      first_shader = MESA_SHADER_VERTEX;
+      last_shader = MESA_SHADER_COMPUTE;
    }
    else {
-      first_shader = PIPE_SHADER_COMPUTE;
+      first_shader = MESA_SHADER_COMPUTE;
       last_shader = first_shader + 1;
    }
 
@@ -558,7 +540,7 @@ svga_validate_image_views(struct svga_context *svga,
          return ret;
    }
 
-   svga->rebind.flags.images = FALSE;
+   svga->rebind.flags.images = false;
 
    return PIPE_OK;
 }
@@ -573,18 +555,18 @@ enum pipe_error
 svga_validate_shader_buffers(struct svga_context *svga,
                              enum svga_pipe_type pipe_type)
 {
-   enum pipe_shader_type shader, first_shader, last_shader;
+   mesa_shader_stage shader, first_shader, last_shader;
    bool rebind = svga->rebind.flags.shaderbufs;
    enum pipe_error ret;
 
    assert(svga_have_gl43(svga));
 
    if (pipe_type == SVGA_PIPE_GRAPHICS) {
-      first_shader = PIPE_SHADER_VERTEX;
-      last_shader = PIPE_SHADER_COMPUTE;
+      first_shader = MESA_SHADER_VERTEX;
+      last_shader = MESA_SHADER_COMPUTE;
    }
    else {
-      first_shader = PIPE_SHADER_COMPUTE;
+      first_shader = MESA_SHADER_COMPUTE;
       last_shader = first_shader + 1;
    }
 
@@ -597,7 +579,7 @@ svga_validate_shader_buffers(struct svga_context *svga,
          return ret;
    }
 
-   svga->rebind.flags.shaderbufs = FALSE;
+   svga->rebind.flags.shaderbufs = false;
 
    ret = svga_validate_shader_buffer_resources(svga,
                svga->state.hw_draw.num_atomic_buffers,
@@ -607,7 +589,7 @@ svga_validate_shader_buffers(struct svga_context *svga,
    if (ret != PIPE_OK)
       return ret;
 
-   svga->rebind.flags.atomicbufs = FALSE;
+   svga->rebind.flags.atomicbufs = false;
 
    return PIPE_OK;
 }
@@ -646,7 +628,7 @@ last_command_was_draw(const struct svga_context *svga)
  * They are equal if the vertex buffer attributes and the vertex buffer
  * resources are identical.
  */
-static boolean
+static bool
 vertex_buffers_equal(unsigned count,
                      SVGA3dVertexBuffer_v2 *pVBufAttr1,
                      struct pipe_resource **pVBuf1,
@@ -702,7 +684,7 @@ validate_vertex_buffers(struct svga_hwtnl *hwtnl,
 
       /* Set IA slot0 input buffer to the SO buffer */
       assert(vbuf_count == 1);
-      vbuffer_attrs[0].stride = hwtnl->cmd.vbufs[0].stride;
+      vbuffer_attrs[0].stride = svga->state.sw.need_swtnl ? hwtnl->cmd.vdecl[0].array.stride : svga->curr.velems->strides[0];
       vbuffer_attrs[0].offset = hwtnl->cmd.vbufs[0].buffer_offset;
       vbuffer_attrs[0].sid = 0;
       assert(so_vertex_count->buffer != NULL);
@@ -717,7 +699,7 @@ validate_vertex_buffers(struct svga_hwtnl *hwtnl,
          struct svga_buffer *sbuf =
             svga_buffer(hwtnl->cmd.vbufs[i].buffer.resource);
 
-         vbuffer_attrs[i].stride = hwtnl->cmd.vbufs[i].stride;
+         vbuffer_attrs[i].stride = svga->state.sw.need_swtnl ? hwtnl->cmd.vdecl[i].array.stride : svga->curr.velems->strides[i];
          vbuffer_attrs[i].offset = hwtnl->cmd.vbufs[i].buffer_offset;
          vbuffer_attrs[i].sid = 0;
 
@@ -824,7 +806,7 @@ validate_vertex_buffers(struct svga_hwtnl *hwtnl,
             SVGA3dVertexBuffer_v2 *pbufAttrs = vbuffer_attrs;
             struct svga_winsys_surface **pbufHandles = vbuffer_handles;
             unsigned numVBuf = 0;
-            boolean emitVBufs =
+            bool emitVBufs =
                !svga_sws(svga)->have_index_vertex_buffer_offset_cmd ||
                svga->rebind.flags.vertexbufs;
 
@@ -833,7 +815,7 @@ validate_vertex_buffers(struct svga_hwtnl *hwtnl,
              * corresponding entries in the device's vertex buffer list.
              */
             for (i = 0; i < num_vbuffers; i++) {
-               boolean emit =
+               bool emit =
                   vertex_buffers_equal(1,
                                        &vbuffer_attrs[i],
                                        &vbuffers[i],
@@ -848,7 +830,7 @@ validate_vertex_buffers(struct svga_hwtnl *hwtnl,
                   /* Include the last vertex buffer in the next emit
                    * if it is different.
                    */
-                  emit = TRUE;
+                  emit = true;
                   numVBuf++;
                   i++;
                }
@@ -915,7 +897,7 @@ validate_vertex_buffers(struct svga_hwtnl *hwtnl,
       }
    }
 
-   svga->rebind.flags.vertexbufs = FALSE;
+   svga->rebind.flags.vertexbufs = false;
 
    return PIPE_OK;
 }
@@ -987,7 +969,7 @@ validate_index_buffer(struct svga_hwtnl *hwtnl,
       }
    }
 
-   svga->rebind.flags.indexbuf = FALSE;
+   svga->rebind.flags.indexbuf = false;
 
    return PIPE_OK;
 }
@@ -1006,6 +988,7 @@ draw_vgpu10(struct svga_hwtnl *hwtnl,
    struct svga_context *svga = hwtnl->svga;
    struct svga_winsys_surface *indirect_handle;
    enum pipe_error ret;
+   bool is_instanced_draw = instance_count > 1 || start_instance > 0;
 
    assert(svga_have_vgpu10(svga));
    assert(hwtnl->cmd.prim_count == 0);
@@ -1096,7 +1079,7 @@ draw_vgpu10(struct svga_hwtnl *hwtnl,
                                                        indirect_handle,
                                                        indirect->offset);
       }
-      else if (instance_count > 1) {
+      else if (is_instanced_draw) {
          ret = SVGA3D_vgpu10_DrawIndexedInstanced(svga->swc,
                                                   vcount,
                                                   instance_count,
@@ -1139,7 +1122,7 @@ draw_vgpu10(struct svga_hwtnl *hwtnl,
                                                 indirect_handle,
                                                 indirect->offset);
       }
-      else if (instance_count > 1) {
+      else if (is_instanced_draw) {
          ret = SVGA3D_vgpu10_DrawInstanced(svga->swc,
                                            vcount,
                                            instance_count,
@@ -1376,7 +1359,7 @@ svga_hwtnl_prim(struct svga_hwtnl *hwtnl,
    else {
       /* batch up drawing commands */
       assert(indirect == NULL);
-#ifdef DEBUG
+#if MESA_DEBUG
       check_draw_params(hwtnl, range, min_index, max_index, ib);
       assert(start_instance == 0);
       assert(instance_count <= 1);
@@ -1410,7 +1393,7 @@ done:
 /**
  * Return TRUE if there are pending primitives.
  */
-boolean
+bool
 svga_hwtnl_has_pending_prim(struct svga_hwtnl *hwtnl)
 {
    return hwtnl->cmd.prim_count > 0;

@@ -222,7 +222,6 @@ _mesa_reserve_parameter_storage(struct gl_program_parameter_list *paramList,
    }
 
    if (needSizeValues > paramList->SizeValues) {
-      unsigned oldSize = paramList->SizeValues;
       paramList->SizeValues = needSizeValues + 16; /* alloc some extra */
 
       paramList->ParameterValues = (gl_constant_value *)
@@ -235,8 +234,8 @@ _mesa_reserve_parameter_storage(struct gl_program_parameter_list *paramList,
                        paramList->SizeValues * sizeof(gl_constant_value) +
                        12, 16);
       /* The values are written to the shader cache, so clear them. */
-      memset(paramList->ParameterValues + oldSize, 0,
-             (paramList->SizeValues - oldSize) * sizeof(gl_constant_value));
+      memset(paramList->ParameterValues + oldValNum, 0,
+             (paramList->SizeValues - oldValNum) * sizeof(gl_constant_value));
    }
 }
 
@@ -303,6 +302,7 @@ _mesa_add_parameter(struct gl_program_parameter_list *paramList,
 
    memset(&paramList->Parameters[oldNum], 0,
           sizeof(struct gl_program_parameter));
+   memset(&paramList->ParameterValues[oldValNum], 0, padded_size);
 
    struct gl_program_parameter *p = paramList->Parameters + oldNum;
    p->Name = strdup(name ? name : "");
@@ -353,7 +353,7 @@ _mesa_add_parameter(struct gl_program_parameter_list *paramList,
       paramList->LastStateVarIndex =
          MAX2(paramList->LastStateVarIndex, oldNum);
    } else {
-      unreachable("invalid parameter type");
+      UNREACHABLE("invalid parameter type");
    }
 
    assert(paramList->NumParameters <= paramList->Size);
@@ -422,21 +422,31 @@ _mesa_add_typed_unnamed_constant(struct gl_program_parameter_list *paramList,
 }
 
 GLint
-_mesa_add_sized_state_reference(struct gl_program_parameter_list *paramList,
-                                const gl_state_index16 stateTokens[STATE_LENGTH],
-                                const unsigned size, bool pad_and_align)
+_mesa_lookup_state_param_idx(struct gl_program_parameter_list *paramList,
+                             const gl_state_index16 stateTokens[STATE_LENGTH])
 {
-   char *name;
-   GLint index;
-
-   /* Check if the state reference is already in the list */
-   for (index = 0; index < (GLint) paramList->NumParameters; index++) {
+   for (GLint index = 0; index < (GLint) paramList->NumParameters; index++) {
       if (!memcmp(paramList->Parameters[index].StateIndexes,
                   stateTokens,
                   sizeof(paramList->Parameters[index].StateIndexes))) {
          return index;
       }
    }
+
+   return -1;
+}
+
+GLint
+_mesa_add_sized_state_reference(struct gl_program_parameter_list *paramList,
+                                const gl_state_index16 stateTokens[STATE_LENGTH],
+                                const unsigned size, bool pad_and_align)
+{
+   char *name;
+
+   /* Check if the state reference is already in the list */
+   GLint index = _mesa_lookup_state_param_idx(paramList, stateTokens);
+   if (index >= 0)
+      return index;
 
    name = _mesa_program_state_string(stateTokens);
    index = _mesa_add_parameter(paramList, PROGRAM_STATE_VAR, name,

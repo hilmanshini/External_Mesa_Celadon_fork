@@ -1,33 +1,15 @@
 /**************************************************************************
  *
  * Copyright 2011 Advanced Micro Devices, Inc.
- * All Rights Reserved.
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the
- * "Software"), to deal in the Software without restriction, including
- * without limitation the rights to use, copy, modify, merge, publish,
- * distribute, sub license, and/or sell copies of the Software, and to
- * permit persons to whom the Software is furnished to do so, subject to
- * the following conditions:
- *
- * The above copyright notice and this permission notice (including the
- * next paragraph) shall be included in all copies or substantial portions
- * of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT.
- * IN NO EVENT SHALL THE COPYRIGHT HOLDER(S) OR AUTHOR(S) BE LIABLE FOR
- * ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
- * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
- * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  *
  **************************************************************************/
 
 #ifndef AC_UVD_DEC_H
 #define AC_UVD_DEC_H
 
+#include "ac_video_dec.h"
 
 /* UVD uses PM4 packet type 0 and 2 */
 #define RUVD_PKT_TYPE_S(x)        (((unsigned)(x)&0x3) << 30)
@@ -338,6 +320,18 @@ struct ruvd_mpeg4 {
    } divx_311_config;
 };
 
+struct ruvd_avc_its {
+   unsigned char scaling_list_4x4[6][16];
+   unsigned char scaling_list_8x8[2][64];
+};
+
+struct ruvd_hevc_its {
+   unsigned char scaling_list_4x4[6][16];
+   unsigned char scaling_list_8x8[6][64];
+   unsigned char scaling_list_16x16[6][64];
+   unsigned char scaling_list_32x32[2][64];
+};
+
 /* message between driver and hardware */
 struct ruvd_msg {
 
@@ -402,7 +396,7 @@ struct ruvd_msg {
          uint32_t dt_uv_surf_tile_config;
          // re-use dt_wa_chroma_top_offset as dt_ext_info for UV pitch in stoney
          uint32_t dt_wa_chroma_top_offset;
-         uint32_t dt_wa_chroma_bottom_offset;
+         uint32_t dt_wa_chroma_bottom_offset; /* gfx9: used as dt_swizzle_mode */
 
          uint32_t reserved[16];
 
@@ -424,5 +418,17 @@ struct ruvd_msg {
       } decode;
    } body;
 };
+
+struct ac_uvd_stream_handle {
+   uint32_t base;
+   uint32_t counter;
+};
+
+void ac_uvd_init_stream_handle(struct ac_uvd_stream_handle *handle);
+unsigned ac_uvd_alloc_stream_handle(struct ac_uvd_stream_handle *handle);
+
+uint32_t ac_uvd_dec_dpb_size(const struct radeon_info *info, struct ac_video_dec_session_param *param);
+uint32_t ac_uvd_dec_dpb_alignment(const struct radeon_info *info, struct ac_video_dec_session_param *param);
+struct ac_video_dec *ac_uvd_create_video_decoder(const struct radeon_info *info, struct ac_video_dec_session_param *param);
 
 #endif

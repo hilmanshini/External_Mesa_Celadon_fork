@@ -36,6 +36,7 @@
 #include "pipe/p_state.h"
 #include "tgsi/tgsi_ureg.h"
 #include "tgsi/tgsi_dump.h"
+#include "util/macros.h"
 #include "util/u_memory.h"
 
 #include "ShaderDump.h"
@@ -217,10 +218,10 @@ struct Shader_xlate {
    uint indexable_temp_offsets[SHADER_MAX_INDEXABLE_TEMPS];
 
    struct {
-      boolean declared;
-      uint    writemask;
-      uint    siv_name;
-      boolean overloaded;
+      bool declared;
+      uint writemask;
+      uint siv_name;
+      bool overloaded;
       struct ureg_src reg;
    } inputs[SHADER_MAX_INPUTS];
 
@@ -260,12 +261,12 @@ translate_interpolation(D3D10_SB_INTERPOLATION_MODE interpolation)
 
    case D3D10_SB_INTERPOLATION_LINEAR_CENTROID:
    case D3D10_SB_INTERPOLATION_LINEAR_SAMPLE: // DX10.1
-      LOG_UNSUPPORTED(TRUE);
+      LOG_UNSUPPORTED(true);
       return TGSI_INTERPOLATE_PERSPECTIVE;
 
    case D3D10_SB_INTERPOLATION_LINEAR_NOPERSPECTIVE_CENTROID:
    case D3D10_SB_INTERPOLATION_LINEAR_NOPERSPECTIVE_SAMPLE: // DX10.1
-      LOG_UNSUPPORTED(TRUE);
+      LOG_UNSUPPORTED(true);
       return TGSI_INTERPOLATE_LINEAR;
    }
 
@@ -298,7 +299,8 @@ translate_system_name(D3D10_SB_NAME name)
    case D3D10_SB_NAME_IS_FRONT_FACE:
       return TGSI_SEMANTIC_FACE;
    case D3D10_SB_NAME_SAMPLE_INDEX:
-      LOG_UNSUPPORTED(TRUE);
+   default:
+      LOG_UNSUPPORTED(true);
       return TGSI_SEMANTIC_GENERIC;
    }
 
@@ -351,7 +353,7 @@ trans_dcl_ret_type(D3D10_SB_RESOURCE_RETURN_TYPE d3drettype) {
       return TGSI_RETURN_TYPE_FLOAT;
    case D3D10_SB_RETURN_TYPE_MIXED:
    default:
-      LOG_UNSUPPORTED(TRUE);
+      LOG_UNSUPPORTED(true);
       return TGSI_RETURN_TYPE_FLOAT;
    }
 }
@@ -466,7 +468,7 @@ dcl_base_input(struct Shader_xlate *sx,
       ureg_MOV(ureg, ureg_writemask(temp, writemask),
                swizzle_reg(dcl_reg, writemask, siv_name));
       sx->inputs[index].reg = ureg_src(temp);
-      sx->inputs[index].overloaded = TRUE;
+      sx->inputs[index].overloaded = true;
       sx->inputs[index].writemask |= writemask;
    } else if (sx->inputs[index].overloaded) {
       struct ureg_dst temp = ureg_dst(sx->inputs[index].reg);
@@ -477,7 +479,7 @@ dcl_base_input(struct Shader_xlate *sx,
       assert(!sx->inputs[index].declared);
 
       sx->inputs[index].reg = dcl_reg;
-      sx->inputs[index].declared = TRUE;
+      sx->inputs[index].declared = true;
       sx->inputs[index].writemask = writemask;
       sx->inputs[index].siv_name = siv_name;
    }
@@ -690,7 +692,7 @@ translate_relative_operand(struct Shader_xlate *sx,
    case D3D10_SB_OPERAND_TYPE_NULL:
    case D3D10_SB_OPERAND_TYPE_RASTERIZER:
    case D3D10_SB_OPERAND_TYPE_OUTPUT_COVERAGE_MASK:
-      LOG_UNSUPPORTED(TRUE);
+      LOG_UNSUPPORTED(true);
       reg = ureg_src(ureg_DECL_temporary(sx->ureg));
       break;
 
@@ -768,9 +770,10 @@ translate_operand(struct Shader_xlate *sx,
    case D3D10_SB_OPERAND_TYPE_NULL:
    case D3D10_SB_OPERAND_TYPE_RASTERIZER:
    case D3D10_SB_OPERAND_TYPE_OUTPUT_COVERAGE_MASK:
+   default:
       /* XXX: Translate more operands types.
        */
-      LOG_UNSUPPORTED(TRUE);
+      LOG_UNSUPPORTED(true);
       reg = ureg_DECL_temporary(sx->ureg);
    }
 
@@ -806,7 +809,7 @@ translate_indexable_temp(struct Shader_xlate *sx,
    default:
       /* XXX: Other index representations.
        */
-      LOG_UNSUPPORTED(TRUE);
+      LOG_UNSUPPORTED(true);
       reg = ureg_src(ureg_DECL_temporary(sx->ureg));
    }
    return reg;
@@ -815,7 +818,7 @@ translate_indexable_temp(struct Shader_xlate *sx,
 static struct ureg_dst
 translate_dst_operand(struct Shader_xlate *sx,
                       const struct Shader_dst_operand *operand,
-                      boolean saturate)
+                      bool saturate)
 {
    struct ureg_dst reg;
    unsigned writemask =
@@ -882,7 +885,7 @@ translate_src_operand(struct Shader_xlate *sx,
          default:
             /* XXX: Other index representations.
              */
-            LOG_UNSUPPORTED(TRUE);
+            LOG_UNSUPPORTED(true);
 
          }
       } else {
@@ -908,7 +911,7 @@ translate_src_operand(struct Shader_xlate *sx,
          default:
             /* XXX: Other index representations.
              */
-            LOG_UNSUPPORTED(TRUE);
+            LOG_UNSUPPORTED(true);
          }
 
          switch (operand->base.index[0].index_rep) {
@@ -930,7 +933,7 @@ translate_src_operand(struct Shader_xlate *sx,
          default:
             /* XXX: Other index representations.
              */
-            LOG_UNSUPPORTED(TRUE);
+            LOG_UNSUPPORTED(true);
          }
       }
       break;
@@ -1012,7 +1015,7 @@ translate_src_operand(struct Shader_xlate *sx,
       default:
          /* XXX: Other index representations.
           */
-         LOG_UNSUPPORTED(TRUE);
+         LOG_UNSUPPORTED(true);
       }
 
       break;
@@ -1036,7 +1039,7 @@ translate_src_operand(struct Shader_xlate *sx,
       default:
          /* XXX: Other index representations.
           */
-         LOG_UNSUPPORTED(TRUE);
+         LOG_UNSUPPORTED(true);
       }
       break;
 
@@ -1128,7 +1131,7 @@ texture_dim_from_tgsi_target(unsigned tgsi_target)
    }
 }
 
-static boolean
+static bool
 operand_is_scalar(const struct Shader_src_operand *operand)
 {
    return operand->swizzle[0] == operand->swizzle[1] &&
@@ -1195,7 +1198,6 @@ sample_ureg_emit(struct ureg_program *ureg,
                  tgsi_opcode,
                  &dst, 1,
                  TGSI_TEXTURE_UNKNOWN,
-                 TGSI_RETURN_TYPE_UNKNOWN,
                  &texoffsets, num_offsets,
                  src, num_src);
 }
@@ -1247,8 +1249,8 @@ Shader_tgsi_translate(const unsigned *code,
    struct Shader_opcode opcode;
    const struct tgsi_token *tokens = NULL;
    uint nr_tokens;
-   boolean shader_dumped = FALSE;
-   boolean inside_sub = FALSE;
+   bool shader_dumped = false;
+   bool inside_sub = false;
    uint i, j;
 
    memset(&sx, 0, sizeof sx);
@@ -1257,7 +1259,7 @@ Shader_tgsi_translate(const unsigned *code,
 
    if (st_debug & ST_DEBUG_TGSI) {
       dx10_shader_dump_tokens(code);
-      shader_dumped = TRUE;
+      shader_dumped = true;
    }
 
    sx.max_calls = 64;
@@ -1275,14 +1277,16 @@ Shader_tgsi_translate(const unsigned *code,
    /* Header. */
    switch (parser.header.type) {
    case D3D10_SB_PIXEL_SHADER:
-      ureg = ureg_create(PIPE_SHADER_FRAGMENT);
+      ureg = ureg_create(MESA_SHADER_FRAGMENT);
       break;
    case D3D10_SB_VERTEX_SHADER:
-      ureg = ureg_create(PIPE_SHADER_VERTEX);
+      ureg = ureg_create(MESA_SHADER_VERTEX);
       break;
    case D3D10_SB_GEOMETRY_SHADER:
-      ureg = ureg_create(PIPE_SHADER_GEOMETRY);
+      ureg = ureg_create(MESA_SHADER_GEOMETRY);
       break;
+   default:
+      UNREACHABLE("unsupported D3D10_SB_SHADER\n");
    }
 
    assert(ureg);
@@ -1873,19 +1877,19 @@ Shader_tgsi_translate(const unsigned *code,
          case D3D10_SB_PRIMITIVE_TOPOLOGY_POINTLIST:
             ureg_property(sx.ureg,
                           TGSI_PROPERTY_GS_OUTPUT_PRIM,
-                          PIPE_PRIM_POINTS);
+                          MESA_PRIM_POINTS);
             break;
 
          case D3D10_SB_PRIMITIVE_TOPOLOGY_LINESTRIP:
             ureg_property(sx.ureg,
                           TGSI_PROPERTY_GS_OUTPUT_PRIM,
-                          PIPE_PRIM_LINE_STRIP);
+                          MESA_PRIM_LINE_STRIP);
             break;
 
          case D3D10_SB_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP:
             ureg_property(sx.ureg,
                           TGSI_PROPERTY_GS_OUTPUT_PRIM,
-                          PIPE_PRIM_TRIANGLE_STRIP);
+                          MESA_PRIM_TRIANGLE_STRIP);
             break;
 
          default:
@@ -1903,35 +1907,35 @@ Shader_tgsi_translate(const unsigned *code,
             declare_vertices_in(&sx, 1);
             ureg_property(sx.ureg,
                           TGSI_PROPERTY_GS_INPUT_PRIM,
-                          PIPE_PRIM_POINTS);
+                          MESA_PRIM_POINTS);
             break;
 
          case D3D10_SB_PRIMITIVE_LINE:
             declare_vertices_in(&sx, 2);
             ureg_property(sx.ureg,
                           TGSI_PROPERTY_GS_INPUT_PRIM,
-                          PIPE_PRIM_LINES);
+                          MESA_PRIM_LINES);
             break;
 
          case D3D10_SB_PRIMITIVE_TRIANGLE:
             declare_vertices_in(&sx, 3);
             ureg_property(sx.ureg,
                           TGSI_PROPERTY_GS_INPUT_PRIM,
-                          PIPE_PRIM_TRIANGLES);
+                          MESA_PRIM_TRIANGLES);
             break;
 
          case D3D10_SB_PRIMITIVE_LINE_ADJ:
             declare_vertices_in(&sx, 4);
             ureg_property(sx.ureg,
                           TGSI_PROPERTY_GS_INPUT_PRIM,
-                          PIPE_PRIM_LINES_ADJACENCY);
+                          MESA_PRIM_LINES_ADJACENCY);
             break;
 
          case D3D10_SB_PRIMITIVE_TRIANGLE_ADJ:
             declare_vertices_in(&sx, 6);
             ureg_property(sx.ureg,
                           TGSI_PROPERTY_GS_INPUT_PRIM,
-                          PIPE_PRIM_TRIANGLES_ADJACENCY);
+                          MESA_PRIM_TRIANGLES_ADJACENCY);
             break;
 
          default:
@@ -2197,7 +2201,7 @@ Shader_tgsi_translate(const unsigned *code,
          }
          tgsi_inst_no = ureg_get_instruction_number(ureg);
          ureg_BGNSUB(ureg);
-         inside_sub = TRUE;
+         inside_sub = true;
          Shader_add_label(&sx, label, tgsi_inst_no);
       }
          break;
@@ -2233,7 +2237,7 @@ Shader_tgsi_translate(const unsigned *code,
             if (ox->tgsi_opcode == TGSI_LOG_UNSUPPORTED) {
                if (!shader_dumped) {
                   dx10_shader_dump_tokens(code);
-                  shader_dumped = TRUE;
+                  shader_dumped = true;
                }
                debug_printf("%s: unsupported opcode %i\n",
                             __func__, ox->type);

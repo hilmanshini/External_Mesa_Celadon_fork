@@ -1,5 +1,5 @@
 /*
- * Copyright Â 2019 Alyssa Rosenzweig
+ * Copyright © 2019 Alyssa Rosenzweig
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -25,7 +25,8 @@
 #ifndef NIR_BLEND_H
 #define NIR_BLEND_H
 
-#include "compiler/nir/nir.h"
+#include "compiler/nir/nir_defines.h"
+#include "util/blend.h"
 #include "util/format/u_formats.h"
 
 /* These structs encapsulates the blend state such that it can be lowered
@@ -33,38 +34,50 @@
  */
 
 typedef struct {
-   enum blend_func func;
-
-   enum blend_factor src_factor;
-   bool invert_src_factor;
-
-   enum blend_factor dst_factor;
-   bool invert_dst_factor;
+   enum pipe_blend_func func;
+   enum pipe_blendfactor src_factor;
+   enum pipe_blendfactor dst_factor;
 } nir_lower_blend_channel;
 
 typedef struct {
+   enum pipe_format format;
+
    nir_lower_blend_channel rgb;
    nir_lower_blend_channel alpha;
 
    /* 4-bit colormask. 0x0 for none, 0xF for RGBA, 0x1 for R */
-   unsigned colormask;
+   unsigned colormask:4;
+
+   unsigned advanced_blend:1;
+   enum pipe_advanced_blend_mode blend_mode;
+   bool src_premultiplied;
+   bool dst_premultiplied;
+   enum pipe_blend_overlap_mode overlap;
 } nir_lower_blend_rt;
 
 typedef struct {
    nir_lower_blend_rt rt[8];
-   enum pipe_format format[8];
 
    bool logicop_enable;
-   unsigned logicop_func;
-
-   nir_ssa_def *src1;
+   enum pipe_logicop logicop_func;
 
    /* If set, will use load_blend_const_color_{r,g,b,a}_float instead of
     * load_blend_const_color_rgba */
    bool scalar_blend_const;
 } nir_lower_blend_options;
 
-void nir_lower_blend(nir_shader *shader,
+nir_def *
+nir_color_logicop(nir_builder *b, nir_def *src, nir_def *dst,
+                  enum pipe_logicop func, enum pipe_format format);
+
+nir_def *
+nir_color_blend(nir_builder *b, nir_def *src0, nir_def *src1, nir_def *dst,
+                const nir_lower_blend_rt *rt, bool scalar_blend_const);
+
+nir_def *
+nir_color_mask(nir_builder *b, nir_def *src, nir_def *dst, unsigned mask);
+
+bool nir_lower_blend(nir_shader *shader,
                      const nir_lower_blend_options *options);
 
 #endif

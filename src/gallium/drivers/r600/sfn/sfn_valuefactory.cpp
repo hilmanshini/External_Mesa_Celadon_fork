@@ -1,27 +1,7 @@
 /* -*- mesa-c++  -*-
- *
- * Copyright (c) 2021 Collabora LTD
- *
+ * Copyright 2021 Collabora LTD
  * Author: Gert Wollny <gert.wollny@collabora.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include "sfn_valuefactory.h"
@@ -53,37 +33,42 @@ ValueFactory::set_virtual_register_base(int base)
 }
 
 bool
-ValueFactory::allocate_registers(const exec_list *registers)
+ValueFactory::allocate_registers(const nir_intrinsic_instr_alloc& regs)
 {
-   bool has_arrays = false;
    struct array_entry {
       unsigned index;
       unsigned length;
-      unsigned ncomponents;
+      int ncomponents;
 
       bool operator()(const array_entry& a, const array_entry& b) const
       {
-         return a.length < b.length ||
-                (a.length == b.length && a.ncomponents > b.ncomponents);
+         return a.ncomponents < b.ncomponents ||
+               (a.ncomponents == b.ncomponents && a.length < b.length);
       }
    };
 
    using array_list =
       std::priority_queue<array_entry, std::vector<array_entry>, array_entry>;
 
+   std::list<unsigned> non_array;
    array_list arrays;
+   for(auto intr : regs) {
+      unsigned num_elms = nir_intrinsic_num_array_elems(intr);
+      int num_comp = nir_intrinsic_num_components(intr);
+      int bit_size = nir_intrinsic_bit_size(intr);
 
-   foreach_list_typed(nir_register, reg, node, registers)
-   {
-      if (reg->num_array_elems) {
+      if (num_elms > 0 || num_comp > 1 || bit_size > 32) {
          array_entry ae = {
-            reg->index, reg->num_array_elems, reg->bit_size / 32 * reg->num_components};
+            intr->def.index,
+            num_elms ? num_elms : 1,
+            bit_size / 32 * num_comp};
          arrays.push(ae);
-         has_arrays = true;
+      } else {
+         non_array.push_back(intr->def.index);
       }
    }
 
-   int ncomponents = 0;
+   int free_components = 4;
    int sel = m_next_register_index;
    unsigned length = 0;
 
@@ -94,46 +79,39 @@ ValueFactory::allocate_registers(const exec_list *registers)
       /* This is a bit hackish, return an id that encodes the array merge. To
        * make sure that the mapping doesn't go wrong we have to make sure the
        * arrays is longer than the number of instances in this arrays slot */
-      if (a.ncomponents + ncomponents > 4 || a.length > length) {
+      if (a.ncomponents > free_components || a.length > length) {
          sel = m_next_register_index;
-         ncomponents = 0;
-         length = 0;
+         free_components = 4;
+         m_next_register_index += a.length;
       }
 
-      if (ncomponents == 0)
-         m_next_register_index += a.length;
+      uint32_t frac = free_components - a.ncomponents;
 
-      uint32_t frac = ncomponents;
       auto array = new LocalArray(sel, a.ncomponents, a.length, frac);
 
-      for (unsigned i = 0; i < a.ncomponents; ++i) {
+      for (int i = 0; i < a.ncomponents; ++i) {
          RegisterKey key(a.index, i, vp_array);
-         m_channel_counts.inc_count(i);
+         m_channel_counts.inc_count(frac + i, a.length);
          m_registers[key] = array;
          sfn_log << SfnLog::reg << __func__ << ": Allocate array " << key << ":" << *array
                  << "\n";
       }
 
-      ncomponents += a.ncomponents;
+      free_components -= a.ncomponents;
       length = a.length;
    }
 
-   foreach_list_typed(nir_register, reg, node, registers)
-   {
-      if (!reg->num_array_elems) {
-         uint32_t sel = m_next_register_index++;
-         unsigned num_components = reg->num_components * reg->bit_size / 32;
-         for (auto chan = 0u; chan < num_components; ++chan) {
-            RegisterKey key(reg->index, chan, vp_register);
-            m_channel_counts.inc_count(chan);
-            m_registers[key] =
-               new Register(sel, chan, num_components > 1 ? pin_none : pin_free);
-            sfn_log << SfnLog::reg << "allocate register " << key << ":"
-                    << *m_registers[key] << "\n";
-         }
-      }
+   m_required_array_registers = m_next_register_index ? m_next_register_index : 0;
+
+   for (auto index : non_array) {
+      RegisterKey key(index, 0, vp_register);
+      auto chan = m_channel_counts.least_used(0xf);
+      m_registers[key] = new Register(m_next_register_index++,
+                                      chan, pin_free);
+      m_channel_counts.inc_count(chan);
    }
-   return has_arrays;
+
+   return true;
 }
 
 int ValueFactory::new_register_index()
@@ -169,21 +147,31 @@ ValueFactory::allocate_pinned_vec4(int sel, bool is_ssa)
    return retval;
 }
 
-void
-ValueFactory::inject_value(const nir_dest& dest, int chan, PVirtualValue value)
+LocalArray *
+ValueFactory::allocate_pinned_array(int start, int size, int channels)
 {
-   assert(dest.is_ssa);
-   RegisterKey key(dest.ssa.index, chan, vp_ssa);
+   auto array = new LocalArray(start, channels, 4, 0);
+
+   for (int i = 0; i < channels; ++i) {
+      RegisterKey key(start, i, vp_array);
+      m_registers[key] = array;
+   }
+
+   for (auto reg : *array) {
+      reg->set_pin(pin_fully);
+      reg->set_flag(Register::pin_start);
+      reg->set_flag(Register::ssa);
+   }
+   return array;
+}
+
+void
+ValueFactory::inject_value(const nir_def& def, int chan, PVirtualValue value)
+{
+   RegisterKey key(def.index, chan, vp_ssa);
    sfn_log << SfnLog::reg << "Inject value with key " << key << "\n";
    assert(m_values.find(key) == m_values.end());
    m_values[key] = value;
-}
-
-PRegister
-ValueFactory::dest(const nir_alu_dest& dst, int chan, Pin pin_channel, uint8_t chan_mask)
-{
-   sfn_log << SfnLog::reg << "Search (ref) " << &dst << "\n";
-   return dest(dst.dest, chan, pin_channel, chan_mask);
 }
 
 class TranslateRegister : public RegisterVisitor {
@@ -209,46 +197,6 @@ public:
    int m_offset;
    int m_chan;
 };
-
-PRegister
-ValueFactory::resolve_array(nir_register *reg,
-                            nir_src *indirect,
-                            int base_offset,
-                            int chan)
-{
-   PVirtualValue addr = nullptr;
-   auto type = reg->num_array_elems ? vp_array : vp_register;
-   RegisterKey key(reg->index, chan, type);
-   auto ireg = m_registers.find(key);
-   if (ireg == m_registers.end()) {
-      std::cerr << "Key " << key << " not found\n";
-      assert(0);
-   }
-
-   if (reg->num_array_elems) {
-
-      if (indirect)
-         addr = src(*indirect, 0);
-
-      TranslateRegister array_resolution(base_offset, addr, chan);
-
-      ireg->second->accept(array_resolution);
-      assert(array_resolution.m_value);
-      return array_resolution.m_value;
-   } else {
-      return ireg->second;
-   }
-}
-
-PRegister
-ValueFactory::dest(const nir_dest& dst, int chan, Pin pin_channel, uint8_t chan_mask)
-{
-   if (dst.is_ssa) {
-      return dest(dst.ssa, chan, pin_channel, chan_mask);
-   } else {
-      return resolve_array(dst.reg.reg, dst.reg.indirect, dst.reg.base_offset, chan);
-   }
-}
 
 void
 ValueFactory::allocate_const(nir_load_const_instr *load_const)
@@ -314,35 +262,39 @@ ValueFactory::temp_vec4(Pin pin, const RegisterVec4::Swizzle& swizzle)
 }
 
 RegisterVec4
-ValueFactory::dest_vec4(const nir_dest& dst, Pin pin)
+ValueFactory::dest_vec4(const nir_def& def, Pin pin)
 {
    if (pin != pin_group && pin != pin_chgr)
       pin = pin_chan;
-   if (dst.is_ssa) {
-      PRegister x = dest(dst, 0, pin);
-      PRegister y = dest(dst, 1, pin);
-      PRegister z = dest(dst, 2, pin);
-      PRegister w = dest(dst, 3, pin);
-      return RegisterVec4(x, y, z, w, pin);
-   } else {
-      assert(!dst.reg.indirect);
-      PRegister v[4];
-      int sel = -1;
-      for (int i = 0; i < 4; ++i) {
-         RegisterKey key(dst.reg.reg->index, i, vp_register);
-         v[i] = m_registers[key];
-         assert(sel >= 0 || v[i]);
-         if (sel < 0)
-            sel = v[i]->sel();
-
-         if (!v[i]) {
-            v[i] = m_registers[key] = new Register(sel, i, pin_group);
-         }
-      }
-      return RegisterVec4(v[0], v[1], v[2], v[3], pin);
-   }
-   unreachable("unsupported");
+   PRegister x = dest(def, 0, pin);
+   PRegister y = dest(def, 1, pin);
+   PRegister z = dest(def, 2, pin);
+   PRegister w = dest(def, 3, pin);
+   return RegisterVec4(x, y, z, w, pin);
 }
+
+PRegister ValueFactory::addr()
+{
+    if (!m_ar)
+        m_ar = new AddressRegister(AddressRegister::addr);
+    return m_ar;
+}
+
+PRegister ValueFactory::idx_reg(unsigned idx)
+{
+
+    if (idx == 0) {
+        if (!m_idx0)
+            m_idx0 = new AddressRegister(AddressRegister::idx0);
+        return m_idx0;
+    } else {
+        assert(idx == 1);
+        if (!m_idx1)
+            m_idx1 = new AddressRegister(AddressRegister::idx1);
+        return m_idx1;
+    }
+}
+
 
 PVirtualValue
 ValueFactory::src(const nir_alu_src& alu_src, int chan)
@@ -361,16 +313,11 @@ ValueFactory::src(const nir_src& src, int chan)
 {
    sfn_log << SfnLog::reg << "search (ref) " << (void *)&src << "\n";
 
-   if (src.is_ssa) {
-      sfn_log << SfnLog::reg << "search ssa " << src.ssa->index << " c:" << chan
-              << " got ";
-      auto val = ssa_src(*src.ssa, chan);
-      sfn_log << *val << "\n";
-      return val;
-   } else {
-      sfn_log << SfnLog::reg << "search reg " << src.reg.reg->index << "\n";
-      return local_register(src.reg, chan);
-   }
+   sfn_log << SfnLog::reg << "search ssa " << src.ssa->index << " c:" << chan
+           << " got ";
+   auto val = ssa_src(*src.ssa, chan);
+   sfn_log << *val << "\n";
+   return val;
 }
 
 PVirtualValue
@@ -387,7 +334,7 @@ ValueFactory::dummy_dest(unsigned chan)
 }
 
 PRegister
-ValueFactory::dest(const nir_ssa_def& ssa, int chan, Pin pin_channel, uint8_t chan_mask)
+ValueFactory::dest(const nir_def& ssa, int chan, Pin pin_channel, uint8_t chan_mask)
 {
    RegisterKey key(ssa.index, chan, vp_ssa);
 
@@ -405,7 +352,8 @@ ValueFactory::dest(const nir_ssa_def& ssa, int chan, Pin pin_channel, uint8_t ch
       sel = m_next_register_index++;
       sfn_log << SfnLog::reg << "Assign " << sel << " to index " << ssa.index << " in "
               << &m_ssa_index_to_sel << "\n";
-      m_ssa_index_to_sel[ssa.index] = sel;
+      if (pin_channel != pin_free)
+         m_ssa_index_to_sel[ssa.index] = sel;
    }
 
    if (pin_channel == pin_free)
@@ -448,7 +396,7 @@ ValueFactory::undef(int index, int chan)
 }
 
 PVirtualValue
-ValueFactory::ssa_src(const nir_ssa_def& ssa, int chan)
+ValueFactory::ssa_src(const nir_def& ssa, int chan)
 {
    RegisterKey key(ssa.index, chan, vp_ssa);
    sfn_log << SfnLog::reg << "search src with key" << key << "\n";
@@ -461,20 +409,21 @@ ValueFactory::ssa_src(const nir_ssa_def& ssa, int chan)
    if (ival != m_values.end())
       return ival->second;
 
+   RegisterKey rkey(ssa.index, chan, vp_register);
+   sfn_log << SfnLog::reg << "search src with key" << rkey << "\n";
+
+   ireg = m_registers.find(rkey);
+   if (ireg != m_registers.end())
+      return ireg->second;
+
+   RegisterKey array_key(ssa.index, chan, vp_array);
+   sfn_log << SfnLog::reg << "search array with key" << array_key << "\n";
+   auto iarray = m_registers.find(array_key);
+   if (iarray != m_registers.end())
+      return iarray->second;
+
    std::cerr << "Didn't find source with key " << key << "\n";
-   unreachable("Source values should always exist");
-}
-
-PRegister
-ValueFactory::local_register(const nir_reg_dest& dst, int chan)
-{
-   return resolve_array(dst.reg, dst.indirect, dst.base_offset, chan);
-}
-
-PRegister
-ValueFactory::local_register(const nir_reg_src& src, int chan)
-{
-   return resolve_array(src.reg, src.indirect, src.base_offset, chan);
+   UNREACHABLE("Source values should always exist");
 }
 
 PVirtualValue
@@ -512,12 +461,12 @@ ValueFactory::src_vec(const nir_src& source, int components)
 }
 
 std::vector<PRegister, Allocator<PRegister>>
-ValueFactory::dest_vec(const nir_dest& dst, int num_components)
+ValueFactory::dest_vec(const nir_def& def, int num_components)
 {
    std::vector<PRegister, Allocator<PRegister>> retval;
    retval.reserve(num_components);
    for (int i = 0; i < num_components; ++i)
-      retval.push_back(dest(dst, i, num_components > 1 ? pin_none : pin_free));
+      retval.push_back(dest(def, i, num_components > 1 ? pin_none : pin_free));
    return retval;
 }
 
@@ -533,7 +482,7 @@ ValueFactory::src_vec4(const nir_src& source, Pin pin, const RegisterVec4::Swizz
 
    int sel = sx ? sx->sel() : (sy ? sy->sel() : (sz ? sz->sel() : sw ? sw->sel() : -1));
    if (sel < 0)
-      unreachable("source vector without valid components");
+      UNREACHABLE("source vector without valid components");
 
    if (!sx)
       sx = new Register(sel, 7, pin);
@@ -584,7 +533,7 @@ chan_from_char(char chan)
    case '_':
       return 7;
    }
-   unreachable("Unknown swizzle char");
+   UNREACHABLE("Unknown swizzle char");
 }
 
 static int
@@ -637,31 +586,47 @@ split_register_string(const string& s,
          size_str.append(1, s[i]);
          break;
       default:
-         unreachable("Malformed Array allocation string");
+         UNREACHABLE("Malformed Array allocation string");
       }
    }
    return true;
 }
 
 PRegister
-ValueFactory::dest_from_string(const std::string& s)
+ValueFactory::dest_from_string(const std::string& s, int *dest_chan)
 {
-   assert(s.length() >= 4);
-
-   assert(strchr("ARS_", s[0]));
+   if (s == "AR") {
+      if (!m_ar)
+         m_ar = new AddressRegister(AddressRegister::addr);
+      return m_ar;
+   } else if (s == "IDX0") {
+      if (!m_idx0)
+         m_idx0 = new AddressRegister(AddressRegister::idx0);
+      return m_idx0;
+   } else if (s == "IDX1") {
+      if (!m_idx1)
+         m_idx1 = new AddressRegister(AddressRegister::idx1);
+      return m_idx1;
+   }
 
    string index_str;
    string size_str;
    string swizzle_str;
    string pin_str;
 
+   assert(s.length() >= 4);
+
+   assert(strchr("ARS_(", s[0]));
+
    split_register_string(s, index_str, size_str, swizzle_str, pin_str);
 
    int sel = 0;
    if (s[0] == '_') {
       /* Since these instructions still may use or switch to a different
-       * channel we have to create a new instance for each occurance */
-      sel = std::numeric_limits<int>::max() - m_nowrite_idx++;
+       * channel we have to create a new instance for each occurrence */
+      sel = -1;
+   } else if (s[0] == '(') {
+      sel = g_registers_unused;
    } else {
       std::istringstream n(index_str);
       n >> sel;
@@ -681,14 +646,21 @@ ValueFactory::dest_from_string(const std::string& s)
    case '_':
       pool = vp_ignore;
       break;
+   case '(':
    case 'S':
       pool = vp_ssa;
       break;
    default:
-      unreachable("Unknown value type");
+      UNREACHABLE("Unknown value type");
    }
 
    bool is_ssa = s[0] == 'S';
+
+   if (pool == vp_ignore) {
+      assert(dest_chan);
+      *dest_chan = chan;
+      return nullptr;
+   }
 
    RegisterKey key(sel, chan, pool);
 
@@ -713,7 +685,8 @@ ValueFactory::dest_from_string(const std::string& s)
          auto array = static_cast<LocalArray *>(ireg->second);
          PVirtualValue addr = nullptr;
          int offset = 0;
-         if (size_str[0] == 'S' || size_str[0] == 'R') {
+         if (size_str[0] == 'S' || size_str[0] == 'R' ||
+             size_str == "AR" || size_str.substr(0,3) == "IDX") {
             addr = src_from_string(size_str);
          } else {
             istringstream num_str(size_str);
@@ -729,6 +702,17 @@ ValueFactory::dest_from_string(const std::string& s)
 PVirtualValue
 ValueFactory::src_from_string(const std::string& s)
 {
+   if (s == "AR") {
+      assert(m_ar);
+      return m_ar;
+   } else if (s == "IDX0") {
+      assert(m_idx0);
+      return m_idx0;
+   } else if (s == "IDX1") {
+      assert(m_idx1);
+      return m_idx1;
+   }
+
    switch (s[0]) {
    case 'A':
    case 'S':
@@ -737,7 +721,7 @@ ValueFactory::src_from_string(const std::string& s)
    case 'L':
       return LiteralConstant::from_string(s);
    case 'K':
-      return UniformValue::from_string(s);
+      return UniformValue::from_string(s, this);
    case 'P':
       return InlineConstant::param_from_string(s);
    case 'I':
@@ -745,7 +729,7 @@ ValueFactory::src_from_string(const std::string& s)
 
    default:
       std::cerr << "'" << s << "'";
-      unreachable("Unknown register type");
+      UNREACHABLE("Unknown register type");
    }
 
    assert(strchr("ARS_", s[0]));
@@ -783,7 +767,7 @@ ValueFactory::src_from_string(const std::string& s)
       pool = vp_ssa;
       break;
    default:
-      unreachable("Unknown value type");
+      UNREACHABLE("Unknown value type");
    }
 
    RegisterKey key(sel, chan, pool);
@@ -794,7 +778,8 @@ ValueFactory::src_from_string(const std::string& s)
          auto array = static_cast<LocalArray *>(ireg->second);
          PVirtualValue addr = nullptr;
          int offset = 0;
-         if (size_str[0] == 'S' || size_str[0] == 'R') {
+         if (size_str[0] == 'S' || size_str[0] == 'R' ||
+             size_str == "AR" || size_str.substr(0,3) == "IDX") {
             addr = src_from_string(size_str);
          } else {
             istringstream num_str(size_str);
@@ -802,12 +787,19 @@ ValueFactory::src_from_string(const std::string& s)
          }
          return array->element(offset, addr, chan - array->frac());
       } else {
+         auto old_pin = ireg->second->pin();
+         if (old_pin != p) {
+            if ((old_pin == pin_group && p == pin_chgr) ||
+                ((old_pin == pin_free || old_pin == pin_none) &&
+                 (p == pin_chan || p == pin_group)))
+               ireg->second->set_pin(p);
+         }
          return ireg->second;
       }
    } else {
       if (sel != std::numeric_limits<int>::max()) {
          std::cerr << "register " << key << "not found \n";
-         unreachable("Source register should exist");
+         UNREACHABLE("Source register should exist");
       } else {
          auto reg = new Register(sel, chan, p);
          m_registers[key] = reg;
@@ -925,7 +917,7 @@ ValueFactory::array_from_string(const std::string& s)
          size_str.append(1, s[i]);
          break;
       default:
-         unreachable("Malformed Array allocation string");
+         UNREACHABLE("Malformed Array allocation string");
       }
    }
 
@@ -988,14 +980,12 @@ ValueFactory::prepare_live_range_map()
          continue;
 
       if (key.value.pool == vp_array) {
-         if (key.value.chan == 0) {
-            auto array = static_cast<LocalArray *>(reg);
-            for (auto& a : *array) {
-               result.append_register(a);
-            }
+         auto array = static_cast<LocalArray *>(reg);
+         for (auto& a : *array) {
+            result.append_register(a);
          }
       } else {
-         if (reg->chan() < 4)
+         if (reg->chan() < 4 && reg->sel() != g_registers_unused)
             result.append_register(reg);
       }
    }
@@ -1051,7 +1041,8 @@ ValueFactory::get_shader_info(r600_shader *sh_info)
    if (!arrays.empty()) {
 
       sh_info->num_arrays = arrays.size();
-      sh_info->arrays = new r600_shader_array[arrays.size()];
+      sh_info->arrays =
+         (r600_shader_array *)malloc(sizeof(struct r600_shader_array) * arrays.size());
 
       for (auto& arr : arrays) {
          sh_info->arrays->gpr_start = arr->sel();

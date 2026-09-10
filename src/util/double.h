@@ -25,6 +25,7 @@
 #ifndef _DOUBLE_H_
 #define _DOUBLE_H_
 
+#include "u_math.h"
 
 #ifdef __cplusplus
 extern "C" {

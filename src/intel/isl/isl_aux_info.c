@@ -22,6 +22,7 @@
  */
 
 #include "isl/isl.h"
+#include "dev/intel_device_info.h"
 
 #ifdef IN_UNIT_TEST
 /* STATIC_ASSERT is a do { ... } while(0) statement */
@@ -30,8 +31,8 @@ UNUSED static void static_assert_func(void) {
    STATIC_ASSERT(ISL_AUX_STATE_ASSERT == ((enum isl_aux_state) 0));
 }
 
-#undef unreachable
-#define unreachable(str) return 0
+#undef UNREACHABLE
+#define UNREACHABLE(str) return 0
 
 #undef assert
 #define assert(cond) do { \
@@ -53,6 +54,12 @@ enum write_behavior {
     * fast-cleared blocks.
     */
    WRITES_COMPRESS_CLEAR,
+
+   /* Writes using the 3D engine are compressed and potentially update
+    * the contents of the hierarchical depth buffer causing it to end
+    * up in non-passthrough state.
+    */
+   WRITES_COMPRESS_HIZ,
 
    /* Writes implicitly fully resolve the compression block and write the data
     * uncompressed into the main surface. The resolved aux blocks are
@@ -86,13 +93,14 @@ struct aux_usage_info {
 #define x false
 static const struct aux_usage_info info[] = {
 /*         write_behavior c fc pr fra */
-   AUX(         COMPRESS, Y, Y, x, x, HIZ)
-   AUX(         COMPRESS, Y, Y, x, x, HIZ_CCS)
+   AUX(         COMPRESS, Y, x, x, x, ZCS)
+   AUX(     COMPRESS_HIZ, Y, Y, x, x, HIZ)
+   AUX(     COMPRESS_HIZ, Y, Y, x, x, HIZ_CCS)
    AUX(         COMPRESS, Y, Y, x, x, HIZ_CCS_WT)
    AUX(         COMPRESS, Y, Y, Y, x, MCS)
    AUX(         COMPRESS, Y, Y, Y, x, MCS_CCS)
    AUX(         COMPRESS, Y, Y, Y, Y, CCS_E)
-   AUX(   COMPRESS_CLEAR, Y, Y, Y, Y, GFX12_CCS_E)
+   AUX(   COMPRESS_CLEAR, Y, Y, Y, Y, FCV_CCS_E)
    AUX(RESOLVE_AMBIGUATE, x, Y, x, Y, CCS_D)
    AUX(RESOLVE_AMBIGUATE, Y, x, x, Y, MC)
    AUX(         COMPRESS, Y, x, x, Y, STC_CCS)
@@ -111,6 +119,8 @@ aux_state_possible(enum isl_aux_state state,
       return info[usage].fast_clear;
    case ISL_AUX_STATE_COMPRESSED_CLEAR:
       return info[usage].fast_clear && info[usage].compressed;
+   case ISL_AUX_STATE_COMPRESSED_HIER_DEPTH:
+      return info[usage].write_behavior == WRITES_COMPRESS_HIZ;
    case ISL_AUX_STATE_COMPRESSED_NO_CLEAR:
       return info[usage].compressed;
    case ISL_AUX_STATE_RESOLVED:
@@ -123,7 +133,97 @@ aux_state_possible(enum isl_aux_state state,
 #endif
    }
 
-   unreachable("Invalid aux state.");
+   UNREACHABLE("Invalid aux state.");
+}
+
+enum isl_aux_state
+isl_aux_get_initial_state(const struct intel_device_info *devinfo,
+                          enum isl_aux_usage usage,
+                          bool zeroed)
+{
+   switch (usage) {
+   case ISL_AUX_USAGE_HIZ:
+   case ISL_AUX_USAGE_HIZ_CCS:
+   case ISL_AUX_USAGE_HIZ_CCS_WT:
+      if (zeroed && devinfo->ver <= 11) {
+         /* On ICL and prior, fast-clearing a HiZ block fills it with zeroes.
+          * On gfx12+, it is filled with a non-zero value.
+          */
+         return ISL_AUX_STATE_CLEAR;
+      } else {
+         return ISL_AUX_STATE_AUX_INVALID;
+      }
+   case ISL_AUX_USAGE_MCS:
+   case ISL_AUX_USAGE_MCS_CCS:
+      if (zeroed) {
+         /* From the Sky Lake PRM, "Compressed Multisampled Surfaces":
+          *
+          *    "An MCS value of 0x00 indicates that both samples are stored in
+          *    sample slice 0 (thus have the same color). This is the fully
+          *    compressed case."
+          *
+          * This quote is from the 2x MSAA section, but the same mapping
+          * exists for 4-16x MSAA. This state can avoid the need to ambiguate
+          * in some cases.
+          */
+         return ISL_AUX_STATE_COMPRESSED_NO_CLEAR;
+      } else {
+         return ISL_AUX_STATE_AUX_INVALID;
+      }
+   case ISL_AUX_USAGE_CCS_D:
+   case ISL_AUX_USAGE_CCS_E:
+   case ISL_AUX_USAGE_FCV_CCS_E:
+   case ISL_AUX_USAGE_STC_CCS:
+   case ISL_AUX_USAGE_ZCS:
+      if (zeroed) {
+         /* From the Sky Lake PRM, "MCS Buffer for Render Target(s)":
+          *
+          *    "If Software wants to enable Color Compression without Fast
+          *     clear, Software needs to initialize MCS with zeros."
+          *
+          * Although MCS is mentioned, CCS seems to have been intended. This
+          * can be seen in Bspec 14091, in the row containing
+          * WaDisableCCSClearsIfRtCompressionEnabledInGT3.
+          *
+          * A CCS surface initialized to zero is in the pass-through state.
+          * This state can avoid the need to ambiguate in some cases.
+          */
+         return ISL_AUX_STATE_PASS_THROUGH;
+      } else if (devinfo->ver >= 12) {
+         /* From Bspec 47709, "MCS/CCS Buffers for Render Target(s)":
+          *
+          *    "CCS surface does not require initialization. Illegal CCS
+          *     [values] are treated as uncompressed memory."
+          *
+          * The above quote is from the render target section, but we assume
+          * it applies to CCS in general (e.g., STC_CCS). The uninitialized
+          * CCS may be in any aux state. We choose the one which is most
+          * convenient.
+          *
+          * We avoid states with CLEAR because stencil does not support it.
+          * Those states also create a dependency on the clear color, which
+          * can have negative performance implications. Even though some
+          * blocks may actually be encoded with CLEAR, we can get away with
+          * ignoring them - there are no known issues that require fast
+          * cleared blocks to be tracked and avoided.
+          *
+          * We specifically avoid the AUX_INVALID state because it could
+          * trigger an ambiguate. BLORP does not have support for ambiguating
+          * stencil. Also, ambiguating some LODs of mipmapped 8bpp surfaces
+          * seems to stomp on neighboring miplevels.
+          *
+          * There is only one remaining aux state which can give us correct
+          * behavior, COMPRESSED_NO_CLEAR.
+          */
+         return ISL_AUX_STATE_COMPRESSED_NO_CLEAR;
+      } else if (devinfo->ver >= 9) {
+         return ISL_AUX_STATE_AUX_INVALID;
+      } else {
+         UNREACHABLE("Unsupported gfx version");
+      }
+   default:
+      UNREACHABLE("Unsupported aux mode");
+   }
 }
 
 enum isl_aux_op
@@ -133,17 +233,31 @@ isl_aux_prepare_access(enum isl_aux_state initial_state,
 {
    if (usage != ISL_AUX_USAGE_NONE) {
       UNUSED const enum isl_aux_usage state_superset_usage =
-         usage == ISL_AUX_USAGE_CCS_D ? ISL_AUX_USAGE_CCS_E : usage;
+         usage == ISL_AUX_USAGE_CCS_D ? ISL_AUX_USAGE_CCS_E :
+         usage == ISL_AUX_USAGE_HIZ_CCS_WT ? ISL_AUX_USAGE_HIZ_CCS : usage;
       assert(aux_state_possible(initial_state, state_superset_usage));
    }
    assert(!fast_clear_supported || info[usage].fast_clear);
 
    switch (initial_state) {
+   case ISL_AUX_STATE_CLEAR:
+      if (!fast_clear_supported)
+         return info[usage].partial_resolve ?
+                ISL_AUX_OP_PARTIAL_RESOLVE : ISL_AUX_OP_FULL_RESOLVE;
+      else if (usage == ISL_AUX_USAGE_HIZ_CCS_WT)
+         return ISL_AUX_OP_PARTIAL_RESOLVE;
+      else
+         return ISL_AUX_OP_NONE;
+   case ISL_AUX_STATE_COMPRESSED_HIER_DEPTH:
+      if (!fast_clear_supported)
+         return ISL_AUX_OP_FULL_RESOLVE;
+      else if (info[usage].write_behavior != WRITES_COMPRESS_HIZ)
+         return ISL_AUX_OP_PARTIAL_RESOLVE;
+      FALLTHROUGH;
    case ISL_AUX_STATE_COMPRESSED_CLEAR:
       if (!info[usage].compressed)
          return ISL_AUX_OP_FULL_RESOLVE;
       FALLTHROUGH;
-   case ISL_AUX_STATE_CLEAR:
    case ISL_AUX_STATE_PARTIAL_CLEAR:
       return fast_clear_supported ?
                 ISL_AUX_OP_NONE :
@@ -164,7 +278,7 @@ isl_aux_prepare_access(enum isl_aux_state initial_state,
 #endif
    }
 
-   unreachable("Invalid aux state.");
+   UNREACHABLE("Invalid aux state.");
 }
 
 enum isl_aux_state
@@ -183,11 +297,26 @@ isl_aux_state_transition_aux_op(enum isl_aux_state initial_state,
       return ISL_AUX_STATE_CLEAR;
    case ISL_AUX_OP_PARTIAL_RESOLVE:
       assert(isl_aux_state_has_valid_aux(initial_state));
-      assert(info[usage].partial_resolve);
-      return initial_state == ISL_AUX_STATE_CLEAR ||
-             initial_state == ISL_AUX_STATE_PARTIAL_CLEAR ||
-             initial_state == ISL_AUX_STATE_COMPRESSED_CLEAR ?
-             ISL_AUX_STATE_COMPRESSED_NO_CLEAR : initial_state;
+      if (isl_aux_usage_has_hiz(usage)) {
+         assert(initial_state != ISL_AUX_STATE_PARTIAL_CLEAR);
+         if (isl_aux_usage_has_ccs(usage)) {
+            return initial_state == ISL_AUX_STATE_COMPRESSED_HIER_DEPTH ||
+                   initial_state == ISL_AUX_STATE_CLEAR ?
+                   ISL_AUX_STATE_COMPRESSED_CLEAR : initial_state;
+         } else {
+            return initial_state == ISL_AUX_STATE_COMPRESSED_HIER_DEPTH ||
+                   initial_state == ISL_AUX_STATE_COMPRESSED_CLEAR ||
+                   initial_state == ISL_AUX_STATE_COMPRESSED_NO_CLEAR  ||
+                   initial_state == ISL_AUX_STATE_CLEAR ?
+                   ISL_AUX_STATE_RESOLVED : initial_state;
+         }
+      } else {
+         assert(info[usage].partial_resolve);
+         return initial_state == ISL_AUX_STATE_CLEAR ||
+                initial_state == ISL_AUX_STATE_PARTIAL_CLEAR ||
+                initial_state == ISL_AUX_STATE_COMPRESSED_CLEAR ?
+                ISL_AUX_STATE_COMPRESSED_NO_CLEAR : initial_state;
+      }
    case ISL_AUX_OP_FULL_RESOLVE:
       assert(isl_aux_state_has_valid_aux(initial_state));
       return info[usage].full_resolves_ambiguate ||
@@ -201,7 +330,7 @@ isl_aux_state_transition_aux_op(enum isl_aux_state initial_state,
 #endif
    }
 
-   unreachable("Invalid aux op.");
+   UNREACHABLE("Invalid aux op.");
 }
 
 enum isl_aux_state
@@ -220,28 +349,41 @@ isl_aux_state_transition_write(enum isl_aux_state initial_state,
    assert(aux_state_possible(initial_state, usage));
    assert(info[usage].write_behavior == WRITES_COMPRESS ||
           info[usage].write_behavior == WRITES_COMPRESS_CLEAR ||
+          info[usage].write_behavior == WRITES_COMPRESS_HIZ ||
           info[usage].write_behavior == WRITES_RESOLVE_AMBIGUATE);
 
    if (full_surface) {
       return info[usage].write_behavior == WRITES_COMPRESS ?
                 ISL_AUX_STATE_COMPRESSED_NO_CLEAR :
              info[usage].write_behavior == WRITES_COMPRESS_CLEAR ?
-                ISL_AUX_STATE_COMPRESSED_CLEAR : ISL_AUX_STATE_PASS_THROUGH;
+                ISL_AUX_STATE_COMPRESSED_CLEAR :
+             info[usage].write_behavior == WRITES_COMPRESS_HIZ ?
+                ISL_AUX_STATE_COMPRESSED_HIER_DEPTH :
+             ISL_AUX_STATE_PASS_THROUGH;
    }
 
    switch (initial_state) {
    case ISL_AUX_STATE_CLEAR:
    case ISL_AUX_STATE_PARTIAL_CLEAR:
       return info[usage].write_behavior == WRITES_RESOLVE_AMBIGUATE ?
-             ISL_AUX_STATE_PARTIAL_CLEAR : ISL_AUX_STATE_COMPRESSED_CLEAR;
+                ISL_AUX_STATE_PARTIAL_CLEAR :
+             info[usage].write_behavior == WRITES_COMPRESS_HIZ ?
+                ISL_AUX_STATE_COMPRESSED_HIER_DEPTH :
+             ISL_AUX_STATE_COMPRESSED_CLEAR;
    case ISL_AUX_STATE_RESOLVED:
    case ISL_AUX_STATE_PASS_THROUGH:
    case ISL_AUX_STATE_COMPRESSED_NO_CLEAR:
       return info[usage].write_behavior == WRITES_COMPRESS ?
                 ISL_AUX_STATE_COMPRESSED_NO_CLEAR :
              info[usage].write_behavior == WRITES_COMPRESS_CLEAR ?
-                ISL_AUX_STATE_COMPRESSED_CLEAR : initial_state;
+                ISL_AUX_STATE_COMPRESSED_CLEAR :
+             info[usage].write_behavior == WRITES_COMPRESS_HIZ ?
+                ISL_AUX_STATE_COMPRESSED_HIER_DEPTH :
+             initial_state;
    case ISL_AUX_STATE_COMPRESSED_CLEAR:
+      return info[usage].write_behavior == WRITES_COMPRESS_HIZ ?
+                ISL_AUX_STATE_COMPRESSED_HIER_DEPTH : initial_state;
+   case ISL_AUX_STATE_COMPRESSED_HIER_DEPTH:
    case ISL_AUX_STATE_AUX_INVALID:
       return initial_state;
 #ifdef IN_UNIT_TEST
@@ -250,7 +392,7 @@ isl_aux_state_transition_write(enum isl_aux_state initial_state,
 #endif
    }
 
-   unreachable("Invalid aux state.");
+   UNREACHABLE("Invalid aux state.");
 }
 
 bool

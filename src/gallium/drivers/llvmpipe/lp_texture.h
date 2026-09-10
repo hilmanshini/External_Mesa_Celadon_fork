@@ -32,7 +32,8 @@
 #include "pipe/p_state.h"
 #include "util/u_debug.h"
 #include "lp_limits.h"
-#ifdef DEBUG
+#include "util/bitset.h"
+#if MESA_DEBUG
 #include "util/list.h"
 #endif
 
@@ -44,14 +45,21 @@ enum lp_texture_usage
    LP_TEX_USAGE_WRITE_ALL
 };
 
+enum llvmpipe_memory_fd_type
+{
+   LLVMPIPE_MEMORY_FD_TYPE_INVALID,
+   LLVMPIPE_MEMORY_FD_TYPE_ANONYMOUS,
+   LLVMPIPE_MEMORY_FD_TYPE_OPAQUE,
+   LLVMPIPE_MEMORY_FD_TYPE_DMA_BUF,
+};
 
 struct pipe_context;
 struct pipe_screen;
+struct pipe_memory_object;
 struct llvmpipe_context;
 struct llvmpipe_screen;
 
 struct sw_displaytarget;
-
 
 /**
  * llvmpipe subclass of pipe_resource.  A texture, drawing surface,
@@ -87,6 +95,8 @@ struct llvmpipe_resource
     */
    void *tex_data;
 
+   BITSET_WORD *residency;
+
    /**
     * Data for non-texture resources.
     */
@@ -101,9 +111,13 @@ struct llvmpipe_resource
 
    uint64_t size_required;
    uint64_t backing_offset;
+#ifdef HAVE_LIBDRM
+   struct llvmpipe_memory_allocation *dmabuf_alloc;
+#endif
    bool backable;
-   bool imported_memory;
-#ifdef DEBUG
+   struct pipe_memory_object *imported_memory;
+   bool dmabuf;
+#if MESA_DEBUG
    struct list_head list;
 #endif
 };
@@ -112,13 +126,25 @@ struct llvmpipe_resource
 struct llvmpipe_transfer
 {
    struct pipe_transfer base;
+   void *map;
+   struct pipe_box block_box;
 };
 
+struct llvmpipe_memory_allocation
+{
+   int fd;
+   uint64_t offset;
+   void *cpu_addr;
+   uint64_t size;
+   enum llvmpipe_memory_fd_type type;
+   int mem_fd;
+};
 
 struct llvmpipe_memory_object
 {
    struct pipe_memory_object b;
-   struct pipe_memory_allocation *data;
+   struct pipe_reference reference;
+   struct llvmpipe_memory_allocation *mem_alloc;
    uint64_t size;
 };
 
@@ -156,12 +182,12 @@ void llvmpipe_init_screen_resource_funcs(struct pipe_screen *screen);
 void llvmpipe_init_context_resource_funcs(struct pipe_context *pipe);
 
 
-static inline boolean
+static inline bool
 llvmpipe_resource_is_texture(const struct pipe_resource *resource)
 {
    switch (resource->target) {
    case PIPE_BUFFER:
-      return FALSE;
+      return false;
    case PIPE_TEXTURE_1D:
    case PIPE_TEXTURE_1D_ARRAY:
    case PIPE_TEXTURE_2D:
@@ -170,32 +196,32 @@ llvmpipe_resource_is_texture(const struct pipe_resource *resource)
    case PIPE_TEXTURE_3D:
    case PIPE_TEXTURE_CUBE:
    case PIPE_TEXTURE_CUBE_ARRAY:
-      return TRUE;
+      return true;
    default:
       assert(0);
-      return FALSE;
+      return false;
    }
 }
 
 
-static inline boolean
+static inline bool
 llvmpipe_resource_is_1d(const struct pipe_resource *resource)
 {
    switch (resource->target) {
    case PIPE_BUFFER:
    case PIPE_TEXTURE_1D:
    case PIPE_TEXTURE_1D_ARRAY:
-      return TRUE;
+      return true;
    case PIPE_TEXTURE_2D:
    case PIPE_TEXTURE_2D_ARRAY:
    case PIPE_TEXTURE_RECT:
    case PIPE_TEXTURE_3D:
    case PIPE_TEXTURE_CUBE:
    case PIPE_TEXTURE_CUBE_ARRAY:
-      return FALSE;
+      return false;
    default:
       assert(0);
-      return FALSE;
+      return false;
    }
 }
 
@@ -248,7 +274,7 @@ unsigned
 llvmpipe_resource_size(const struct pipe_resource *resource);
 
 
-ubyte *
+uint8_t *
 llvmpipe_get_texture_image_address(struct llvmpipe_resource *lpr,
                                    unsigned face_slice, unsigned level);
 
@@ -279,5 +305,10 @@ llvmpipe_transfer_map_ms(struct pipe_context *pipe,
                          unsigned sample,
                          const struct pipe_box *box,
                          struct pipe_transfer **transfer);
+
+uint32_t
+llvmpipe_get_texel_offset(struct pipe_resource *resource,
+                          uint32_t level, uint32_t x,
+                          uint32_t y, uint32_t z);
 
 #endif /* LP_TEXTURE_H */

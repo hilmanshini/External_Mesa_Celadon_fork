@@ -3,155 +3,177 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <stdint.h>
 #include "compiler/nir/nir_builder.h"
-#include "agx_compiler.h"
+#include "agx_nir.h"
+#include "nir.h"
+#include "nir_intrinsics.h"
+#include "nir_opcodes.h"
 
-/* Results of pattern matching */
 struct match {
-   nir_ssa_scalar base, offset;
-   bool has_offset;
+   nir_scalar base, offset;
    bool sign_extend;
-
-   /* Signed shift. A negative shift indicates that the offset needs ushr
-    * applied. It's cheaper to fold iadd and materialize an extra ushr, than
-    * to leave the iadd untouched, so this is good.
-    */
-   int8_t shift;
+   uint8_t shift;
 };
 
-/* Try to pattern match address calculation */
-static struct match
-match_address(nir_ssa_scalar base, int8_t format_shift)
+static enum pipe_format
+format_for_bitsize(unsigned bitsize)
 {
+   switch (bitsize) {
+   case 8:
+      return PIPE_FORMAT_R8_UINT;
+   case 16:
+      return PIPE_FORMAT_R16_UINT;
+   case 32:
+      return PIPE_FORMAT_R32_UINT;
+   default:
+      UNREACHABLE("should have been lowered");
+   }
+}
+
+static bool
+pass(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_global &&
+       intr->intrinsic != nir_intrinsic_load_global_constant &&
+       intr->intrinsic != nir_intrinsic_global_atomic &&
+       intr->intrinsic != nir_intrinsic_global_atomic_swap &&
+       intr->intrinsic != nir_intrinsic_store_global)
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+
+   unsigned bitsize = intr->intrinsic == nir_intrinsic_store_global
+                         ? nir_src_bit_size(intr->src[0])
+                         : intr->def.bit_size;
+   enum pipe_format format = format_for_bitsize(bitsize);
+   unsigned format_shift = util_logbase2(util_format_get_blocksize(format));
+
+   nir_src *orig_offset = nir_get_io_offset_src(intr);
+   nir_scalar base = nir_scalar_resolved(orig_offset->ssa, 0);
    struct match match = {.base = base};
+   bool shift_must_match =
+      (intr->intrinsic == nir_intrinsic_global_atomic) ||
+      (intr->intrinsic == nir_intrinsic_global_atomic_swap);
+   unsigned max_shift = format_shift + (shift_must_match ? 0 : 2);
 
-   /* All address calculations are iadd at the root */
-   if (!nir_ssa_scalar_is_alu(base) ||
-       nir_ssa_scalar_alu_op(base) != nir_op_iadd)
-      return match;
+   if (nir_scalar_is_alu(base)) {
+      nir_op op = nir_scalar_alu_op(base);
+      if (op == nir_op_ulea_agx || op == nir_op_ilea_agx) {
+         unsigned shift = nir_scalar_as_uint(nir_scalar_chase_alu_src(base, 2));
+         if (shift >= format_shift && shift <= max_shift) {
+            match = (struct match){
+               .base = nir_scalar_chase_alu_src(base, 0),
+               .offset = nir_scalar_chase_alu_src(base, 1),
+               .shift = shift - format_shift,
+               .sign_extend = (op == nir_op_ilea_agx),
+            };
+         }
+      } else if (op == nir_op_iadd) {
+         for (unsigned i = 0; i < 2; ++i) {
+            nir_scalar const_scalar = nir_scalar_chase_alu_src(base, i);
+            if (!nir_scalar_is_const(const_scalar))
+               continue;
 
-   /* Only 64+32 addition is supported, look for an extension */
-   nir_ssa_scalar summands[] = {
-      nir_ssa_scalar_chase_alu_src(base, 0),
-      nir_ssa_scalar_chase_alu_src(base, 1),
-   };
+            /* Put scalar into form (k*2^n), clamping n at the maximum hardware
+             * shift.
+             */
+            int64_t raw_scalar = nir_scalar_as_uint(const_scalar);
+            assert(raw_scalar != 0 && "must have been optimized out");
 
-   for (unsigned i = 0; i < ARRAY_SIZE(summands); ++i) {
-      if (!nir_ssa_scalar_is_alu(summands[i]))
-         continue;
+            uint32_t shift = MIN2(__builtin_ctz(raw_scalar), max_shift);
+            int64_t k = raw_scalar >> shift;
 
-      nir_op op = nir_ssa_scalar_alu_op(summands[i]);
+            /* See if the reduced scalar is from a sign extension. We must have
+             * at least the format shift to avoid underflowing.
+             */
+            if (k > INT32_MAX || k < INT32_MIN || shift < format_shift)
+               break;
 
-      if (op != nir_op_u2u64 && op != nir_op_i2i64)
-         continue;
+            /* Match the constant */
+            match = (struct match){
+               .base = nir_scalar_chase_alu_src(base, 1 - i),
+               .offset = nir_get_scalar(nir_imm_int(b, k), 0),
+               .shift = shift - format_shift,
+               .sign_extend = true,
+            };
 
-      match.base = summands[1 - i];
-      match.offset = nir_ssa_scalar_chase_alu_src(summands[i], 0);
-      match.sign_extend = (op == nir_op_i2i64);
-
-      /* Undo the implicit shift from using as offset */
-      match.shift = -format_shift;
-
-      /* Now try to fold in an ishl from the offset */
-      if (nir_ssa_scalar_is_alu(match.offset) &&
-          nir_ssa_scalar_alu_op(match.offset) == nir_op_ishl) {
-
-         nir_ssa_scalar shifted = nir_ssa_scalar_chase_alu_src(match.offset, 0);
-         nir_ssa_scalar shift = nir_ssa_scalar_chase_alu_src(match.offset, 1);
-
-         if (nir_ssa_scalar_is_const(shift)) {
-            int8_t new_shift = match.shift + nir_ssa_scalar_as_uint(shift);
-
-            /* Only fold in if we wouldn't overflow the lsl field */
-            if (new_shift <= 2) {
-               match.offset = shifted;
-               match.shift = new_shift;
-            }
+            break;
          }
       }
    }
 
-   return match;
-}
+   nir_def *offset = match.offset.def != NULL
+                        ? nir_channel(b, match.offset.def, match.offset.comp)
+                        : nir_imm_int(b, 0);
 
-static bool
-pass(struct nir_builder *b, nir_instr *instr, UNUSED void *data)
-{
-   if (instr->type != nir_instr_type_intrinsic)
-      return false;
+   nir_def *new_base = nir_channel(b, match.base.def, match.base.comp);
 
-   nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-   if (intr->intrinsic != nir_intrinsic_load_global &&
-       intr->intrinsic != nir_intrinsic_load_global_constant &&
-       intr->intrinsic != nir_intrinsic_store_global)
-      return false;
-
-   b->cursor = nir_before_instr(instr);
-
-   unsigned bitsize = intr->intrinsic == nir_intrinsic_store_global
-                         ? nir_src_bit_size(intr->src[0])
-                         : nir_dest_bit_size(intr->dest);
-
-   /* TODO: Handle more sizes */
-   assert(bitsize == 16 || bitsize == 32);
-   enum pipe_format format =
-      bitsize == 32 ? PIPE_FORMAT_R32_UINT : PIPE_FORMAT_R16_UINT;
-
-   unsigned format_shift = util_logbase2(util_format_get_blocksize(format));
-
-   nir_src *orig_offset = nir_get_io_offset_src(intr);
-   nir_ssa_scalar base = nir_ssa_scalar_resolved(orig_offset->ssa, 0);
-   struct match match = match_address(base, format_shift);
-
-   nir_ssa_def *offset =
-      match.offset.def != NULL
-         ? nir_channel(b, match.offset.def, match.offset.comp)
-         : nir_imm_int(b, 0);
-
-   /* If we were unable to fold in the shift, insert a right-shift now to undo
-    * the implicit left shift of the instruction.
-    */
-   if (match.shift < 0) {
-      if (match.sign_extend)
-         offset = nir_ishr_imm(b, offset, -match.shift);
-      else
-         offset = nir_ushr_imm(b, offset, -match.shift);
-
-      match.shift = 0;
-   }
-
-   assert(match.shift >= 0);
-   nir_ssa_def *new_base = nir_channel(b, match.base.def, match.base.comp);
+   nir_def *repl = NULL;
+   bool has_dest = (intr->intrinsic != nir_intrinsic_store_global);
+   unsigned num_components = has_dest ? intr->def.num_components : 0;
+   unsigned bit_size = has_dest ? intr->def.bit_size : 0;
 
    if (intr->intrinsic == nir_intrinsic_load_global) {
-      nir_ssa_def *repl =
-         nir_load_agx(b, nir_dest_num_components(intr->dest),
-                      nir_dest_bit_size(intr->dest), new_base, offset,
+      repl =
+         nir_load_agx(b, num_components, bit_size, new_base, offset,
                       .access = nir_intrinsic_access(intr), .base = match.shift,
                       .format = format, .sign_extend = match.sign_extend);
 
-      nir_ssa_def_rewrite_uses(&intr->dest.ssa, repl);
    } else if (intr->intrinsic == nir_intrinsic_load_global_constant) {
-      nir_ssa_def *repl = nir_load_constant_agx(
-         b, nir_dest_num_components(intr->dest), nir_dest_bit_size(intr->dest),
-         new_base, offset, .access = nir_intrinsic_access(intr),
-         .base = match.shift, .format = format,
+      repl = nir_load_constant_agx(b, num_components, bit_size, new_base,
+                                   offset, .access = nir_intrinsic_access(intr),
+                                   .base = match.shift, .format = format,
+                                   .sign_extend = match.sign_extend);
+   } else if (intr->intrinsic == nir_intrinsic_global_atomic) {
+      repl =
+         nir_global_atomic_agx(b, bit_size, new_base, offset, intr->src[1].ssa,
+                               .atomic_op = nir_intrinsic_atomic_op(intr),
+                               .sign_extend = match.sign_extend);
+   } else if (intr->intrinsic == nir_intrinsic_global_atomic_swap) {
+      repl = nir_global_atomic_swap_agx(
+         b, bit_size, new_base, offset, intr->src[1].ssa, intr->src[2].ssa,
+         .atomic_op = nir_intrinsic_atomic_op(intr),
          .sign_extend = match.sign_extend);
-
-      nir_ssa_def_rewrite_uses(&intr->dest.ssa, repl);
    } else {
       nir_store_agx(b, intr->src[0].ssa, new_base, offset,
                     .access = nir_intrinsic_access(intr), .base = match.shift,
                     .format = format, .sign_extend = match.sign_extend);
    }
 
-   nir_instr_remove(instr);
+   if (repl)
+      nir_def_rewrite_uses(&intr->def, repl);
+
+   nir_instr_remove(&intr->instr);
    return true;
 }
 
 bool
-agx_nir_lower_address(nir_shader *shader)
+agx_nir_lower_address(nir_shader *nir)
 {
-   return nir_shader_instructions_pass(
-      shader, pass, nir_metadata_block_index | nir_metadata_dominance, NULL);
+   bool progress = false;
+
+   /* First, clean up as much as possible. This will make fusing more effective.
+    */
+   do {
+      progress = false;
+      NIR_PASS(progress, nir, agx_nir_cleanup_amul);
+      NIR_PASS(progress, nir, nir_opt_constant_folding);
+      NIR_PASS(progress, nir, nir_opt_dce);
+   } while (progress);
+
+   /* Then, fuse as many lea as possible */
+   NIR_PASS(progress, nir, agx_nir_fuse_lea);
+
+   /* Next, lower load/store using the lea's */
+   NIR_PASS(progress, nir, nir_shader_intrinsics_pass, pass,
+            nir_metadata_control_flow, NULL);
+
+   /* Finally, lower any leftover lea instructions back to ALU to let
+    * nir_opt_algebraic simplify them from here.
+    */
+   NIR_PASS(progress, nir, agx_nir_lower_lea);
+   NIR_PASS(progress, nir, nir_opt_dce);
+
+   return progress;
 }

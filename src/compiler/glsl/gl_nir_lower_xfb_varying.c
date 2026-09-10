@@ -140,11 +140,11 @@ copy_to_new_var(nir_builder *b, nir_deref_instr *deref,
          nir_deref_instr *new_var_m_deref =
             nir_build_deref_array(b, new_var_deref, &c->def);
 
-         nir_ssa_def *value = nir_load_deref(b, m_deref);
+         nir_def *value = nir_load_deref(b, m_deref);
          nir_store_deref(b, new_var_m_deref, value, writemask);
       }
    } else {
-      nir_ssa_def *value = nir_load_deref(b, deref);
+      nir_def *value = nir_load_deref(b, deref);
       nir_store_deref(b, new_var_deref, value, writemask);
    }
 }
@@ -155,17 +155,15 @@ gl_nir_lower_xfb_varying(nir_shader *shader, const char *old_var_name,
 {
    nir_function_impl *impl = nir_shader_get_entrypoint(shader);
 
-   nir_builder b;
-   nir_builder_init(&b, impl);
-   b.cursor = nir_before_block(nir_start_block(impl));
+   nir_builder b = nir_builder_at(nir_before_impl(impl));
 
    nir_deref_instr *deref = NULL;
    const struct glsl_type *type = NULL;
    if (!get_deref(&b, old_var_name, toplevel_var, &deref, &type))
       return NULL;
 
-   nir_variable *new_variable = rzalloc(shader, nir_variable);
-   new_variable->name = generate_new_name(new_variable, old_var_name);
+   nir_variable *new_variable = nir_variable_create_zeroed(shader);
+   new_variable->name = generate_new_name(shader, old_var_name);
    new_variable->type = type;
    new_variable->data.mode = nir_var_shader_out;
    new_variable->data.location = -1;
@@ -184,7 +182,7 @@ gl_nir_lower_xfb_varying(nir_shader *shader, const char *old_var_name,
             b.cursor = nir_before_instr(nir_block_last_instr(block));
             copy_to_new_var(&b, deref, new_var_deref, type);
          } else if (block == nir_impl_last_block(impl)) {
-            b.cursor = nir_after_instr(nir_block_last_instr(block));
+            b.cursor = nir_after_block(block);
             copy_to_new_var(&b, deref, new_var_deref, type);
          }
       } else {

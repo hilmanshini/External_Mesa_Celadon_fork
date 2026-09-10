@@ -32,7 +32,7 @@
 #include "etnaviv_format.h"
 #include "etnaviv_resource.h"
 #include "etnaviv_screen.h"
-#include "etnaviv_surface.h"
+#include "etnaviv_state.h"
 #include "etnaviv_tiling.h"
 #include "etnaviv_translate.h"
 #include "etnaviv_util.h"
@@ -45,7 +45,6 @@
 #include "util/u_memory.h"
 #include "util/u_surface.h"
 
-#include "hw/common.xml.h"
 #include "hw/state.xml.h"
 #include "hw/state_3d.xml.h"
 
@@ -106,10 +105,10 @@ etna_compile_rs_state(struct etna_context *ctx, struct compiled_rs_state *cs,
                           COND(src_super, VIVS_RS_SOURCE_STRIDE_TILING) |
                           COND(src_multi, VIVS_RS_SOURCE_STRIDE_MULTI);
 
-   if (VIV_FEATURE(ctx->screen, chipMinorFeatures6, CACHE128B256BPERLINE))
+   if (VIV_FEATURE(ctx->screen, ETNA_FEATURE_CACHE128B256BPERLINE))
       cs->RS_SOURCE_STRIDE |= VIVS_RS_SOURCE_STRIDE_TS_MODE(rs->source_ts_mode) |
                               COND(src_super, VIVS_RS_SOURCE_STRIDE_SUPER_TILED_NEW);
-   else if ((rs->downsample_x || rs->downsample_y) && VIV_FEATURE(screen, chipMinorFeatures4, SMALL_MSAA))
+   else if ((rs->downsample_x || rs->downsample_y) && VIV_FEATURE(screen, ETNA_FEATURE_SMALL_MSAA))
       cs->RS_SOURCE_STRIDE |= VIVS_RS_SOURCE_STRIDE_TS_MODE(TS_MODE_256B);
 
    /* Initially all pipes are set to the base address of the source and
@@ -132,7 +131,7 @@ etna_compile_rs_state(struct etna_context *ctx, struct compiled_rs_state *cs,
                         COND(dst_super, VIVS_RS_DEST_STRIDE_TILING) |
                         COND(dst_multi, VIVS_RS_DEST_STRIDE_MULTI);
 
-   if (VIV_FEATURE(ctx->screen, chipMinorFeatures6, CACHE128B256BPERLINE))
+   if (VIV_FEATURE(ctx->screen, ETNA_FEATURE_CACHE128B256BPERLINE))
       cs->RS_DEST_STRIDE |= COND(dst_super, VIVS_RS_DEST_STRIDE_SUPER_TILED_NEW);
 
    if (src_multi)
@@ -145,7 +144,7 @@ etna_compile_rs_state(struct etna_context *ctx, struct compiled_rs_state *cs,
                         VIVS_RS_WINDOW_SIZE_HEIGHT(rs->height);
 
    /* use dual pipe mode when required */
-   if (!screen->specs.single_buffer && screen->specs.pixel_pipes == 2 &&
+   if (screen->specs.pe_multitiled &&
        !(rs->height & (rs->downsample_y ? 0xf : 0x7))) {
       cs->RS_WINDOW_SIZE = VIVS_RS_WINDOW_SIZE_WIDTH(rs->width) |
                               VIVS_RS_WINDOW_SIZE_HEIGHT(rs->height / 2);
@@ -175,20 +174,16 @@ etna_compile_rs_state(struct etna_context *ctx, struct compiled_rs_state *cs,
          !rs->swap_rb && !rs->flip &&
          !rs->clear_mode && rs->source_padded_width &&
          !rs->source_ts_compressed) {
-      if (VIV_FEATURE(ctx->screen, chipMinorFeatures6, CACHE128B256BPERLINE))
+      if (VIV_FEATURE(ctx->screen, ETNA_FEATURE_CACHE128B256BPERLINE))
          cs->RS_EXTRA_CONFIG |= VIVS_RS_EXTRA_CONFIG_TS_MODE(rs->source_ts_mode);
       /* Total number of tiles (same as for autodisable) */
       cs->RS_KICKER_INPLACE = rs->tile_count;
    }
    cs->source_ts_valid = rs->source_ts_valid;
-}
+   cs->single_buffer = screen->specs.single_buffer;
 
-/* modify the clear bits value in the compiled RS state */
-static void
-etna_modify_rs_clearbits(struct compiled_rs_state *cs, uint32_t clear_bits)
-{
-   cs->RS_CLEAR_CONTROL &= ~VIVS_RS_CLEAR_CONTROL_BITS__MASK;
-   cs->RS_CLEAR_CONTROL |= VIVS_RS_CLEAR_CONTROL_BITS(clear_bits);
+   if (cs->single_buffer)
+      assert(!src_multi && !dst_multi);
 }
 
 #define EMIT_STATE(state_name, src_value) \
@@ -218,14 +213,16 @@ etna_submit_rs_state(struct etna_context *ctx,
 
    if (cs->RS_KICKER_INPLACE) {
       etna_cmd_stream_reserve(stream, 6);
+      ETNA_CONTEXT_ATOMIC_EMIT(ctx);
       etna_coalesce_start(stream, &coalesce);
       /* 0/1 */ EMIT_STATE(RS_EXTRA_CONFIG, cs->RS_EXTRA_CONFIG);
       /* 2/3 */ EMIT_STATE(RS_SOURCE_STRIDE, cs->RS_SOURCE_STRIDE);
       /* 4/5 */ EMIT_STATE(RS_KICKER_INPLACE, cs->RS_KICKER_INPLACE);
       etna_coalesce_end(stream, &coalesce);
    } else if (screen->specs.pixel_pipes > 1 ||
-              VIV_FEATURE(screen, chipMinorFeatures7, RS_NEW_BASEADDR)) {
+              VIV_FEATURE(screen, ETNA_FEATURE_RS_NEW_BASEADDR)) {
       etna_cmd_stream_reserve(stream, 34); /* worst case - both pipes multi=1 */
+      ETNA_CONTEXT_ATOMIC_EMIT(ctx);
       etna_coalesce_start(stream, &coalesce);
       /* 0/1 */ EMIT_STATE(RS_CONFIG, cs->RS_CONFIG);
       /* 2/3 */ EMIT_STATE(RS_SOURCE_STRIDE, cs->RS_SOURCE_STRIDE);
@@ -253,10 +250,16 @@ etna_submit_rs_state(struct etna_context *ctx,
       /*28   */ EMIT_STATE(RS_FILL_VALUE(2), cs->RS_FILL_VALUE[2]);
       /*29   */ EMIT_STATE(RS_FILL_VALUE(3), cs->RS_FILL_VALUE[3]);
       /*30/31*/ EMIT_STATE(RS_EXTRA_CONFIG, cs->RS_EXTRA_CONFIG);
+
+      if (cs->single_buffer)
+         EMIT_STATE(RS_SINGLE_BUFFER, VIVS_RS_SINGLE_BUFFER_ENABLE);
       /*32/33*/ EMIT_STATE(RS_KICKER, 0xbeebbeeb);
+      if (cs->single_buffer)
+         EMIT_STATE(RS_SINGLE_BUFFER, 0x0);
       etna_coalesce_end(stream, &coalesce);
    } else {
       etna_cmd_stream_reserve(stream, 22);
+      ETNA_CONTEXT_ATOMIC_EMIT(ctx);
       etna_coalesce_start(stream, &coalesce);
       /* 0/1 */ EMIT_STATE(RS_CONFIG, cs->RS_CONFIG);
       /* 2   */ EMIT_STATE_RELOC(RS_SOURCE_ADDR, &cs->source[0]);
@@ -276,18 +279,27 @@ etna_submit_rs_state(struct etna_context *ctx,
       /*20/21*/ EMIT_STATE(RS_KICKER, 0xbeebbeeb);
       etna_coalesce_end(stream, &coalesce);
    }
+
+   if (DBG_ENABLED(ETNA_DBG_DRAW_STALL))
+      etna_stall(stream, SYNC_RECIPIENT_FE, SYNC_RECIPIENT_PE);
 }
 
 /* Generate clear command for a surface (non-fast clear case) */
-void
-etna_rs_gen_clear_surface(struct etna_context *ctx, struct etna_surface *surf,
-                          uint64_t clear_value)
+static void
+etna_rs_gen_clear_cmd(struct etna_context *ctx,
+                      struct pipe_surface *psurf, struct etna_resource *res,
+                      unsigned plane_offset, uint64_t clear_value,
+                      uint32_t clear_bits, struct compiled_rs_state *rs_state)
 {
    ASSERTED struct etna_screen *screen = ctx->screen;
-   struct etna_resource *dst = etna_resource(surf->base.texture);
+   struct etna_resource_level *level = &res->levels[psurf->level];
    uint32_t format;
 
-   switch (util_format_get_blocksizebits(surf->base.format)) {
+   switch (util_format_get_blocksizebits(psurf->format)) {
+   case 8:
+      assert(VIV_FEATURE(screen, ETNA_FEATURE_S8));
+      format = RS_FORMAT_S8;
+      break;
    case 16:
       format = RS_FORMAT_A4R4G4B4;
       break;
@@ -295,71 +307,132 @@ etna_rs_gen_clear_surface(struct etna_context *ctx, struct etna_surface *surf,
       format = RS_FORMAT_A8R8G8B8;
       break;
    case 64:
-      assert(screen->specs.halti >= 2);
+   case 128:
+      assert(screen->info->halti >= 2);
       format = RS_FORMAT_64BPP_CLEAR;
       break;
    default:
-      unreachable("bpp not supported for clear by RS");
+      UNREACHABLE("bpp not supported for clear by RS");
       break;
    }
 
    /* use tiled clear if width is multiple of 16 */
-   bool tiled_clear = (surf->level->padded_width & ETNA_RS_WIDTH_MASK) == 0 &&
-                      (surf->level->padded_height & ETNA_RS_HEIGHT_MASK) == 0;
+   bool tiled_clear = (level->padded_width & ETNA_RS_WIDTH_MASK) == 0 &&
+                      (level->padded_height & ETNA_RS_HEIGHT_MASK) == 0;
 
-   etna_compile_rs_state( ctx, &surf->clear_command, &(struct rs_state) {
+   etna_compile_rs_state(ctx, rs_state, &(struct rs_state) {
       .source_format = format,
       .dest_format = format,
-      .dest = dst->bo,
-      .dest_offset = surf->offset,
-      .dest_stride = surf->level->stride,
-      .dest_padded_height = surf->level->padded_height,
-      .dest_tiling = tiled_clear ? dst->layout : ETNA_LAYOUT_LINEAR,
+      .dest = res->bo,
+      .dest_offset = level->offset + psurf->first_layer * level->layer_stride + plane_offset,
+      .dest_stride = level->stride,
+      .dest_padded_height = level->padded_height,
+      .dest_tiling = tiled_clear ? res->layout : ETNA_LAYOUT_LINEAR,
       .dither = {0xffffffff, 0xffffffff},
-      .width = surf->level->padded_width, /* These must be padded to 16x4 if !LINEAR, otherwise RS will hang */
-      .height = surf->level->padded_height,
+      .width = level->padded_width, /* These must be padded to 16x4 if !LINEAR, otherwise RS will hang */
+      .height = level->padded_height,
       .clear_value = {clear_value, clear_value >> 32, clear_value, clear_value >> 32},
+      .clear_mode = VIVS_RS_CLEAR_CONTROL_MODE_ENABLED1,
+      .clear_bits = clear_bits
+   });
+}
+
+/* Generate TS clear command for a surface (fast clear case) */
+static void
+etna_rs_gen_ts_clear_cmd(struct etna_context *ctx,
+                         struct pipe_surface *psurf, struct etna_resource *res,
+                         struct compiled_rs_state *rs_state)
+{
+   ASSERTED struct etna_screen *screen = ctx->screen;
+   struct etna_resource_level *level = &res->levels[psurf->level];
+
+   etna_compile_rs_state(ctx, rs_state, &(struct rs_state) {
+      .source_format = RS_FORMAT_A8R8G8B8,
+      .dest_format = RS_FORMAT_A8R8G8B8,
+      .dest = res->ts_bo,
+      .dest_offset = level->ts_offset,
+      .dest_stride = 0x40,
+      .dest_tiling = ETNA_LAYOUT_TILED,
+      .dither = {0xffffffff, 0xffffffff},
+      .width = 16,
+      .height = align(level->ts_layer_stride / 0x40, 4),
+      .clear_value = {screen->specs.ts_clear_value},
       .clear_mode = VIVS_RS_CLEAR_CONTROL_MODE_ENABLED1,
       .clear_bits = 0xffff
    });
 }
 
 static void
-etna_blit_clear_color_rs(struct pipe_context *pctx, struct pipe_surface *dst,
-                      const union pipe_color_union *color)
+etna_blit_clear_color_rs(struct pipe_context *pctx, unsigned idx,
+                      const union pipe_color_union *color, bool use_ts)
 {
    struct etna_context *ctx = etna_context(pctx);
-   struct etna_surface *surf = etna_surface(dst);
-   uint64_t new_clear_value = etna_clear_blit_pack_rgba(surf->base.format, color);
+   struct pipe_surface *dst = &ctx->framebuffer_s.base.cbufs[idx];
+   struct etna_resource *dst_res = etna_resource_get_render_compatible(pctx, dst->texture);
+   struct etna_resource_level *dst_level = &dst_res->levels[dst->level];
+   uint64_t new_clear_value = etna_clear_blit_pack_rgba(dst->format, color);
+   struct compiled_rs_state rs_state;
 
-   if (surf->level->ts_size) { /* TS: use precompiled clear command */
-      ctx->framebuffer.TS_COLOR_CLEAR_VALUE = new_clear_value;
-      ctx->framebuffer.TS_COLOR_CLEAR_VALUE_EXT = new_clear_value >> 32;
+   if (use_ts && dst_level->ts_size) {
+      if (idx == 0) {
+         ctx->framebuffer.TS_COLOR_CLEAR_VALUE = new_clear_value;
+         ctx->framebuffer.TS_COLOR_CLEAR_VALUE_EXT = new_clear_value >> 32;
+      } else {
+         ctx->framebuffer.RT_TS_COLOR_CLEAR_VALUE[idx - 1] = new_clear_value;
+         ctx->framebuffer.RT_TS_COLOR_CLEAR_VALUE_EXT[idx - 1] = new_clear_value >> 32;
+      }
 
-      if (VIV_FEATURE(ctx->screen, chipMinorFeatures1, AUTO_DISABLE)) {
+      if (VIV_FEATURE(ctx->screen, ETNA_FEATURE_AUTO_DISABLE)) {
          /* Set number of color tiles to be filled */
          etna_set_state(ctx->stream, VIVS_TS_COLOR_AUTO_DISABLE_COUNT,
-                        surf->level->padded_width * surf->level->padded_height / 16);
+                        dst_level->padded_width * dst_level->padded_height / 16);
          ctx->framebuffer.TS_MEM_CONFIG |= VIVS_TS_MEM_CONFIG_COLOR_AUTO_DISABLE;
       }
 
       /* update clear color in SW meta area of the buffer if TS is exported */
-      if (unlikely(new_clear_value != surf->level->clear_value &&
+      if (unlikely(new_clear_value != dst_level->clear_value &&
           etna_resource_ext_ts(etna_resource(dst->texture))))
-         etna_resource(dst->texture)->ts_meta->v0.clear_value = new_clear_value;
+         dst_level->ts_meta->v0.clear_value = new_clear_value;
 
-      surf->level->ts_valid = true;
-      ctx->dirty |= ETNA_DIRTY_TS | ETNA_DIRTY_DERIVE_TS;
-   } else if (unlikely(new_clear_value != surf->level->clear_value)) { /* Queue normal RS clear for non-TS surfaces */
-      /* If clear color changed, re-generate stored command */
-      etna_rs_gen_clear_surface(ctx, surf, new_clear_value);
+      etna_rs_gen_ts_clear_cmd(ctx, dst, dst_res, &rs_state);
+
+      etna_resource_level_ts_mark_valid(dst_level);
+      etna_resource_level_mark_unflushed(dst_level);
+      ctx->dirty |= ETNA_DIRTY_TS;
+   } else { /* Queue normal RS clear for non-TS surfaces */
+      if (format_is_128bit(dst->format)) {
+         const uint64_t rg = (uint64_t)color->ui[1] << 32 | color->ui[0];
+         const uint64_t ba = (uint64_t)color->ui[3] << 32 | color->ui[2];
+
+         etna_rs_gen_clear_cmd(ctx, dst, dst_res, 0, rg, 0xffff, &rs_state);
+         etna_submit_rs_state(ctx, &rs_state);
+
+         /* Consecutive RS clears need a flush in between, like the GC600
+          * hang workaround in etna_clear_rs(..). The blob brackets every RS
+          * operation this way. */
+         etna_set_state(ctx->stream, VIVS_GL_FLUSH_CACHE,
+                        VIVS_GL_FLUSH_CACHE_COLOR | VIVS_GL_FLUSH_CACHE_DEPTH);
+         etna_stall(ctx->stream, SYNC_RECIPIENT_RA, SYNC_RECIPIENT_PE);
+
+         etna_rs_gen_clear_cmd(ctx, dst, dst_res,
+                               etna_resource_level_second_plane_offset(dst_level),
+                               ba, 0xffff, &rs_state);
+      } else {
+         etna_rs_gen_clear_cmd(ctx, dst, dst_res, 0, new_clear_value, 0xffff, &rs_state);
+      }
+
+      etna_resource_level_ts_mark_invalid(dst_level);
    }
 
-   etna_submit_rs_state(ctx, &surf->clear_command);
+   etna_submit_rs_state(ctx, &rs_state);
 
-   surf->level->clear_value = new_clear_value;
-   resource_written(ctx, surf->base.texture);
-   etna_resource(surf->base.texture)->seqno++;
+   if (dst->texture->bind & PIPE_BIND_SAMPLER_VIEW)
+      ctx->dirty |= ETNA_DIRTY_TEXTURE_CACHES;
+
+   ctx->dirty |= ETNA_DIRTY_DERIVE_TS;
+   dst_level->clear_value = new_clear_value;
+   resource_written(ctx, &dst_res->base);
+   etna_resource_level_mark_changed(dst_level);
 }
 
 static void
@@ -367,17 +440,19 @@ etna_blit_clear_zs_rs(struct pipe_context *pctx, struct pipe_surface *dst,
                    unsigned buffers, double depth, unsigned stencil)
 {
    struct etna_context *ctx = etna_context(pctx);
-   struct etna_surface *surf = etna_surface(dst);
-   uint32_t new_clear_value = translate_clear_depth_stencil(surf->base.format, depth, stencil);
+   struct etna_resource *dst_res = etna_resource_get_render_compatible(pctx, dst->texture);
+   struct etna_resource_level *dst_level = &dst_res->levels[dst->level];
+   uint32_t new_clear_value = translate_clear_depth_stencil(dst->format, depth, stencil);
    uint32_t new_clear_bits = 0, clear_bits_depth, clear_bits_stencil;
+   struct compiled_rs_state rs_state;
 
    /* Get the channels to clear */
-   switch (surf->base.format) {
+   switch (dst->format) {
    case PIPE_FORMAT_Z16_UNORM:
+   case PIPE_FORMAT_X8Z24_UNORM:
       clear_bits_depth = 0xffff;
       clear_bits_stencil = 0;
       break;
-   case PIPE_FORMAT_X8Z24_UNORM:
    case PIPE_FORMAT_S8_UINT_Z24_UNORM:
       clear_bits_depth = 0xeeee;
       clear_bits_stencil = 0x1111;
@@ -391,45 +466,54 @@ etna_blit_clear_zs_rs(struct pipe_context *pctx, struct pipe_surface *dst,
       new_clear_bits |= clear_bits_depth;
    if (buffers & PIPE_CLEAR_STENCIL)
       new_clear_bits |= clear_bits_stencil;
-   /* FIXME: when tile status is enabled, this becomes more complex as
-    * we may separately clear the depth from the stencil.  In this case,
-    * we want to resolve the surface, and avoid using the tile status.
-    * We may be better off recording the pending clear operation,
-    * delaying the actual clear to the first use.  This way, we can merge
-    * consecutive clears together. */
-   if (surf->level->ts_size) { /* TS: use precompiled clear command */
+
+   if (dst_level->ts_size && new_clear_bits == 0xffff) {
       /* Set new clear depth value */
       ctx->framebuffer.TS_DEPTH_CLEAR_VALUE = new_clear_value;
-      if (VIV_FEATURE(ctx->screen, chipMinorFeatures1, AUTO_DISABLE)) {
+      if (VIV_FEATURE(ctx->screen, ETNA_FEATURE_AUTO_DISABLE)) {
          /* Set number of depth tiles to be filled */
          etna_set_state(ctx->stream, VIVS_TS_DEPTH_AUTO_DISABLE_COUNT,
-                        surf->level->padded_width * surf->level->padded_height / 16);
+                        dst_level->padded_width * dst_level->padded_height / 16);
          ctx->framebuffer.TS_MEM_CONFIG |= VIVS_TS_MEM_CONFIG_DEPTH_AUTO_DISABLE;
       }
 
-      surf->level->ts_valid = true;
-      ctx->dirty |= ETNA_DIRTY_TS | ETNA_DIRTY_DERIVE_TS;
-   } else {
-      if (unlikely(new_clear_value != surf->level->clear_value)) { /* Queue normal RS clear for non-TS surfaces */
-         /* If clear depth value changed, re-generate stored command */
-         etna_rs_gen_clear_surface(ctx, surf, new_clear_value);
-      }
-      /* Update the channels to be cleared */
-      etna_modify_rs_clearbits(&surf->clear_command, new_clear_bits);
+      etna_rs_gen_ts_clear_cmd(ctx, dst, dst_res, &rs_state);
+
+      etna_resource_level_ts_mark_valid(dst_level);
+      etna_resource_level_mark_unflushed(dst_level);
+      ctx->dirty |= ETNA_DIRTY_TS;
+   } else { /* Queue normal RS clear for non-TS surfaces */
+      /* If the level has valid TS state we need to flush it, as the regular
+       * clear will not update the state and we must therefore invalidate it. */
+      etna_copy_resource(pctx, &dst_res->base, &dst_res->base,
+                         dst->level, dst->level, false);
+
+      etna_rs_gen_clear_cmd(ctx, dst, dst_res, 0, new_clear_value, new_clear_bits, &rs_state);
+
+      etna_resource_level_ts_mark_invalid(dst_level);
    }
 
-   etna_submit_rs_state(ctx, &surf->clear_command);
+   etna_submit_rs_state(ctx, &rs_state);
 
-   surf->level->clear_value = new_clear_value;
-   resource_written(ctx, surf->base.texture);
-   etna_resource(surf->base.texture)->seqno++;
+   dst_level->clear_value = new_clear_value;
+   resource_written(ctx, &dst_res->base);
+   etna_resource_level_mark_changed(dst_level);
+   ctx->dirty |= ETNA_DIRTY_DERIVE_TS;
+
+   if (dst->texture->bind & PIPE_BIND_SAMPLER_VIEW)
+      ctx->dirty |= ETNA_DIRTY_TEXTURE_CACHES;
 }
 
 static void
-etna_clear_rs(struct pipe_context *pctx, unsigned buffers, const struct pipe_scissor_state *scissor_state,
+etna_clear_rs(struct pipe_context *pctx, unsigned buffers,
+           uint32_t color_clear_mask, uint8_t stencil_clear_mask,
+           const struct pipe_scissor_state *scissor_state,
            const union pipe_color_union *color, double depth, unsigned stencil)
 {
    struct etna_context *ctx = etna_context(pctx);
+
+   if (!etna_render_condition_check(pctx))
+      return;
 
    /* Flush color and depth cache before clearing anything.
     * This is especially important when coming from another surface, as
@@ -440,16 +524,24 @@ etna_clear_rs(struct pipe_context *pctx, unsigned buffers, const struct pipe_sci
    /* Preparation: Flush the TS if needed. This must be done after flushing
     * color and depth, otherwise it can result in crashes */
    bool need_ts_flush = false;
-   if ((buffers & PIPE_CLEAR_COLOR) && ctx->framebuffer_s.nr_cbufs) {
-      struct etna_surface *surf = etna_surface(ctx->framebuffer_s.cbufs[0]);
+   if (buffers & PIPE_CLEAR_COLOR) {
+      for (int idx = 0; idx < ctx->framebuffer_s.base.nr_cbufs; ++idx) {
+         struct pipe_surface *psurf = &ctx->framebuffer_s.base.cbufs[idx];
 
-      if (surf->level->ts_size)
-         need_ts_flush = true;
+         if (!psurf->texture)
+            continue;
+
+         if (!(buffers & (PIPE_CLEAR_COLOR0 << idx)))
+            continue;
+
+         if (etna_resource_get_render_compatible(pctx, psurf->texture)->levels[psurf->level].ts_size)
+            need_ts_flush = true;
+      }
    }
-   if ((buffers & PIPE_CLEAR_DEPTHSTENCIL) && ctx->framebuffer_s.zsbuf != NULL) {
-      struct etna_surface *surf = etna_surface(ctx->framebuffer_s.zsbuf);
+   if ((buffers & PIPE_CLEAR_DEPTHSTENCIL) && ctx->framebuffer_s.base.zsbuf.texture != NULL) {
+      struct pipe_surface *psurf = &ctx->framebuffer_s.base.zsbuf;
 
-      if (surf->level->ts_size)
+      if (etna_resource_get_render_compatible(pctx, psurf->texture)->levels[psurf->level].ts_size)
          need_ts_flush = true;
    }
 
@@ -460,14 +552,21 @@ etna_clear_rs(struct pipe_context *pctx, unsigned buffers, const struct pipe_sci
     * resolve and copy) do not require the TS state.
     */
    if (buffers & PIPE_CLEAR_COLOR) {
-      for (int idx = 0; idx < ctx->framebuffer_s.nr_cbufs; ++idx) {
-         struct etna_surface *surf = etna_surface(ctx->framebuffer_s.cbufs[idx]);
+      const bool use_ts = etna_use_ts_for_mrt(ctx->screen, &ctx->framebuffer_s.base);
 
-         etna_blit_clear_color_rs(pctx, ctx->framebuffer_s.cbufs[idx],
-                               &color[idx]);
+      for (int idx = 0; idx < ctx->framebuffer_s.base.nr_cbufs; ++idx) {
+         struct pipe_surface *psurf = &ctx->framebuffer_s.base.cbufs[idx];
 
-         if (!etna_resource(surf->prsc)->explicit_flush)
-            etna_context_add_flush_resource(ctx, surf->prsc);
+         if (!psurf->texture)
+            continue;
+
+         if (!(buffers & (PIPE_CLEAR_COLOR0 << idx)))
+            continue;
+
+         etna_blit_clear_color_rs(pctx, idx, color, use_ts);
+
+         if (!etna_resource(psurf->texture)->explicit_flush)
+            etna_context_add_flush_resource(ctx, psurf->texture);
       }
    }
 
@@ -477,8 +576,9 @@ etna_clear_rs(struct pipe_context *pctx, unsigned buffers, const struct pipe_sci
       etna_set_state(ctx->stream, VIVS_GL_FLUSH_CACHE,
                      VIVS_GL_FLUSH_CACHE_COLOR | VIVS_GL_FLUSH_CACHE_DEPTH);
 
-   if ((buffers & PIPE_CLEAR_DEPTHSTENCIL) && ctx->framebuffer_s.zsbuf != NULL)
-      etna_blit_clear_zs_rs(pctx, ctx->framebuffer_s.zsbuf, buffers, depth, stencil);
+   if ((buffers & PIPE_CLEAR_DEPTHSTENCIL) &&
+       ctx->framebuffer_s.base.zsbuf.texture != NULL)
+      etna_blit_clear_zs_rs(pctx, &ctx->framebuffer_s.base.zsbuf, buffers, depth, stencil);
 
    etna_stall(ctx->stream, SYNC_RECIPIENT_RA, SYNC_RECIPIENT_PE);
 }
@@ -552,18 +652,17 @@ etna_compute_tileoffset(const struct pipe_box *box, enum pipe_format format,
       offset = (y & ~0x3f) * stride + blocksize * ((x & ~0x3f) << 6);
       break;
    default:
-      unreachable("invalid resource layout");
+      UNREACHABLE("invalid resource layout");
    }
 
    return offset;
 }
 
 static inline void
-etna_get_rs_alignment_mask(const struct etna_context *ctx,
+etna_get_rs_alignment_mask(const struct etna_screen *screen,
                            const enum etna_surface_layout layout,
                            unsigned int *width_mask, unsigned int *height_mask)
 {
-   struct etna_screen *screen = ctx->screen;
    unsigned int h_align, w_align;
 
    if (layout & ETNA_LAYOUT_BIT_SUPER) {
@@ -578,30 +677,6 @@ etna_get_rs_alignment_mask(const struct etna_context *ctx,
    *height_mask = h_align -1;
 }
 
-static bool msaa_config(const struct pipe_resource *src,
-                        const struct pipe_resource *dst,
-                        int *msaa_xscale,
-                        int *msaa_yscale)
-{
-   int src_xscale = 1, src_yscale = 1;
-   int dst_xscale = 1, dst_yscale = 1;
-
-   assert(src->nr_samples <= 4);
-   assert(dst->nr_samples <= 4);
-
-   translate_samples_to_xyscale(src->nr_samples, &src_xscale, &src_yscale);
-   translate_samples_to_xyscale(dst->nr_samples, &dst_xscale, &dst_yscale);
-
-   /* RS does not support upscaling */
-   if ((src_xscale < dst_xscale) || (src_yscale < dst_yscale))
-      return false;
-
-   *msaa_xscale = src_xscale - dst_xscale + 1;
-   *msaa_yscale = src_yscale - dst_yscale + 1;
-
-   return true;
-}
-
 static bool
 etna_try_rs_blit(struct pipe_context *pctx,
                  const struct pipe_blit_info *blit_info)
@@ -610,16 +685,29 @@ etna_try_rs_blit(struct pipe_context *pctx,
    struct etna_resource *src = etna_resource(blit_info->src.resource);
    struct etna_resource *dst = etna_resource(blit_info->dst.resource);
    struct compiled_rs_state copy_to_screen;
-   int msaa_xscale = 1, msaa_yscale = 1;
+   int src_xscale, src_yscale, dst_xscale, dst_yscale;
+   bool downsample_x = false, downsample_y = false;
 
    /* Ensure that the level is valid */
    assert(blit_info->src.level <= src->base.last_level);
    assert(blit_info->dst.level <= dst->base.last_level);
 
-   if (!msaa_config(&src->base, &dst->base, &msaa_xscale, &msaa_yscale)) {
-      DBG("upsampling not supported");
+   if (!translate_samples_to_xyscale(src->base.nr_samples, &src_xscale, &src_yscale))
+      return false;
+   if (!translate_samples_to_xyscale(dst->base.nr_samples, &dst_xscale, &dst_yscale))
+      return false;
+
+   /* RS does not support upscaling */
+   if ((src_xscale < dst_xscale) || (src_yscale < dst_yscale)) {
+      DBG("upscaling requested: source %dx%d destination %dx%d",
+          src_xscale, src_yscale, dst_xscale, dst_yscale);
       return false;
    }
+
+   if (src_xscale > dst_xscale)
+      downsample_x = true;
+   if (src_yscale > dst_yscale)
+      downsample_y = true;
 
    /* The width/height are in pixels; they do not change as a result of
     * multi-sampling. So, when blitting from a 4x multisampled surface
@@ -645,20 +733,27 @@ etna_try_rs_blit(struct pipe_context *pctx,
     *  - fail if swizzle needed
     *  - avoid trying to convert between float/int formats?
     */
-   if (blit_info->src.format != blit_info->dst.format)
+   if (blit_info->src.format != blit_info->dst.format) {
+      DBG("non matching formats: %s vs %s",
+          util_format_short_name(blit_info->src.format),
+          util_format_short_name(blit_info->dst.format));
       return false;
+   }
 
    /* try to find a exact format match first */
    uint32_t format = translate_rs_format(blit_info->dst.format);
    /* When not resolving MSAA, but only doing a layout conversion, we can get
     * away with a fallback format of matching size.
     */
-   if (format == ETNA_NO_MATCH && msaa_xscale == 1 && msaa_yscale == 1)
+   if (format == ETNA_NO_MATCH && !downsample_x && !downsample_y)
       format = etna_compatible_rs_format(blit_info->dst.format);
-   if (format == ETNA_NO_MATCH)
+   if (format == ETNA_NO_MATCH) {
+      DBG("format not supported: %s", util_format_short_name(blit_info->dst.format));
       return false;
+   }
 
    if (blit_info->scissor_enable ||
+       blit_info->swizzle_enable ||
        blit_info->dst.box.depth != blit_info->src.box.depth ||
        blit_info->dst.box.depth != 1) {
       return false;
@@ -666,21 +761,29 @@ etna_try_rs_blit(struct pipe_context *pctx,
 
    unsigned w_mask, h_mask;
 
-   etna_get_rs_alignment_mask(ctx, src->layout, &w_mask, &h_mask);
-   if ((blit_info->src.box.x & w_mask) || (blit_info->src.box.y & h_mask))
+   etna_get_rs_alignment_mask(ctx->screen, src->layout, &w_mask, &h_mask);
+   if ((blit_info->src.box.x & w_mask) || (blit_info->src.box.y & h_mask)) {
+      DBG("src x/y not properly aligned: %d %d",
+          blit_info->src.box.x,
+          blit_info->src.box.y);
       return false;
+   }
 
-   etna_get_rs_alignment_mask(ctx, dst->layout, &w_mask, &h_mask);
-   if ((blit_info->dst.box.x & w_mask) || (blit_info->dst.box.y & h_mask))
+   etna_get_rs_alignment_mask(ctx->screen, dst->layout, &w_mask, &h_mask);
+   if ((blit_info->dst.box.x & w_mask) || (blit_info->dst.box.y & h_mask)) {
+      DBG("dst x/y not properly aligned: %d %d",
+          blit_info->src.box.x,
+          blit_info->src.box.y);
       return false;
+   }
 
    struct etna_resource_level *src_lev = &src->levels[blit_info->src.level];
    struct etna_resource_level *dst_lev = &dst->levels[blit_info->dst.level];
 
    /* we may be given coordinates up to the padded width to avoid
     * any alignment issues with different tiling formats */
-   assert((blit_info->src.box.x + blit_info->src.box.width) * msaa_xscale <= src_lev->padded_width);
-   assert((blit_info->src.box.y + blit_info->src.box.height) * msaa_yscale <= src_lev->padded_height);
+   assert((blit_info->src.box.x + blit_info->src.box.width) * src_xscale <= src_lev->padded_width);
+   assert((blit_info->src.box.y + blit_info->src.box.height) * src_yscale <= src_lev->padded_height);
    assert(blit_info->dst.box.x + blit_info->dst.box.width <= dst_lev->padded_width);
    assert(blit_info->dst.box.y + blit_info->dst.box.height <= dst_lev->padded_height);
 
@@ -706,57 +809,59 @@ etna_try_rs_blit(struct pipe_context *pctx,
    /* If the width is not aligned to the RS width, but is within our
     * padding, adjust the width to suite the RS width restriction.
     * Note: the RS width/height are converted to source samples here. */
-   unsigned int width = blit_info->src.box.width * msaa_xscale;
-   unsigned int height = blit_info->src.box.height * msaa_yscale;
-   unsigned int w_align = (ETNA_RS_WIDTH_MASK + 1) * msaa_xscale;
-   unsigned int h_align = (ETNA_RS_HEIGHT_MASK + 1) * msaa_yscale;
+   unsigned int width = blit_info->src.box.width * src_xscale;
+   unsigned int height = blit_info->src.box.height * src_yscale;
+   unsigned int w_align = (ETNA_RS_WIDTH_MASK + 1) * src_xscale;
+   unsigned int h_align = (ETNA_RS_HEIGHT_MASK + 1) * src_yscale;
 
-   if (width & (w_align - 1) && width >= src_lev->width * msaa_xscale && width >= dst_lev->width)
+   if (width & (w_align - 1) && width >= src_lev->width * src_xscale && width >= dst_lev->width)
       width = align(width, w_align);
 
-   if (height & (h_align - 1) && height >= src_lev->height * msaa_yscale && height >= dst_lev->height) {
-      if (!ctx->screen->specs.single_buffer &&
-          align(height, h_align * ctx->screen->specs.pixel_pipes) <=
-          dst_lev->padded_height * msaa_yscale)
-         height = align(height, h_align * ctx->screen->specs.pixel_pipes);
-      else
-         height = align(height, h_align);
+   if (height & (h_align - 1) && height >= src_lev->height * src_yscale && height >= dst_lev->height) {
+      height = align(height, h_align);
+
+      /* Try to increase alignment to multi-pipe requirements to unlock
+       * multi-pipe resolve for increased performance. */
+      if (!ctx->screen->specs.single_buffer) {
+          unsigned int pipe_align = align(height, h_align * ctx->screen->specs.pixel_pipes);
+
+          if (pipe_align <= src_lev->padded_height &&
+              pipe_align <= dst_lev->padded_height * src_yscale)
+             height = pipe_align;
+      }
    }
 
    /* The padded dimensions are in samples */
    if (width > src_lev->padded_width ||
-       width > dst_lev->padded_width * msaa_xscale ||
+       width > dst_lev->padded_width * src_xscale ||
        height > src_lev->padded_height ||
-       height > dst_lev->padded_height * msaa_yscale ||
+       height > dst_lev->padded_height * src_yscale ||
        width & (w_align - 1) || height & (h_align - 1))
       goto manual;
 
-   /* Always flush color and depth cache together before resolving. This works
-    * around artifacts that appear in some cases when scanning out a texture
-    * directly after it has been rendered to, such as rendering an animated web
-    * page in a QtWebEngine based WebView on GC2000. The artifacts look like
-    * the texture sampler samples zeroes instead of texture data in a small,
-    * irregular triangle in the lower right of each browser tile quad. Other
-    * attempts to avoid these artifacts, including a pipeline stall before the
-    * color flush or a TS cache flush afterwards, or flushing multiple times,
-    * with stalls before and after each flush, have shown no effect. */
-   if (src->base.bind & PIPE_BIND_RENDER_TARGET ||
-       src->base.bind & PIPE_BIND_DEPTH_STENCIL) {
-      etna_set_state(ctx->stream, VIVS_GL_FLUSH_CACHE,
-		     VIVS_GL_FLUSH_CACHE_COLOR | VIVS_GL_FLUSH_CACHE_DEPTH);
-      etna_stall(ctx->stream, SYNC_RECIPIENT_RA, SYNC_RECIPIENT_PE);
+   /* Flush destination, as the blit will invalidate any pending TS changes. */
+   if (dst != src && etna_resource_level_needs_flush(dst_lev))
+      etna_copy_resource(pctx, &dst->base, &dst->base,
+                         blit_info->dst.level, blit_info->dst.level,
+                         false);
 
-      if (src_lev->ts_size && src_lev->ts_valid)
-         etna_set_state(ctx->stream, VIVS_TS_FLUSH_CACHE, VIVS_TS_FLUSH_CACHE_FLUSH);
-   }
+   /* Always flush color and depth cache together before resolving. This makes
+    * sure that all previous cache content written by the PE is flushed out
+    * before RS uses the pixel pipes, which invalidates those caches. */
+   etna_set_state(ctx->stream, VIVS_GL_FLUSH_CACHE,
+                  VIVS_GL_FLUSH_CACHE_COLOR | VIVS_GL_FLUSH_CACHE_DEPTH);
+   etna_stall(ctx->stream, SYNC_RECIPIENT_RA, SYNC_RECIPIENT_PE);
 
    /* Set up color TS to source surface before blit, if needed */
    bool source_ts_valid = false;
-   if (src_lev->ts_size && src_lev->ts_valid) {
+   if (etna_resource_level_ts_valid(src_lev)) {
       struct etna_reloc reloc;
       unsigned ts_offset =
          src_lev->ts_offset + blit_info->src.box.z * src_lev->ts_layer_stride;
       uint32_t ts_mem_config = 0;
+
+      /* flush TS cache before changing to another TS configuration */
+      etna_set_state(ctx->stream, VIVS_TS_FLUSH_CACHE, VIVS_TS_FLUSH_CACHE_FLUSH);
 
       if (src_lev->ts_compress_fmt >= 0) {
          ts_mem_config |= VIVS_TS_MEM_CONFIG_COLOR_COMPRESSION |
@@ -806,9 +911,14 @@ etna_try_rs_blit(struct pipe_context *pctx,
       .dest_offset = dst_offset,
       .dest_stride = dst_lev->stride,
       .dest_padded_height = dst_lev->padded_height,
-      .downsample_x = msaa_xscale > 1,
-      .downsample_y = msaa_yscale > 1,
-      .swap_rb = translate_rb_src_dst_swap(src->base.format, dst->base.format),
+      .downsample_x = downsample_x,
+      .downsample_y = downsample_y,
+      /* Swap R<->B when requested by the caller (shared resource flush) or
+       * for transfer blits of RB_SWAP formats on non-shared resources. */
+      .swap_rb = ctx->blit_rb_swap ||
+                 (ctx->in_transfer_blit &&
+                  translate_pe_format_rb_swap(blit_info->src.format) &&
+                  !src->shared && !dst->shared),
       .dither = {0xffffffff, 0xffffffff}, // XXX dither when going from 24 to 16 bit?
       .clear_mode = VIVS_RS_CLEAR_CONTROL_MODE_DISABLED,
       .width = width,
@@ -821,21 +931,76 @@ etna_try_rs_blit(struct pipe_context *pctx,
    etna_submit_rs_state(ctx, &copy_to_screen);
    resource_read(ctx, &src->base);
    resource_written(ctx, &dst->base);
-   dst->seqno++;
-   dst_lev->ts_valid = false;
+   etna_resource_level_mark_changed(dst_lev);
+
+   /* We don't need to mark the TS as invalid if this was just a flush without
+    * compression, as in that case only clear tiles are filled and the tile
+    * status still matches the blit target buffer. For compressed formats the
+    * tiles are decompressed, so tile status doesn't match anymore.
+    */
+   if (src != dst || src_lev->ts_compress_fmt >= 0)
+      etna_resource_level_ts_mark_invalid(dst_lev);
+
    ctx->dirty |= ETNA_DIRTY_DERIVE_TS;
 
    return true;
 
 manual:
    if (src->layout == ETNA_LAYOUT_TILED && dst->layout == ETNA_LAYOUT_TILED) {
-      if ((etna_resource_status(ctx, src) & ETNA_PENDING_WRITE) ||
-          (etna_resource_status(ctx, dst) & ETNA_PENDING_WRITE))
-         pctx->flush(pctx, NULL, 0);
+      if ((etna_resource_status(ctx, &src->base) & ETNA_PENDING_WRITE) ||
+          (etna_resource_status(ctx, &dst->base) & ETNA_PENDING_WRITE))
+         etna_flush(pctx, NULL, 0, true);
+
+      perf_debug_ctx(ctx, "RS blit falls back to sw");
+
       return etna_manual_blit(dst, dst_lev, dst_offset, src, src_lev, src_offset, blit_info);
    }
 
    return false;
+}
+
+static void
+etna_emit_yuv_tiler_state_rs(struct etna_context *ctx, struct etna_yuv_config *config)
+{
+   struct etna_cmd_stream *stream = ctx->stream;
+
+   etna_set_state(stream, VIVS_YUV_CONFIG,
+                  VIVS_YUV_CONFIG_SOURCE_FORMAT(config->format) | VIVS_YUV_CONFIG_ENABLE);
+   etna_set_state(stream, VIVS_YUV_WINDOW_SIZE,
+                  VIVS_YUV_WINDOW_SIZE_HEIGHT(config->height) |
+                  VIVS_YUV_WINDOW_SIZE_WIDTH(config->width));
+
+   etna_yuv_emit_plane(ctx, config->planes[0], ETNA_PENDING_READ, VIVS_YUV_Y_BASE, VIVS_YUV_Y_STRIDE);
+   etna_yuv_emit_plane(ctx, config->planes[1], ETNA_PENDING_READ, VIVS_YUV_U_BASE, VIVS_YUV_U_STRIDE);
+   etna_yuv_emit_plane(ctx, config->planes[2], ETNA_PENDING_READ, VIVS_YUV_V_BASE, VIVS_YUV_V_STRIDE);
+   etna_yuv_emit_plane(ctx, config->dst, ETNA_PENDING_WRITE, VIVS_YUV_DEST_BASE, VIVS_YUV_DEST_STRIDE);
+
+   /* configure RS */
+   etna_set_state(stream, VIVS_RS_SOURCE_STRIDE, 0);
+   etna_set_state(stream, VIVS_RS_CLEAR_CONTROL, 0);
+
+   /* trigger resolve */
+   etna_set_state(stream,  VIVS_RS_KICKER, 0xbadabeeb);
+
+   /* disable yuv tiller */
+   etna_set_state(stream, VIVS_YUV_CONFIG, 0x0);
+}
+
+void
+etna_align_box_for_rs(const struct etna_screen *screen,
+                      const struct etna_resource *rsc,
+                      struct pipe_box *box)
+{
+   unsigned w_align, h_align;
+
+   etna_get_rs_alignment_mask(screen, rsc->layout, &w_align, &h_align);
+
+   box->width += box->x & w_align;
+   box->x = box->x & ~w_align;
+   box->width = align(box->width, (ETNA_RS_WIDTH_MASK + 1));
+   box->height += box->y & h_align;
+   box->y = box->y & ~h_align;
+   box->height = align(box->height, ETNA_RS_HEIGHT_MASK + 1);
 }
 
 void
@@ -846,4 +1011,5 @@ etna_clear_blit_rs_init(struct pipe_context *pctx)
    DBG("etnaviv: Using RS blit engine");
    pctx->clear = etna_clear_rs;
    ctx->blit = etna_try_rs_blit;
+   ctx->emit_yuv_tiler_state = etna_emit_yuv_tiler_state_rs;
 }

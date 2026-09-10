@@ -2,25 +2,7 @@ CopyRight = '''
 /*
  * Copyright 2015-2019 Advanced Micro Devices, Inc.
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE.
- *
+ * SPDX-License-Identifier: MIT
  */
 '''
 
@@ -65,10 +47,10 @@ class StringTable:
 
         return idx
 
-    def emit(self, filp, name, static=True):
+    def emit(self, filp, name):
         """
         Write
-        [static] const char name[] = "...";
+        [extern] const char name[] = "...";
         to filp.
         """
         fragments = [
@@ -79,11 +61,15 @@ class StringTable:
             )
             for te in self.table
         ]
-        filp.write('%sconst char %s[] = {\n%s\n};\n' % (
-            'static ' if static else '',
+
+        filp.write('#ifdef SID_TABLE_IMPLEMENTATION\n')
+        filp.write('const char %s[] = {\n%s\n};\n' % (
             name,
             '\n'.join('\t' + fragment for fragment in fragments)
         ))
+        filp.write('#else // SID_TABLE_IMPLEMENTATION\n')
+        filp.write('extern const char %s[];\n' % ( name ))
+        filp.write('#endif // SID_TABLE_IMPLEMENTATION\n')
 
 class IntTable:
     """
@@ -121,7 +107,7 @@ class IntTable:
     def emit(self, filp, name, static=True):
         """
         Write
-        [static] const typename name[] = { ... };
+        [extern] const typename name[] = { ... };
         to filp.
         """
         idxs = sorted(self.idxs) + [len(self.table)]
@@ -134,11 +120,16 @@ class IntTable:
             for i in range(len(idxs) - 1)
         ]
 
-        filp.write('%sconst %s %s[] = {\n%s\n};\n' % (
-            'static ' if static else '',
+        filp.write('#ifdef SID_TABLE_IMPLEMENTATION\n')
+        filp.write('const %s %s[] = {\n%s\n};\n' % (
             self.typename, name,
             '\n'.join(fragments)
         ))
+        filp.write('extern const %s %s[];\n' % (
+            self.typename, name
+        ))
+        filp.write('#else // SID_TABLE_IMPLEMENTATION\n')
+        filp.write('#endif // SID_TABLE_IMPLEMENTATION\n')
 
 class Field:
     def __init__(self, name, bits):
@@ -216,7 +207,8 @@ class FieldTable:
         """
         idxs = sorted(self.idxs) + [len(self.table)]
 
-        filp.write('static const struct si_field sid_fields_table[] = {\n')
+        filp.write('#ifdef SID_TABLE_IMPLEMENTATION\n')
+        filp.write('const struct si_field sid_fields_table[] = {\n')
 
         for start, end in zip(idxs, idxs[1:]):
             filp.write('\t/* %s */\n' % (start))
@@ -224,6 +216,9 @@ class FieldTable:
                 filp.write('\t%s,\n' % (field.format(string_table, idx_table)))
 
         filp.write('};\n')
+        filp.write('#else // SID_TABLE_IMPLEMENTATION\n')
+        filp.write('extern const struct si_field sid_fields_table[];\n')
+        filp.write('#endif // SID_TABLE_IMPLEMENTATION\n')
 
 
 def parse_packet3(filp):
@@ -279,10 +274,12 @@ struct si_packet3 {
 };
 ''')
 
-        out('static const struct si_packet3 packet3_table[] = {')
+        out('#ifdef SID_TABLE_IMPLEMENTATION\n')
+        out('const struct si_packet3 packet3_table[] = {')
         for pkt in packets:
             out('\t{%s, %s},' % (self.__strings.add(pkt[5:]), pkt))
         out('};')
+        out('const unsigned packet3_table_size = %d;' % len(packets))
         out()
 
         regmaps_by_chip = defaultdict(list)
@@ -298,7 +295,7 @@ struct si_packet3 {
             regmaps = regmaps_by_chip[chip]
             regmaps.sort(key=lambda regmap: (regmap.map.to, regmap.map.at))
 
-            out('static const struct si_reg {chip}_reg_table[] = {{'.format(**locals()))
+            out('const struct si_reg {chip}_reg_table[] = {{'.format(**locals()))
 
             for regmap in regmaps:
                 if hasattr(regmap, 'type_ref'):
@@ -326,6 +323,15 @@ struct si_packet3 {
                           .format(self.__strings.add(regmap.name), **locals()))
 
             out('};\n')
+            out('const unsigned %s_reg_table_size = %d;' % (chip, len(regmaps)))
+
+        out('#else // SID_TABLE_IMPLEMENTATION\n')
+        out('extern const struct si_packet3 packet3_table[];')
+        out('extern const unsigned packet3_table_size;')
+        for chip in sorted(regmaps_by_chip.keys()):
+            out('extern const struct si_reg {chip}_reg_table[];'.format(**locals()))
+            out('extern const unsigned {chip}_reg_table_size;'.format(**locals()))
+        out('#endif // SID_TABLE_IMPLEMENTATION\n')
 
         self.__fields.emit(file, self.__strings, self.__strings_offsets)
 

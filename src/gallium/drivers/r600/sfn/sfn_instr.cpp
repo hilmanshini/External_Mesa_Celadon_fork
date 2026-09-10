@@ -1,27 +1,7 @@
 /* -*- mesa-c++  -*-
- *
- * Copyright (c) 2021 Collabora LTD
- *
+ * Copyright 2021 Collabora LTD
  * Author: Gert Wollny <gert.wollny@collabora.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include "sfn_instr_alugroup.h"
@@ -43,7 +23,6 @@ using std::string;
 using std::vector;
 
 Instr::Instr():
-    m_use_count(0),
     m_block_id(std::numeric_limits<int>::max()),
     m_index(std::numeric_limits<int>::max())
 {
@@ -60,23 +39,36 @@ Instr::print(std::ostream& os) const
 bool
 Instr::ready() const
 {
+   if (is_scheduled())
+      return true;
    for (auto& i : m_required_instr)
       if (!i->ready())
          return false;
    return do_ready();
 }
 
-int
-int_from_string_with_prefix(const std::string& str, const std::string& prefix)
+bool
+int_from_string_with_prefix_optional(const std::string& str,
+                                     const std::string& prefix,
+                                     int& value)
 {
    if (str.substr(0, prefix.length()) != prefix) {
-      std::cerr << "Expect '" << prefix << "' as start of '" << str << "'\n";
-      assert(0);
+      return false;
    }
 
    std::stringstream help(str.substr(prefix.length()));
-   int retval;
-   help >> retval;
+   help >> value;
+   return true;
+}
+
+int
+int_from_string_with_prefix(const std::string& str, const std::string& prefix)
+{
+   int retval = 0;
+   if (!int_from_string_with_prefix_optional(str, prefix, retval)) {
+      std::cerr << "Expect '" << prefix << "' as start of '" << str << "'\n";
+      assert(0);
+   }
    return retval;
 }
 
@@ -128,7 +120,7 @@ sel_and_szw_from_string(const std::string& str, RegisterVec4::Swizzle& swz, bool
          swz[i] = 7;
          break;
       default:
-         unreachable("Unknown swizzle character");
+         UNREACHABLE("Unknown swizzle character");
       }
       ++istr;
       ++i;
@@ -214,7 +206,7 @@ InstrWithVectorResult::InstrWithVectorResult(const RegisterVec4& dest,
                                              const RegisterVec4::Swizzle& dest_swizzle,
                                              int resource_base,
                                              PRegister resource_offset):
-    InstrWithResource(resource_base, resource_offset),
+    Resource(this, resource_base, resource_offset),
     m_dest(dest),
     m_dest_swizzle(dest_swizzle)
 {
@@ -252,7 +244,10 @@ Block::do_print(std::ostream& os) const
 {
    for (int j = 0; j < 2 * m_nesting_depth; ++j)
       os << ' ';
-   os << "BLOCK START\n";
+   os << "BLOCK START ";
+   if (m_cf_start)
+      os << *m_cf_start;
+   os << "\n";
    for (auto& i : m_instructions) {
       for (int j = 0; j < 2 * (m_nesting_depth + i->nesting_corr()) + 2; ++j)
          os << ' ';
@@ -294,16 +289,37 @@ Block::erase(iterator node)
 }
 
 void
-Block::set_type(Type t)
+Block::set_type(Type t, r600_chip_class chip_class)
 {
-   m_blocK_type = t;
+   m_block_type = t;
    switch (t) {
    case vtx:
-   case gds:
-   case tex:
+      /* In theory on >= EG VTX support 16 slots, but with vertex fetch
+       * instructions the register pressure increases fast - i.e. in the worst
+       * case four register more get used, so stick to 8 slots for now.
+       * TODO: think about some trickery in the schedler to make use of up
+       * to 16 slots if the register pressure doesn't get too high.
+       */
       m_remaining_slots = 8;
-      break; /* TODO: 16 for >= EVERGREEN */
+      m_cf_start =
+         new ControlFlowInstr(chip_class >= ISA_CC_CAYMAN ? ControlFlowInstr::cf_tex
+                                                          : ControlFlowInstr::cf_vtx);
+      break;
+   case gds:
+      m_cf_start = new ControlFlowInstr(ControlFlowInstr::cf_gds);
+      m_remaining_slots = chip_class >= ISA_CC_EVERGREEN ? 16 : 8;
+      break;
+   case tex:
+      m_cf_start = new ControlFlowInstr(ControlFlowInstr::cf_tex);
+      m_remaining_slots = chip_class >= ISA_CC_EVERGREEN ? 16 : 8;
+      break;
+   case alu:
+      m_cf_start = new ControlFlowInstr(ControlFlowInstr::cf_alu);
+      /* 128 but a follow up block might need to emit and ADDR + INDEX load */
+      m_remaining_slots = 118;
+      break;
    default:
+      m_cf_start = nullptr;
       m_remaining_slots = 0xffff;
    }
 }
@@ -342,8 +358,15 @@ Block::push_back(PInst instr)
    m_instructions.push_back(instr);
 }
 
-bool
-Block::try_reserve_kcache(const AluGroup& group)
+Block::iterator
+Block::insert(const iterator pos, Instr *instr)
+{
+   return m_instructions.insert(pos, instr);
+}
+
+auto
+Block::try_reserve_kcache(const AluGroup& group) const
+   -> std::pair<std::array<KCacheLine, 4>, bool>
 {
    auto kcache = m_kcache;
 
@@ -352,18 +375,40 @@ Block::try_reserve_kcache(const AluGroup& group)
       auto u = kc->as_uniform();
       assert(u);
       if (!try_reserve_kcache(*u, kcache)) {
-         m_kcache_alloc_failed = true;
-         return false;
+         return {kcache, false};
       }
    }
 
-   m_kcache = kcache;
-   m_kcache_alloc_failed = false;
+   return {kcache, true};
+}
+
+bool
+Block::update_kcache_reservation(const AluGroup& group)
+{
+   auto [kcache, success] = try_reserve_kcache(group);
+
+   if (!success)
+      return false;
+
+   commit_kcache_reservation(kcache);
    return true;
 }
 
 bool
-Block::try_reserve_kcache(const AluInstr& instr)
+Block::kcache_needs_extended() const
+{
+   for (unsigned i = 0; i < s_max_kcache_banks; ++i) {
+      if (m_kcache[i].mode) {
+         if (i > 2 || m_kcache[i].index_mode)
+            return true;
+      }
+   }
+   return false;
+}
+
+auto
+Block::try_reserve_kcache(const AluInstr& instr) const
+   -> std::pair<std::array<KCacheLine, 4>, bool>
 {
    auto kcache = m_kcache;
 
@@ -371,14 +416,29 @@ Block::try_reserve_kcache(const AluInstr& instr)
       auto u = src->as_uniform();
       if (u) {
          if (!try_reserve_kcache(*u, kcache)) {
-            m_kcache_alloc_failed = true;
-            return false;
+            return {kcache, false};
          }
       }
    }
-   m_kcache = kcache;
-   m_kcache_alloc_failed = false;
+   return {kcache, true};
+}
+
+bool
+Block::update_kcache_reservation(const AluInstr& instr)
+{
+   auto [kcache, success] = try_reserve_kcache(instr);
+
+   if (!success)
+      return false;
+
+   commit_kcache_reservation(kcache);
    return true;
+}
+
+void
+Block::commit_kcache_reservation(const std::array<KCacheLine, 4>& kcache)
+{
+   m_kcache = kcache;
 }
 
 void
@@ -395,30 +455,43 @@ unsigned Block::s_max_kcache_banks = 4;
 bool
 Block::try_reserve_kcache(const UniformValue& u, std::array<KCacheLine, 4>& kcache) const
 {
-   const int kcache_banks = s_max_kcache_banks; // TODO: handle pre-evergreen
 
    int bank = u.kcache_bank();
    int sel = (u.sel() - 512);
    int line = sel >> 4;
+   EBufferIndexMode index_mode = bim_none;
+
+   if (auto addr = u.buf_addr()) {
+      /* No indirect addressing with only two kcache banks (since this also
+       * means, we can't emit ALU_EXTENDED */
+      index_mode = addr->sel() == AddressRegister::idx0 ?  bim_zero : bim_one;
+   }
 
    bool found = false;
 
-   for (int i = 0; i < kcache_banks && !found; ++i) {
+   for (unsigned i = 0; i < s_max_kcache_banks && !found; ++i) {
       if (kcache[i].mode) {
          if (kcache[i].bank < bank)
             continue;
 
+
+         if (kcache[i].bank == bank &&
+             kcache[i].index_mode != bim_none &&
+             kcache[i].index_mode != index_mode) {
+            return false;
+         }
          if ((kcache[i].bank == bank && kcache[i].addr > line + 1) ||
              kcache[i].bank > bank) {
-            if (kcache[kcache_banks - 1].mode)
+            if (kcache[s_max_kcache_banks - 1].mode)
                return false;
 
             memmove(&kcache[i + 1],
                     &kcache[i],
-                    (kcache_banks - i - 1) * sizeof(KCacheLine));
+                    (s_max_kcache_banks - i - 1) * sizeof(KCacheLine));
             kcache[i].mode = KCacheLine::lock_1;
             kcache[i].bank = bank;
             kcache[i].addr = line;
+            kcache[i].index_mode = index_mode;
             return true;
          }
 
@@ -449,6 +522,7 @@ Block::try_reserve_kcache(const UniformValue& u, std::array<KCacheLine, 4>& kcac
          kcache[i].mode = KCacheLine::lock_1;
          kcache[i].bank = bank;
          kcache[i].addr = line;
+         kcache[i].index_mode = index_mode;
          return true;
       }
    }
@@ -472,10 +546,24 @@ Block::lds_group_end()
 }
 
 InstrWithVectorResult::InstrWithVectorResult(const InstrWithVectorResult& orig):
-    InstrWithResource(orig),
+    Resource(orig),
     m_dest(orig.m_dest),
     m_dest_swizzle(orig.m_dest_swizzle)
 {
+}
+
+void InstrWithVectorResult::update_indirect_addr(UNUSED PRegister old_reg, PRegister addr)
+{
+   set_resource_offset(addr);
+}
+
+void
+InstrWithVectorResult::pin_registers()
+{
+   for (int i = 0; i < 4; ++i) {
+      if (m_dest[i]->chan() < 4)
+         m_dest[i]->set_pin(pin_chgr);
+   }
 }
 
 class InstrComparer : public ConstInstrVisitor {
@@ -494,7 +582,7 @@ public:
       result = this_##TYPE->is_equal_to(instr);                                          \
    }                                                                                     \
                                                                                          \
-   const TYPE *this_##TYPE{nullptr};
+   const TYPE *this_##TYPE { nullptr }
 
    DECLARE_MEMBER(AluInstr);
    DECLARE_MEMBER(AluGroup);

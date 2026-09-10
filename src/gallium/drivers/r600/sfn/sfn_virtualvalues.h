@@ -1,27 +1,7 @@
 /* -*- mesa-c++  -*-
- *
- * Copyright (c) 2021 Collabora LTD
- *
+ * Copyright 2021 Collabora LTD
  * Author: Gert Wollny <gert.wollny@collabora.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #pragma once
@@ -45,7 +25,7 @@
 #else
 #define ASSERT_OR_THROW(EXPR, ERROR)                                                     \
    if (!(EXPR))                                                                          \
-   unreachable(ERROR)
+   UNREACHABLE(ERROR)
 #endif
 
 namespace r600 {
@@ -70,16 +50,13 @@ class Instr;
 class InlineConstant;
 class LiteralConstant;
 class UniformValue;
+class ValueFactory;
 
 using InstructionSet = std::set<Instr *, std::less<Instr *>, Allocator<Instr *>>;
 
 class VirtualValue : public Allocate {
 public:
    static const uint32_t virtual_register_base = 1024;
-   static const uint32_t clause_temp_registers = 2;
-   static const uint32_t gpr_register_end = 128 - 2 * clause_temp_registers;
-   static const uint32_t clause_temp_register_begin = gpr_register_end;
-   static const uint32_t clause_temp_register_end = 128;
 
    static const uint32_t uniforms_begin = 512;
    static const uint32_t uniforms_end = 640;
@@ -163,6 +140,7 @@ public:
       ssa,
       pin_start,
       pin_end,
+      addr_or_idx,
       flag_count
    };
 
@@ -186,6 +164,9 @@ public:
    void del_use(Instr *instr);
    bool has_uses() const { return !m_uses.empty() || pin() == pin_array; }
    void set_chan(int c) { do_set_chan(c); }
+   void pin_to_chan();
+
+   bool can_switch_to_chan(int c);
 
    virtual VirtualValue *addr() const { return nullptr; }
 
@@ -222,6 +203,23 @@ private:
    std::bitset<flag_count> m_flags{0};
 };
 using PRegister = Register::Pointer;
+
+class AddressRegister : public Register {
+public:
+   enum Type {
+      addr,
+      idx0 = 1,
+      idx1 = 2
+   };
+   AddressRegister(Type type) :  Register(type, 0, pin_fully) {
+      set_flag(addr_or_idx);
+   }
+
+protected:
+   void do_set_chan(UNUSED int c) { UNREACHABLE("Address registers must have chan 0");}
+   void set_sel_internal(UNUSED int sel) {UNREACHABLE("Address registers don't support sel override");}
+};
+
 
 inline std::ostream&
 operator<<(std::ostream& os, const Register& val)
@@ -288,7 +286,6 @@ public:
       void set_value(PRegister reg) { m_value = reg; }
 
    private:
-      const RegisterVec4& m_parent;
       PRegister m_value;
    };
 
@@ -387,10 +384,11 @@ public:
    void print(std::ostream& os) const override;
    int kcache_bank() const { return m_kcache_bank; }
    PVirtualValue buf_addr() const;
+   void set_buf_addr(PVirtualValue addr);
    UniformValue *as_uniform() override { return this; }
 
    bool equal_buf_and_cache(const UniformValue& other) const;
-   static Pointer from_string(const std::string& s);
+   static Pointer from_string(const std::string& s, ValueFactory *factory);
 
 private:
    int m_kcache_bank;
@@ -424,12 +422,16 @@ public:
    uint32_t nchannels() const;
    uint32_t frac() const { return m_frac; }
 
-   void add_parent_to_elements(Instr *instr);
+   void add_parent_to_elements(int chan, Instr *instr);
 
    const Register& operator()(size_t idx, size_t chan) const;
 
    Values::iterator begin() { return m_values.begin(); }
    Values::iterator end() { return m_values.end(); }
+   Values::const_iterator begin() const { return m_values.begin(); }
+   Values::const_iterator end() const { return m_values.end(); }
+
+   uint32_t base_sel() const { return m_base_sel;}
 
 private:
    uint32_t m_base_sel;
@@ -460,6 +462,7 @@ public:
    bool ready(int block, int index) const override;
 
    VirtualValue *addr() const override;
+   void set_addr(PRegister addr); 
    const LocalArray& array() const;
 
 private:

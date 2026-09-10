@@ -1,37 +1,54 @@
 /* -*- mesa-c++  -*-
- *
- * Copyright (c) 2022 Collabora LTD
- *
+ * Copyright 2022 Collabora LTD
  * Author: Gert Wollny <gert.wollny@collabora.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include "sfn_ra.h"
 
+#include "sfn_alu_defines.h"
 #include "sfn_debug.h"
 
 #include <cassert>
 #include <queue>
 
 namespace r600 {
+
+class ComponentInterference {
+public:
+   using Row = std::vector<int>;
+
+   void prepare_row(int row);
+
+   void add(size_t idx1, size_t idx2);
+
+   auto row(int idx) const -> const Row&
+   {
+      assert((size_t)idx < m_rows.size());
+      return m_rows[idx];
+   }
+
+private:
+   std::vector<Row> m_rows;
+};
+
+class Interference {
+public:
+   Interference(LiveRangeMap& map);
+
+   const auto& row(int comp, int index) const
+   {
+      assert(comp < 4);
+      return m_components_maps[comp].row(index);
+   }
+
+private:
+   void initialize();
+   void initialize(ComponentInterference& comp, LiveRangeMap::ChannelLiveRange& clr);
+
+   LiveRangeMap& m_map;
+   std::array<ComponentInterference, 4> m_components_maps;
+};
 
 void
 ComponentInterference::prepare_row(int row)
@@ -71,7 +88,7 @@ Interference::initialize(ComponentInterference& comp_interference,
       comp_interference.prepare_row(row);
       for (size_t col = 0; col < row; ++col) {
          auto& col_entry = clr[col];
-         if (row_entry.m_end >= col_entry.m_start && row_entry.m_start <= col_entry.m_end)
+         if (row_entry.m_end > col_entry.m_start && row_entry.m_start < col_entry.m_end)
             comp_interference.add(row, col);
       }
    }
@@ -113,7 +130,7 @@ group_allocation(LiveRangeMap& lrm,
       if (group.priority > 0)
          color = 0;
 
-      while (color < 124) {
+      while (color < g_registers_end) {
          /* Find the coloring for the first channel */
          bool color_in_use = false;
          int comp = start_comp;
@@ -180,7 +197,7 @@ group_allocation(LiveRangeMap& lrm,
          break;
       }
 
-      if (color == 124)
+      if (color == g_registers_end)
          return false;
    }
 
@@ -193,7 +210,7 @@ scalar_allocation(LiveRangeMap& lrm, const Interference& interference)
    for (int comp = 0; comp < 4; ++comp) {
       auto& live_ranges = lrm.component(comp);
       for (auto& r : live_ranges) {
-         if (r.m_color != -1)
+         if (r.m_color != g_registers_unused)
             continue;
 
          if (r.m_start == -1 && r.m_end == -1)
@@ -205,7 +222,7 @@ scalar_allocation(LiveRangeMap& lrm, const Interference& interference)
 
          int color = 0;
 
-         while (color < 124) {
+         while (color < g_registers_end) {
             bool color_in_use = false;
             for (auto adj : adjecency) {
                if (live_ranges[adj].m_color == color) {
@@ -222,11 +239,88 @@ scalar_allocation(LiveRangeMap& lrm, const Interference& interference)
             r.m_color = color;
             break;
          }
-         if (color == 124)
+         if (color == g_registers_end)
             return false;
       }
    }
    return true;
+}
+
+struct AluRegister {
+   int lifetime;
+   LiveRangeEntry *lre;
+};
+
+static inline bool operator < (const AluRegister& lhs, const AluRegister& rhs)
+{
+   return lhs.lifetime > rhs.lifetime;
+}
+
+using AluClauseRegisters = std::priority_queue<AluRegister>;
+
+
+static void
+scalar_clause_local_allocation (LiveRangeMap& lrm, const Interference&  interference)
+{
+   for (int comp = 0; comp < 4; ++comp) {
+      AluClauseRegisters clause_reg;
+      auto& live_ranges = lrm.component(comp);
+      for (auto& r : live_ranges) {
+
+         sfn_log << SfnLog::merge << "LR: " << *r.m_register
+                 <<  "[ " << r.m_start << ", " << r.m_end
+                  << " ], AC: " << r.m_alu_clause_local
+                  << " Color; " << r.m_color << "\n";
+
+         if (r.m_color != g_registers_unused)
+            continue;
+
+         if (r.m_start == -1 &&
+             r.m_end == -1)
+            continue;
+
+         if (!r.m_alu_clause_local)
+            continue;
+
+         int len = r.m_end - r.m_start;
+         if (len > 1) {
+            clause_reg.push({len, &r});
+            sfn_log << SfnLog::merge << "Consider " << *r.m_register
+                    << " for clause local\n";
+         }
+      }
+
+      while (!clause_reg.empty()) {
+         auto& r = clause_reg.top().lre;
+         clause_reg.pop();
+
+         sfn_log << SfnLog::merge << "Color " << *r->m_register << "\n";
+
+         auto& adjecency = interference.row(comp, r->m_register->index());
+
+         int color = g_clause_local_start;
+
+         while (color < g_clause_local_end) {
+            bool color_in_use = false;
+            for (auto adj : adjecency) {
+               if (live_ranges[adj].m_color == color) {
+                  color_in_use = true;
+                  break;
+               }
+            }
+
+            if (color_in_use) {
+               ++color;
+               continue;
+            }
+
+            r->m_color = color;
+            break;
+         }
+         if (color == g_clause_local_end)
+            break;
+      }
+   }
 }
 
 bool
@@ -289,6 +383,8 @@ register_allocation(LiveRangeMap& lrm)
    if (!group_allocation(lrm, interference, groups_sorted))
       return false;
 
+   scalar_clause_local_allocation(lrm, interference);
+
    if (!scalar_allocation(lrm, interference))
       return false;
 
@@ -297,7 +393,11 @@ register_allocation(LiveRangeMap& lrm)
       for (auto& entry : comp) {
          sfn_log << SfnLog::merge << "Set " << *entry.m_register << " to ";
          entry.m_register->set_sel(entry.m_color);
+         /* No need for any pinning past this point, keeping the flags just makes
+          * testing more difficult.
+          */
          entry.m_register->set_pin(pin_none);
+         entry.m_register->reset_flag(Register::pin_start);
          sfn_log << SfnLog::merge << *entry.m_register << "\n";
       }
    }

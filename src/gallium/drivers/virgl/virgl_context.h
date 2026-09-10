@@ -27,6 +27,7 @@
 #include "pipe/p_context.h"
 #include "util/slab.h"
 #include "util/list.h"
+#include "util/u_framebuffer.h"
 
 #include "virgl_staging_mgr.h"
 #include "virgl_transfer_queue.h"
@@ -65,18 +66,29 @@ struct virgl_shader_binding_state {
    uint32_t image_enabled_mask;
 };
 
+/*
+ * Subclass of pipe_framebuffer_state which has resource handles.
+ */
+struct virgl_framebuffer_state
+{
+   struct pipe_framebuffer_state base;
+
+   uint32_t cbufs_handles[PIPE_MAX_COLOR_BUFS];
+   uint32_t zsbuf_handle;
+};
+
 struct virgl_context {
    struct pipe_context base;
    struct virgl_cmd_buf *cbuf;
    unsigned cbuf_initial_cdw;
 
-   struct virgl_shader_binding_state shader_bindings[PIPE_SHADER_TYPES];
+   struct virgl_shader_binding_state shader_bindings[MESA_SHADER_STAGES];
    struct pipe_shader_buffer atomic_buffers[PIPE_MAX_HW_ATOMIC_BUFFERS];
    uint32_t atomic_buffer_enabled_mask;
 
    struct virgl_vertex_elements_state *vertex_elements;
 
-   struct pipe_framebuffer_state framebuffer;
+   struct virgl_framebuffer_state framebuffer;
 
    struct slab_child_pool transfer_pool;
    struct virgl_transfer_queue queue;
@@ -88,7 +100,7 @@ struct virgl_context {
 
    struct pipe_vertex_buffer vertex_buffer[PIPE_MAX_ATTRIBS];
    unsigned num_vertex_buffers;
-   boolean vertex_array_dirty;
+   bool vertex_array_dirty;
 
    struct virgl_rasterizer_state rs_state;
    struct virgl_so_target so_targets[PIPE_MAX_SO_BUFFERS];
@@ -101,6 +113,13 @@ struct virgl_context {
 
    /* The total size of staging resources used in queued copy transfers. */
    uint64_t queued_staging_res_size;
+};
+
+struct virgl_vertex_elements_state {
+   uint32_t handle;
+   uint8_t binding_map[PIPE_MAX_ATTRIBS];
+   uint8_t num_bindings;
+   uint16_t strides[PIPE_MAX_ATTRIBS];
 };
 
 static inline struct virgl_sampler_view *

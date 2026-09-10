@@ -32,21 +32,20 @@
 #include "git_sha1.h"
 #include "vulkan/vulkan.h"
 
-static_assert(DXIL_SPIRV_SHADER_NONE == (int)MESA_SHADER_NONE, "must match");
-static_assert(DXIL_SPIRV_SHADER_VERTEX == (int)MESA_SHADER_VERTEX, "must match");
-static_assert(DXIL_SPIRV_SHADER_TESS_CTRL == (int)MESA_SHADER_TESS_CTRL, "must match");
-static_assert(DXIL_SPIRV_SHADER_TESS_EVAL == (int)MESA_SHADER_TESS_EVAL, "must match");
-static_assert(DXIL_SPIRV_SHADER_GEOMETRY == (int)MESA_SHADER_GEOMETRY, "must match");
-static_assert(DXIL_SPIRV_SHADER_FRAGMENT == (int)MESA_SHADER_FRAGMENT, "must match");
-static_assert(DXIL_SPIRV_SHADER_COMPUTE == (int)MESA_SHADER_COMPUTE, "must match");
-static_assert(DXIL_SPIRV_SHADER_KERNEL == (int)MESA_SHADER_KERNEL, "must match");
+static_assert((mesa_shader_stage)DXIL_SPIRV_SHADER_NONE == MESA_SHADER_NONE, "must match");
+static_assert((mesa_shader_stage)DXIL_SPIRV_SHADER_VERTEX == MESA_SHADER_VERTEX, "must match");
+static_assert((mesa_shader_stage)DXIL_SPIRV_SHADER_TESS_CTRL == MESA_SHADER_TESS_CTRL, "must match");
+static_assert((mesa_shader_stage)DXIL_SPIRV_SHADER_TESS_EVAL == MESA_SHADER_TESS_EVAL, "must match");
+static_assert((mesa_shader_stage)DXIL_SPIRV_SHADER_GEOMETRY == MESA_SHADER_GEOMETRY, "must match");
+static_assert((mesa_shader_stage)DXIL_SPIRV_SHADER_FRAGMENT == MESA_SHADER_FRAGMENT, "must match");
+static_assert((mesa_shader_stage)DXIL_SPIRV_SHADER_COMPUTE == MESA_SHADER_COMPUTE, "must match");
+static_assert((mesa_shader_stage)DXIL_SPIRV_SHADER_KERNEL == MESA_SHADER_KERNEL, "must match");
 
 bool
 spirv_to_dxil(const uint32_t *words, size_t word_count,
               struct dxil_spirv_specialization *specializations,
               unsigned int num_specializations, dxil_spirv_shader_stage stage,
               const char *entry_point_name,
-              enum dxil_shader_model shader_model_max,
               enum dxil_validator_version validator_version_max,
               const struct dxil_spirv_debug_options *dgb_opts,
               const struct dxil_spirv_runtime_conf *conf,
@@ -56,39 +55,36 @@ spirv_to_dxil(const uint32_t *words, size_t word_count,
    if (stage == DXIL_SPIRV_SHADER_NONE || stage == DXIL_SPIRV_SHADER_KERNEL)
       return false;
 
-   struct spirv_to_nir_options spirv_opts = {
-      .caps = {
-         .draw_parameters = true,
-      },
-      .ubo_addr_format = nir_address_format_32bit_index_offset,
-      .ssbo_addr_format = nir_address_format_32bit_index_offset,
-      .shared_addr_format = nir_address_format_32bit_offset_as_64bit,
-
-      // use_deref_buffer_array_length + nir_lower_explicit_io force
-      //  get_ssbo_size to take in the return from load_vulkan_descriptor
-      //  instead of vulkan_resource_index. This makes it much easier to
-      //  get the DXIL handle for the SSBO.
-      .use_deref_buffer_array_length = true
-   };
-
    glsl_type_singleton_init_or_ref();
 
    struct nir_to_dxil_options opts = {
       .environment = DXIL_ENVIRONMENT_VULKAN,
-      .shader_model_max = shader_model_max,
+      .shader_model_max = conf->shader_model_max,
       .validator_version_max = validator_version_max,
    };
 
-   struct nir_shader_compiler_options nir_options = *dxil_get_nir_compiler_options();
+   const struct spirv_to_nir_options *spirv_opts = dxil_spirv_nir_get_spirv_options();
+   nir_shader_compiler_options nir_options;
+   const unsigned supported_bit_sizes = 16 | 32 | 64;
+   dxil_get_nir_compiler_options(&nir_options, conf->shader_model_max, supported_bit_sizes, supported_bit_sizes);
    // We will manually handle base_vertex when vertex_id and instance_id have
    // have been already converted to zero-base.
-   nir_options.lower_base_vertex = !conf->zero_based_vertex_instance_id;
-   nir_options.lower_helper_invocation = opts.shader_model_max < SHADER_MODEL_6_6;
+   nir_options.lower_base_vertex = conf->first_vertex_and_base_instance_mode != DXIL_SPIRV_SYSVAL_TYPE_ZERO;
 
-   nir_shader *nir = spirv_to_nir(
-      words, word_count, (struct nir_spirv_specialization *)specializations,
-      num_specializations, (gl_shader_stage)stage, entry_point_name,
-      &spirv_opts, &nir_options);
+   struct nir_spirv_specialization *spec = NULL;
+   if (specializations && num_specializations > 0) {
+      spec = vtn_alloc_specialization(num_specializations);
+
+      for (unsigned i = 0; i < num_specializations; i++) {
+         vtn_add_specialization_entry(spec, i, specializations[i].id,
+                                      sizeof(specializations[i].value),
+                                      &specializations[i].value, false);
+      }
+   }
+   nir_shader *nir = spirv_to_nir(words, word_count, spec,
+                                  (mesa_shader_stage)stage, entry_point_name,
+                                  spirv_opts, &nir_options);
+   vtn_free_specialization(spec);
    if (!nir) {
       glsl_type_singleton_decref();
       return false;
@@ -99,8 +95,7 @@ spirv_to_dxil(const uint32_t *words, size_t word_count,
 
    dxil_spirv_nir_prep(nir);
 
-   bool requires_runtime_data;
-   dxil_spirv_nir_passes(nir, conf, &requires_runtime_data);
+   dxil_spirv_nir_passes(nir, conf, &out_dxil->metadata);
 
    if (dgb_opts->dump_nir)
       nir_print_shader(nir, stderr);
@@ -118,7 +113,6 @@ spirv_to_dxil(const uint32_t *words, size_t word_count,
    }
 
    ralloc_free(nir);
-   out_dxil->metadata.requires_runtime_data = requires_runtime_data;
    blob_finish_get_buffer(&dxil_blob, &out_dxil->binary.buffer,
                           &out_dxil->binary.size);
 

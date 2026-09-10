@@ -54,6 +54,8 @@
 #include "sp_tex_sample.h"
 #include "sp_image.h"
 
+#include "nir.h"
+
 static void
 softpipe_destroy( struct pipe_context *pipe )
 {
@@ -81,11 +83,10 @@ softpipe_destroy( struct pipe_context *pipe )
 
    for (i = 0; i < PIPE_MAX_COLOR_BUFS; i++) {
       sp_destroy_tile_cache(softpipe->cbuf_cache[i]);
-      pipe_surface_reference(&softpipe->framebuffer.cbufs[i], NULL);
    }
 
    sp_destroy_tile_cache(softpipe->zsbuf_cache);
-   pipe_surface_reference(&softpipe->framebuffer.zsbuf, NULL);
+   util_unreference_framebuffer_state(&softpipe->framebuffer);
 
    for (sh = 0; sh < ARRAY_SIZE(softpipe->tex_cache); sh++) {
       for (i = 0; i < ARRAY_SIZE(softpipe->tex_cache[0]); i++) {
@@ -108,7 +109,7 @@ softpipe_destroy( struct pipe_context *pipe )
 
    tgsi_exec_machine_destroy(softpipe->fs_machine);
 
-   for (i = 0; i < PIPE_SHADER_TYPES; i++) {
+   for (i = 0; i < MESA_SHADER_STAGES; i++) {
       FREE(softpipe->tgsi.sampler[i]);
       FREE(softpipe->tgsi.image[i]);
       FREE(softpipe->tgsi.buffer[i]);
@@ -140,13 +141,11 @@ softpipe_is_resource_referenced( struct pipe_context *pipe,
    /* check if any of the bound drawing surfaces are this texture */
    if (softpipe->dirty_render_cache) {
       for (i = 0; i < softpipe->framebuffer.nr_cbufs; i++) {
-         if (softpipe->framebuffer.cbufs[i] && 
-             softpipe->framebuffer.cbufs[i]->texture == texture) {
+         if (softpipe->framebuffer.cbufs[i].texture == texture) {
             return SP_REFERENCED_FOR_WRITE;
          }
       }
-      if (softpipe->framebuffer.zsbuf && 
-          softpipe->framebuffer.zsbuf->texture == texture) {
+      if (softpipe->framebuffer.zsbuf.texture == texture) {
          return SP_REFERENCED_FOR_WRITE;
       }
    }
@@ -190,15 +189,15 @@ softpipe_create_context(struct pipe_screen *screen,
 
    util_init_math();
 
-   for (i = 0; i < PIPE_SHADER_TYPES; i++) {
+   for (i = 0; i < MESA_SHADER_STAGES; i++) {
       softpipe->tgsi.sampler[i] = sp_create_tgsi_sampler();
    }
 
-   for (i = 0; i < PIPE_SHADER_TYPES; i++) {
+   for (i = 0; i < MESA_SHADER_STAGES; i++) {
       softpipe->tgsi.image[i] = sp_create_tgsi_image();
    }
 
-   for (i = 0; i < PIPE_SHADER_TYPES; i++) {
+   for (i = 0; i < MESA_SHADER_STAGES; i++) {
       softpipe->tgsi.buffer[i] = sp_create_tgsi_buffer();
    }
 
@@ -248,7 +247,7 @@ softpipe_create_context(struct pipe_screen *screen,
       }
    }
 
-   softpipe->fs_machine = tgsi_exec_machine_create(PIPE_SHADER_FRAGMENT);
+   softpipe->fs_machine = tgsi_exec_machine_create(MESA_SHADER_FRAGMENT);
 
    /* setup quad rendering stages */
    softpipe->quad.shade = sp_quad_shade_stage(softpipe);
@@ -271,34 +270,34 @@ softpipe_create_context(struct pipe_screen *screen,
       goto fail;
 
    draw_texture_sampler(softpipe->draw,
-                        PIPE_SHADER_VERTEX,
+                        MESA_SHADER_VERTEX,
                         (struct tgsi_sampler *)
-                           softpipe->tgsi.sampler[PIPE_SHADER_VERTEX]);
+                           softpipe->tgsi.sampler[MESA_SHADER_VERTEX]);
 
    draw_texture_sampler(softpipe->draw,
-                        PIPE_SHADER_GEOMETRY,
+                        MESA_SHADER_GEOMETRY,
                         (struct tgsi_sampler *)
-                           softpipe->tgsi.sampler[PIPE_SHADER_GEOMETRY]);
+                           softpipe->tgsi.sampler[MESA_SHADER_GEOMETRY]);
 
    draw_image(softpipe->draw,
-              PIPE_SHADER_VERTEX,
+              MESA_SHADER_VERTEX,
               (struct tgsi_image *)
-              softpipe->tgsi.image[PIPE_SHADER_VERTEX]);
+              softpipe->tgsi.image[MESA_SHADER_VERTEX]);
 
    draw_image(softpipe->draw,
-              PIPE_SHADER_GEOMETRY,
+              MESA_SHADER_GEOMETRY,
               (struct tgsi_image *)
-              softpipe->tgsi.image[PIPE_SHADER_GEOMETRY]);
+              softpipe->tgsi.image[MESA_SHADER_GEOMETRY]);
 
    draw_buffer(softpipe->draw,
-              PIPE_SHADER_VERTEX,
+              MESA_SHADER_VERTEX,
               (struct tgsi_buffer *)
-              softpipe->tgsi.buffer[PIPE_SHADER_VERTEX]);
+              softpipe->tgsi.buffer[MESA_SHADER_VERTEX]);
 
    draw_buffer(softpipe->draw,
-              PIPE_SHADER_GEOMETRY,
+              MESA_SHADER_GEOMETRY,
               (struct tgsi_buffer *)
-              softpipe->tgsi.buffer[PIPE_SHADER_GEOMETRY]);
+              softpipe->tgsi.buffer[MESA_SHADER_GEOMETRY]);
 
    softpipe->vbuf_backend = sp_create_vbuf_backend(softpipe);
    if (!softpipe->vbuf_backend)
@@ -321,12 +320,12 @@ softpipe_create_context(struct pipe_screen *screen,
 
    /* plug in AA line/point stages */
    draw_install_aaline_stage(softpipe->draw, &softpipe->pipe);
-   draw_install_aapoint_stage(softpipe->draw, &softpipe->pipe);
+   draw_install_aapoint_stage(softpipe->draw, &softpipe->pipe, nir_type_bool32);
 
    /* Do polygon stipple w/ texture map + frag prog. */
    draw_install_pstipple_stage(softpipe->draw, &softpipe->pipe);
 
-   draw_wide_point_sprites(softpipe->draw, TRUE);
+   draw_wide_point_sprites(softpipe->draw, true);
 
    sp_init_surface_functions(softpipe);
 

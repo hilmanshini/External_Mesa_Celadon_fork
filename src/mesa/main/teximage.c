@@ -31,6 +31,7 @@
 
 #include <stdbool.h>
 #include "util/glheader.h"
+#include "util/perf/cpu_trace.h"
 #include "bufferobj.h"
 #include "context.h"
 #include "enums.h"
@@ -499,7 +500,7 @@ _mesa_max_texture_levels(const struct gl_context *ctx, GLenum target)
       return ffs(util_next_power_of_two(ctx->Const.MaxTextureSize));
    case GL_TEXTURE_3D:
    case GL_PROXY_TEXTURE_3D:
-      return !(ctx->API == API_OPENGLES2 && !ctx->Extensions.OES_texture_3D)
+      return !(_mesa_is_gles2(ctx) && !ctx->Extensions.OES_texture_3D)
          ? ctx->Const.Max3DTextureLevels : 0;
    case GL_TEXTURE_CUBE_MAP:
    case GL_TEXTURE_CUBE_MAP_POSITIVE_X:
@@ -524,8 +525,7 @@ _mesa_max_texture_levels(const struct gl_context *ctx, GLenum target)
       return _mesa_has_texture_cube_map_array(ctx)
          ? ctx->Const.MaxCubeTextureLevels : 0;
    case GL_TEXTURE_BUFFER:
-      return (_mesa_has_ARB_texture_buffer_object(ctx) ||
-              _mesa_has_OES_texture_buffer(ctx)) ? 1 : 0;
+      return _mesa_has_texture_buffer_object(ctx) ? 1 : 0;
    case GL_TEXTURE_2D_MULTISAMPLE:
    case GL_PROXY_TEXTURE_2D_MULTISAMPLE:
    case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
@@ -726,60 +726,6 @@ _mesa_get_tex_max_num_levels(GLenum target, GLsizei width, GLsizei height,
 }
 
 
-#if 000 /* not used anymore */
-/*
- * glTexImage[123]D can accept a NULL image pointer.  In this case we
- * create a texture image with unspecified image contents per the OpenGL
- * spec.
- */
-static GLubyte *
-make_null_texture(GLint width, GLint height, GLint depth, GLenum format)
-{
-   const GLint components = _mesa_components_in_format(format);
-   const GLint numPixels = width * height * depth;
-   GLubyte *data = (GLubyte *) malloc(numPixels * components * sizeof(GLubyte));
-
-#ifdef DEBUG
-   /*
-    * Let's see if anyone finds this.  If glTexImage2D() is called with
-    * a NULL image pointer then load the texture image with something
-    * interesting instead of leaving it indeterminate.
-    */
-   if (data) {
-      static const char message[8][32] = {
-         "   X   X  XXXXX   XXX     X    ",
-         "   XX XX  X      X   X   X X   ",
-         "   X X X  X      X      X   X  ",
-         "   X   X  XXXX    XXX   XXXXX  ",
-         "   X   X  X          X  X   X  ",
-         "   X   X  X      X   X  X   X  ",
-         "   X   X  XXXXX   XXX   X   X  ",
-         "                               "
-      };
-
-      GLubyte *imgPtr = data;
-      GLint h, i, j, k;
-      for (h = 0; h < depth; h++) {
-         for (i = 0; i < height; i++) {
-            GLint srcRow = 7 - (i % 8);
-            for (j = 0; j < width; j++) {
-               GLint srcCol = j % 32;
-               GLubyte texel = (message[srcRow][srcCol]=='X') ? 255 : 70;
-               for (k = 0; k < components; k++) {
-                  *imgPtr++ = texel;
-               }
-            }
-         }
-      }
-   }
-#endif
-
-   return data;
-}
-#endif
-
-
-
 /**
  * Set the size and format-related fields of a gl_texture_image struct
  * to zero.  This is used when a proxy texture test fails.
@@ -797,9 +743,6 @@ clear_teximage_fields(struct gl_texture_image *img)
    img->Width2 = 0;
    img->Height2 = 0;
    img->Depth2 = 0;
-   img->WidthLog2 = 0;
-   img->HeightLog2 = 0;
-   img->DepthLog2 = 0;
    img->TexFormat = MESA_FORMAT_NONE;
    img->NumSamples = 0;
    img->FixedSampleLocations = GL_TRUE;
@@ -941,7 +884,7 @@ _mesa_init_teximage_fields_ms(struct gl_context *ctx,
    img->Height = height;
    img->Depth = depth;
 
-   GLenum depth_mode = ctx->API == API_OPENGL_CORE ? GL_RED : GL_LUMINANCE;
+   GLenum depth_mode = _mesa_is_desktop_gl_core(ctx) ? GL_RED : GL_LUMINANCE;
 
    /* In ES 3.0, DEPTH_TEXTURE_MODE is expected to be GL_RED for textures
     * with depth component data specified with a sized internal format.
@@ -957,8 +900,7 @@ _mesa_init_teximage_fields_ms(struct gl_context *ctx,
    }
    _mesa_update_teximage_format_swizzle(ctx, img, depth_mode);
 
-   img->Width2 = width - 2 * border;   /* == 1 << img->WidthLog2; */
-   img->WidthLog2 = util_logbase2(img->Width2);
+   img->Width2 = width - 2 * border;
 
    switch(target) {
    case GL_TEXTURE_1D:
@@ -968,22 +910,18 @@ _mesa_init_teximage_fields_ms(struct gl_context *ctx,
          img->Height2 = 0;
       else
          img->Height2 = 1;
-      img->HeightLog2 = 0;
       if (depth == 0)
          img->Depth2 = 0;
       else
          img->Depth2 = 1;
-      img->DepthLog2 = 0;
       break;
    case GL_TEXTURE_1D_ARRAY:
    case GL_PROXY_TEXTURE_1D_ARRAY:
       img->Height2 = height; /* no border */
-      img->HeightLog2 = 0; /* not used */
       if (depth == 0)
          img->Depth2 = 0;
       else
          img->Depth2 = 1;
-      img->DepthLog2 = 0;
       break;
    case GL_TEXTURE_2D:
    case GL_TEXTURE_RECTANGLE:
@@ -1000,13 +938,11 @@ _mesa_init_teximage_fields_ms(struct gl_context *ctx,
    case GL_PROXY_TEXTURE_CUBE_MAP:
    case GL_TEXTURE_2D_MULTISAMPLE:
    case GL_PROXY_TEXTURE_2D_MULTISAMPLE:
-      img->Height2 = height - 2 * border; /* == 1 << img->HeightLog2; */
-      img->HeightLog2 = util_logbase2(img->Height2);
+      img->Height2 = height - 2 * border;
       if (depth == 0)
          img->Depth2 = 0;
       else
          img->Depth2 = 1;
-      img->DepthLog2 = 0;
       break;
    case GL_TEXTURE_2D_ARRAY:
    case GL_PROXY_TEXTURE_2D_ARRAY:
@@ -1014,17 +950,13 @@ _mesa_init_teximage_fields_ms(struct gl_context *ctx,
    case GL_PROXY_TEXTURE_CUBE_MAP_ARRAY:
    case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
    case GL_PROXY_TEXTURE_2D_MULTISAMPLE_ARRAY:
-      img->Height2 = height - 2 * border; /* == 1 << img->HeightLog2; */
-      img->HeightLog2 = util_logbase2(img->Height2);
+      img->Height2 = height - 2 * border;
       img->Depth2 = depth; /* no border */
-      img->DepthLog2 = 0; /* not used */
       break;
    case GL_TEXTURE_3D:
    case GL_PROXY_TEXTURE_3D:
-      img->Height2 = height - 2 * border; /* == 1 << img->HeightLog2; */
-      img->HeightLog2 = util_logbase2(img->Height2);
-      img->Depth2 = depth - 2 * border;   /* == 1 << img->DepthLog2; */
-      img->DepthLog2 = util_logbase2(img->Depth2);
+      img->Height2 = height - 2 * border;
+      img->Depth2 = depth - 2 * border;
       break;
    default:
       _mesa_problem(NULL, "invalid target 0x%x in _mesa_init_teximage_fields()",
@@ -1410,7 +1342,7 @@ _mesa_test_proxy_teximage(struct gl_context *ctx, GLenum target,
       for (l = 0; l < numLevels; l++) {
          GLint nextWidth, nextHeight, nextDepth;
 
-         bytes += _mesa_format_image_size64(format, width, height, depth);
+         bytes += _mesa_format_image_size(format, width, height, depth);
 
          if (_mesa_next_mipmap_level_size(target, 0, width, height, depth,
                                           &nextWidth, &nextHeight,
@@ -1426,7 +1358,7 @@ _mesa_test_proxy_teximage(struct gl_context *ctx, GLenum target,
       /* We just compute the size of one mipmap level.  This is the path
        * taken for glTexImage(GL_PROXY_TEXTURE_x).
        */
-      bytes = _mesa_format_image_size64(format, width, height, depth);
+      bytes = _mesa_format_image_size(format, width, height, depth);
    }
 
    bytes *= _mesa_num_tex_faces(target);
@@ -1437,7 +1369,7 @@ _mesa_test_proxy_teximage(struct gl_context *ctx, GLenum target,
    /* We just check if the image size is less than MaxTextureMbytes.
     * Some drivers may do more specific checks.
     */
-   return mbytes <= (uint64_t) ctx->Const.MaxTextureMbytes;
+   return mbytes <= (uint64_t) ctx->screen->caps.max_texture_mb;
 }
 
 
@@ -1500,7 +1432,7 @@ _mesa_target_can_be_compressed(const struct gl_context *ctx, GLenum target,
                                GLenum intFormat, GLenum *error)
 {
    GLboolean target_can_be_compresed = GL_FALSE;
-   mesa_format format = _mesa_glenum_to_compressed_format(intFormat);
+   mesa_format format = _mesa_glenum_to_compressed_format(ctx, intFormat);
    enum mesa_format_layout layout = _mesa_get_format_layout(format);
 
    switch (target) {
@@ -1584,12 +1516,31 @@ _mesa_target_can_be_compressed(const struct gl_context *ctx, GLenum target,
    case GL_TEXTURE_3D:
       switch (layout) {
       case MESA_FORMAT_LAYOUT_ETC2:
-         /* See ETC2/EAC comment in case GL_TEXTURE_CUBE_MAP_ARRAY. */
-         if (_mesa_is_gles3(ctx))
-            return write_error(error, GL_INVALID_OPERATION);
-         break;
+      case MESA_FORMAT_LAYOUT_RGTC:
+         /* From the OpenGL 4.4 compatibility spec:
+          *      An INVALID_OPERATION error is generated by TexImage3D if
+          *      internalformat is one of the EAC, ETC2, or RGTC compressed
+          *      formats and either border is non-zero, or target is not
+          *      TEXTURE_2D_ARRAY.
+          */
+         return write_error(error, GL_INVALID_OPERATION);
       case MESA_FORMAT_LAYOUT_BPTC:
          target_can_be_compresed = ctx->Extensions.ARB_texture_compression_bptc;
+         break;
+      case MESA_FORMAT_LAYOUT_S3TC:
+         /* From the EXT_texture_compression_s3tc spec:
+          *
+          *      In extended OpenGL ES 3.0.2 these new tokens are also accepted by the
+          *      <internalformat> parameter of TexImage3D, CompressedTexImage3D,
+          *      TexStorage2D, TexStorage3D and the <format> parameter of
+          *      CompressedTexSubImage3D.
+          *
+          * The spec does not clarify whether the same applies to newer desktop GL versions
+          * (where 3D textures were introduced), check compatibility ext to be safe.
+          */
+         target_can_be_compresed =
+            ctx->Extensions.EXT_texture_compression_s3tc &&
+            _mesa_is_gles3_compatible(ctx);
          break;
       case MESA_FORMAT_LAYOUT_ASTC:
          target_can_be_compresed =
@@ -1768,11 +1719,11 @@ mutable_tex_object(struct gl_texture_object *texObj)
 /**
  * Return expected size of a compressed texture.
  */
-static GLuint
-compressed_tex_size(GLsizei width, GLsizei height, GLsizei depth,
-                    GLenum glformat)
+static size_t
+compressed_tex_size(const struct gl_context *ctx, GLsizei width, GLsizei height,
+                    GLsizei depth, GLenum glformat)
 {
-   mesa_format mesaFormat = _mesa_glenum_to_compressed_format(glformat);
+   mesa_format mesaFormat = _mesa_glenum_to_compressed_format(ctx, glformat);
    return _mesa_format_image_size(mesaFormat, width, height, depth);
 }
 
@@ -1826,7 +1777,7 @@ _mesa_legal_texture_base_format_for_target(struct gl_context *ctx,
             target == GL_TEXTURE_CUBE_MAP ||
             target == GL_PROXY_TEXTURE_CUBE_MAP) &&
            (ctx->Version >= 30 || ctx->Extensions.EXT_gpu_shader4
-            || (ctx->API == API_OPENGLES2 && ctx->Extensions.OES_depth_texture_cube_map))) &&
+            || (_mesa_is_gles2(ctx) && ctx->Extensions.OES_depth_texture_cube_map))) &&
           !((target == GL_TEXTURE_CUBE_MAP_ARRAY ||
              target == GL_PROXY_TEXTURE_CUBE_MAP_ARRAY) &&
             _mesa_has_texture_cube_map_array(ctx))) {
@@ -1870,6 +1821,12 @@ texture_formats_agree(GLenum internalFormat,
 
    if (_mesa_is_ycbcr_format(internalFormat) != _mesa_is_ycbcr_format(format))
       return false;
+
+   if ((_mesa_is_depth_format(internalFormat) ||
+        _mesa_is_stencil_format(internalFormat)) &&
+       _mesa_is_color_format(format)) {
+      return false;
+   }
 
    return true;
 }
@@ -1959,7 +1916,7 @@ texture_error_check( struct gl_context *ctx,
 
    /* Check border */
    if (border < 0 || border > 1 ||
-       ((ctx->API != API_OPENGL_COMPAT ||
+       ((!_mesa_is_desktop_gl_compat(ctx) ||
          target == GL_TEXTURE_RECTANGLE_NV ||
          target == GL_PROXY_TEXTURE_RECTANGLE_NV) && border != 0)) {
       _mesa_error(ctx, GL_INVALID_VALUE,
@@ -1982,7 +1939,7 @@ texture_error_check( struct gl_context *ctx,
        *     "Specifying a value for internalformat that is not one of the
        *      above (acceptable) values generates the error INVALID VALUE."
        */
-      if (err == GL_INVALID_ENUM && _mesa_is_gles(ctx) && ctx->Version < 20)
+      if (err == GL_INVALID_ENUM && _mesa_is_gles1(ctx))
          err = GL_INVALID_VALUE;
 
       _mesa_error(ctx, err,
@@ -2069,7 +2026,6 @@ texture_error_check( struct gl_context *ctx,
 
    /* additional checks for compressed textures */
    if (_mesa_is_compressed_format(ctx, internalFormat)) {
-      GLenum err;
       if (!_mesa_target_can_be_compressed(ctx, target, internalFormat, &err)) {
          _mesa_error(ctx, err,
                      "glTexImage%dD(target can't be compressed)", dimensions);
@@ -2119,10 +2075,10 @@ compressed_texture_error_check(struct gl_context *ctx, GLint dimensions,
                                GLenum target, struct gl_texture_object* texObj,
                                GLint level, GLenum internalFormat, GLsizei width,
                                GLsizei height, GLsizei depth, GLint border,
-                               GLsizei imageSize, const GLvoid *data)
+                               size_t imageSize, const GLvoid *data)
 {
    const GLint maxLevels = _mesa_max_texture_levels(ctx, target);
-   GLint expectedSize;
+   size_t expectedSize;
    GLenum error = GL_NO_ERROR;
    char *reason = ""; /* no error */
 
@@ -2197,7 +2153,7 @@ compressed_texture_error_check(struct gl_context *ctx, GLint dimensions,
       /* Figure out the expected texture size (in bytes).  This will be
        * checked against the actual size later.
        */
-      expectedSize = compressed_tex_size(width, height, depth, internalFormat);
+      expectedSize = compressed_tex_size(ctx, width, height, depth, internalFormat);
       break;
    }
 
@@ -2423,8 +2379,13 @@ copytexture_error_check( struct gl_context *ctx, GLuint dimensions,
                      "glCopyTexImage%dD(invalid readbuffer)", dimensions);
          return GL_TRUE;
       }
-
-      if (ctx->ReadBuffer->Visual.samples > 0) {
+      /**
+       * From the GL_EXT_multisampled_render_to_texture spec:
+       * Operations are allowed when the extension is supported.
+       */
+      if (!ctx->st_opts->allow_multisampled_copyteximage &&
+          ctx->ReadBuffer->Visual.samples > 0 &&
+          !_mesa_has_rtt_samples(ctx->ReadBuffer)) {
          _mesa_error(ctx, GL_INVALID_OPERATION,
                      "glCopyTexImage%dD(multisample FBO)", dimensions);
          return GL_TRUE;
@@ -2433,7 +2394,7 @@ copytexture_error_check( struct gl_context *ctx, GLuint dimensions,
 
    /* Check border */
    if (border < 0 || border > 1 ||
-       ((ctx->API != API_OPENGL_COMPAT ||
+       ((!_mesa_is_desktop_gl_compat(ctx) ||
          target == GL_TEXTURE_RECTANGLE_NV ||
          target == GL_PROXY_TEXTURE_RECTANGLE_NV) && border != 0)) {
       _mesa_error(ctx, GL_INVALID_VALUE,
@@ -2470,6 +2431,15 @@ copytexture_error_check( struct gl_context *ctx, GLuint dimensions,
       case GL_RGB10_A2:
          break;
 
+      case GL_RED:
+      case GL_RG:
+         /* GL_EXT_texture_rg adds support for GL_RED and GL_RG as an internal
+          * format
+          */
+         if (_mesa_has_EXT_texture_rg(ctx))
+            break;
+
+      FALLTHROUGH;
       default:
          _mesa_error(ctx, GL_INVALID_ENUM,
                      "glCopyTexImage%dD(internalFormat=%s)", dimensions,
@@ -2654,6 +2624,20 @@ copytexture_error_check( struct gl_context *ctx, GLuint dimensions,
       }
    }
 
+   /**
+    * OVR_multiview
+
+      INVALID_FRAMEBUFFER_OPERATION is generated by commands that read from the
+      framebuffer such as BlitFramebuffer, ReadPixels, CopyTexImage*, and
+      CopyTexSubImage*, if the number of views in the current read framebuffer
+      is greater than 1.
+      */
+   if (rb->rtt_numviews > 1) {
+      _mesa_error(ctx, GL_INVALID_FRAMEBUFFER_OPERATION,
+                  "glCopyTexImage%dD(NumViews > 1 on read framebuffer)", dimensions);
+      return GL_TRUE;
+   }
+
    if (!mutable_tex_object(texObj)) {
       _mesa_error(ctx, GL_INVALID_OPERATION,
                   "glCopyTexImage%dD(immutable texture)", dimensions);
@@ -2691,9 +2675,29 @@ copytexsubimage_error_check(struct gl_context *ctx, GLuint dimensions,
          return GL_TRUE;
       }
 
-      if (ctx->ReadBuffer->Visual.samples > 0) {
-         _mesa_error(ctx, GL_INVALID_OPERATION,
-                "%s(multisample FBO)", caller);
+      /**
+       * From the GL_EXT_multisampled_render_to_texture spec:
+       *
+       * "An INVALID_OPERATION error is generated by CopyTexSubImage3D,
+       * CopyTexImage2D, or CopyTexSubImage2D if [...] the value of
+       * READ_FRAMEBUFFER_BINDING is non-zero, and:
+       *   - the read buffer selects an attachment that has no image attached,
+       *     or
+       *   - the value of SAMPLE_BUFFERS for the read framebuffer is one."
+       *
+       * [...]
+       * These errors do not apply to textures and renderbuffers that have
+       * associated multisample data specified by the mechanisms described in
+       * this extension, i.e., the above operations are allowed even when
+       * SAMPLE_BUFFERS is non-zero for renderbuffers created via Renderbuffer-
+       * StorageMultisampleEXT or textures attached via FramebufferTexture2D-
+       * MultisampleEXT.
+       */
+      if (!ctx->st_opts->allow_multisampled_copyteximage &&
+          ctx->ReadBuffer->Visual.samples > 0 &&
+          !_mesa_has_rtt_samples(ctx->ReadBuffer)) {
+         _mesa_error(ctx, GL_INVALID_OPERATION, "%s(multisample FBO)",
+                     caller);
          return GL_TRUE;
       }
    }
@@ -2785,6 +2789,21 @@ copytexsubimage_error_check(struct gl_context *ctx, GLuint dimensions,
       return GL_TRUE;
    }
 
+   /**
+    * OVR_multiview
+
+      INVALID_FRAMEBUFFER_OPERATION is generated by commands that read from the
+      framebuffer such as BlitFramebuffer, ReadPixels, CopyTexImage*, and
+      CopyTexSubImage*, if the number of views in the current read framebuffer
+      is greater than 1.
+      */
+   if (_mesa_is_color_format(texImage->InternalFormat) &&
+       ctx->ReadBuffer->_ColorReadBuffer->rtt_numviews > 1) {
+      _mesa_error(ctx, GL_INVALID_FRAMEBUFFER_OPERATION,
+                  "%s(NumViews > 1 on read framebuffer)", caller);
+      return GL_TRUE;
+   }
+
    /* if we get here, the parameters are OK */
    return GL_FALSE;
 }
@@ -2855,7 +2874,7 @@ _mesa_update_fbo_texture(struct gl_context *ctx,
       info.texObj = texObj;
       info.level = level;
       info.face = face;
-      _mesa_HashWalk(ctx->Shared->FrameBuffers, check_rtt_cb, &info);
+      _mesa_HashWalk(&ctx->Shared->FrameBuffers, check_rtt_cb, &info);
    }
 }
 
@@ -3039,11 +3058,12 @@ lookup_texture_ext_dsa(struct gl_context *ctx, GLenum target, GLuint texture,
       texObj = ctx->Shared->DefaultTex[targetIndex];
       assert(texObj);
    } else {
-      bool isGenName;
-      texObj = _mesa_lookup_texture(ctx, texture);
-      isGenName = texObj != NULL;
-      if (!texObj && ctx->API == API_OPENGL_CORE) {
+      _mesa_HashLockMutex(&ctx->Shared->TexObjects);
+
+      texObj = _mesa_lookup_texture_locked(ctx, texture);
+      if (!texObj && _mesa_is_desktop_gl_core(ctx)) {
          _mesa_error(ctx, GL_INVALID_OPERATION, "%s(non-gen name)", caller);
+         _mesa_HashUnlockMutex(&ctx->Shared->TexObjects);
          return NULL;
       }
 
@@ -3051,12 +3071,14 @@ lookup_texture_ext_dsa(struct gl_context *ctx, GLenum target, GLuint texture,
          texObj = _mesa_new_texture_object(ctx, texture, boundTarget);
          if (!texObj) {
             _mesa_error(ctx, GL_OUT_OF_MEMORY, "%s", caller);
+            _mesa_HashUnlockMutex(&ctx->Shared->TexObjects);
             return NULL;
          }
 
          /* insert into hash table */
-         _mesa_HashInsert(ctx->Shared->TexObjects, texObj->Name, texObj, isGenName);
+         _mesa_HashInsertLocked(&ctx->Shared->TexObjects, texObj->Name, texObj);
       }
+      _mesa_HashUnlockMutex(&ctx->Shared->TexObjects);
 
       if (texObj->Target != boundTarget) {
          _mesa_error(ctx, GL_INVALID_OPERATION, "%s(%s != %s)",
@@ -3091,26 +3113,9 @@ teximage(struct gl_context *ctx, GLboolean compressed, GLuint dims,
    mesa_format texFormat;
    bool dimensionsOK = true, sizeOK = true;
 
-   FLUSH_VERTICES(ctx, 0, 0);
+   MESA_TRACE_FUNC();
 
-   if (MESA_VERBOSE & (VERBOSE_API|VERBOSE_TEXTURE)) {
-      if (compressed)
-         _mesa_debug(ctx,
-                     "glCompressedTexImage%uD %s %d %s %d %d %d %d %p\n",
-                     dims,
-                     _mesa_enum_to_string(target), level,
-                     _mesa_enum_to_string(internalFormat),
-                     width, height, depth, border, pixels);
-      else
-         _mesa_debug(ctx,
-                     "glTexImage%uD %s %d %s %d %d %d %d %s %s %p\n",
-                     dims,
-                     _mesa_enum_to_string(target), level,
-                     _mesa_enum_to_string(internalFormat),
-                     width, height, depth, border,
-                     _mesa_enum_to_string(format),
-                     _mesa_enum_to_string(type), pixels);
-   }
+   FLUSH_VERTICES(ctx, 0, 0);
 
    internalFormat = override_internal_format(internalFormat, width, height);
 
@@ -3146,7 +3151,7 @@ teximage(struct gl_context *ctx, GLboolean compressed, GLuint dims,
     * call by decompressing the texture.  If we really want to support cpal
     * textures in any driver this would have to be changed.
     */
-   if (ctx->API == API_OPENGLES && compressed && dims == 2) {
+   if (_mesa_is_gles1(ctx) && compressed && dims == 2) {
       switch (internalFormat) {
       case GL_PALETTE4_RGB8_OES:
       case GL_PALETTE4_RGBA8_OES:
@@ -3159,7 +3164,7 @@ teximage(struct gl_context *ctx, GLboolean compressed, GLuint dims,
       case GL_PALETTE8_RGBA4_OES:
       case GL_PALETTE8_RGB5_A1_OES:
          _mesa_cpal_compressed_teximage2d(target, level, internalFormat,
-                                          width, height, imageSize, pixels);
+                                          width, height, pixels);
          return;
       }
    }
@@ -3169,7 +3174,7 @@ teximage(struct gl_context *ctx, GLboolean compressed, GLuint dims,
        * texture format since we'll never transcode the user's compressed
        * image data.  The internalFormat was error checked earlier.
        */
-      texFormat = _mesa_glenum_to_compressed_format(internalFormat);
+      texFormat = _mesa_glenum_to_compressed_format(ctx, internalFormat);
    }
    else {
       /* In case of HALF_FLOAT_OES or FLOAT_OES, find corresponding sized
@@ -3285,7 +3290,7 @@ teximage(struct gl_context *ctx, GLboolean compressed, GLuint dims,
 
             _mesa_dirty_texobj(ctx, texObj);
             /* only apply depthMode swizzle if it was explicitly changed */
-            GLenum depth_mode = ctx->API == API_OPENGL_CORE ? GL_RED : GL_LUMINANCE;
+            GLenum depth_mode = _mesa_is_desktop_gl_core(ctx) ? GL_RED : GL_LUMINANCE;
             if (texObj->Attrib.DepthMode != depth_mode)
                _mesa_update_teximage_format_swizzle(ctx, texObj->Image[0][texObj->Attrib.BaseLevel], texObj->Attrib.DepthMode);
             _mesa_update_texture_object_swizzle(ctx, texObj);
@@ -3511,7 +3516,7 @@ static void
 egl_image_target_texture(struct gl_context *ctx,
                          struct gl_texture_object *texObj, GLenum target,
                          GLeglImageOES image, bool tex_storage,
-                         const char *caller)
+                         bool tex_compression, const char *caller)
 {
    struct gl_texture_image *texImage;
    FLUSH_VERTICES(ctx, 0, 0);
@@ -3521,8 +3526,7 @@ egl_image_target_texture(struct gl_context *ctx,
    if (!texObj)
       return;
 
-   if (!image || (ctx->Driver.ValidateEGLImage &&
-                  !ctx->Driver.ValidateEGLImage(ctx, image))) {
+   if (!image || !st_validate_egl_image(ctx, image)) {
       _mesa_error(ctx, GL_INVALID_VALUE, "%s(image=%p)", caller, image);
       return;
    }
@@ -3545,8 +3549,8 @@ egl_image_target_texture(struct gl_context *ctx,
 
       struct st_egl_image stimg;
       bool native_supported;
-      if (!st_get_egl_image(ctx, image, PIPE_BIND_SAMPLER_VIEW, caller,
-                            &stimg, &native_supported)) {
+      if (!st_get_egl_image(ctx, image, PIPE_BIND_SAMPLER_VIEW, tex_compression,
+                            caller, &stimg, &native_supported)) {
          _mesa_unlock_texture(ctx, texObj);
          return;
       }
@@ -3562,6 +3566,7 @@ egl_image_target_texture(struct gl_context *ctx,
              !(target == GL_TEXTURE_2D || target == GL_TEXTURE_EXTERNAL_OES)) {
             _mesa_error(ctx, GL_INVALID_OPERATION,
                         "%s(texture is imported from dmabuf)", caller);
+            pipe_resource_reference(&stimg.texture, NULL);
             _mesa_unlock_texture(ctx, texObj);
             return;
          }
@@ -3604,11 +3609,28 @@ _mesa_EGLImageTargetTexture2DOES(GLenum target, GLeglImageOES image)
    }
 
    if (valid_target) {
-      egl_image_target_texture(ctx, NULL, target, image, false, func);
+      egl_image_target_texture(ctx, NULL, target, image, false, false, func);
    } else {
       _mesa_error(ctx, GL_INVALID_ENUM, "%s(target=%d)", func, target);
    }
 }
+
+static bool
+parse_surface_compression(GLint attrib, bool *compression)
+{
+   switch (attrib) {
+   case GL_SURFACE_COMPRESSION_FIXED_RATE_DEFAULT_EXT:
+      *compression = true;
+      break;
+   case GL_SURFACE_COMPRESSION_FIXED_RATE_NONE_EXT:
+      *compression = false;
+      break;
+   default:
+      return false;
+   }
+   return true;
+}
+
 
 static void
 egl_image_target_texture_storage(struct gl_context *ctx,
@@ -3616,14 +3638,26 @@ egl_image_target_texture_storage(struct gl_context *ctx,
                                  GLeglImageOES image, const GLint *attrib_list,
                                  const char *caller)
 {
+   bool tex_compression = false;
+
    /*
-    * EXT_EGL_image_storage:
+    * EXT_EGL_image_storage_compression:
     *
-    * "<attrib_list> must be NULL or a pointer to the value GL_NONE."
+    * Attributes that can be specified in <attrib_list> include
+    * SURFACE_COMPRESSION_EXT.
     */
-   if (attrib_list && attrib_list[0] != GL_NONE) {
-      _mesa_error(ctx, GL_INVALID_VALUE, "%s(image=%p)", caller, image);
-      return;
+   for (int i = 0; attrib_list && attrib_list[i] != GL_NONE; ++i) {
+      switch (attrib_list[i]) {
+      case GL_SURFACE_COMPRESSION_EXT:
+         if (!parse_surface_compression(attrib_list[++i], &tex_compression)) {
+            _mesa_error(ctx, GL_INVALID_VALUE, "%s(image=%p)", caller, image);
+            return;
+         }
+         break;
+      default:
+         _mesa_error(ctx, GL_INVALID_VALUE, "%s(image=%p)", caller, image);
+         return;
+      }
    }
 
    /*
@@ -3657,7 +3691,8 @@ egl_image_target_texture_storage(struct gl_context *ctx,
    }
 
    if (valid_target) {
-      egl_image_target_texture(ctx, texObj, target, image, true, caller);
+      egl_image_target_texture(ctx, texObj, target, image, true,
+                               tex_compression, caller);
    } else {
       _mesa_error(ctx, GL_INVALID_OPERATION, "%s(target=%d)", caller, target);
    }
@@ -3725,6 +3760,8 @@ texture_sub_image(struct gl_context *ctx, GLuint dims,
                   GLsizei width, GLsizei height, GLsizei depth,
                   GLenum format, GLenum type, const GLvoid *pixels)
 {
+   MESA_TRACE_FUNC();
+
    FLUSH_VERTICES(ctx, 0, 0);
 
    _mesa_update_pixel(ctx);
@@ -3796,14 +3833,6 @@ texsubimage_err(struct gl_context *ctx, GLuint dims, GLenum target, GLint level,
    texImage = _mesa_select_tex_image(texObj, target, level);
    /* texsubimage_error_check ensures that texImage is not NULL */
 
-   if (MESA_VERBOSE & (VERBOSE_API|VERBOSE_TEXTURE))
-      _mesa_debug(ctx, "glTexSubImage%uD %s %d %d %d %d %d %d %d %s %s %p\n",
-                  dims,
-                  _mesa_enum_to_string(target), level,
-                  xoffset, yoffset, zoffset, width, height, depth,
-                  _mesa_enum_to_string(format),
-                  _mesa_enum_to_string(type), pixels);
-
    texture_sub_image(ctx, dims, texObj, texImage, target, level,
                      xoffset, yoffset, zoffset, width, height, depth,
                      format, type, pixels);
@@ -3844,14 +3873,6 @@ texturesubimage(struct gl_context *ctx, GLuint dims,
    struct gl_texture_image *texImage;
    int i;
 
-   if (MESA_VERBOSE & (VERBOSE_API|VERBOSE_TEXTURE))
-      _mesa_debug(ctx,
-                  "glTextureSubImage%uD %d %d %d %d %d %d %d %d %s %s %p\n",
-                  dims, texture, level,
-                  xoffset, yoffset, zoffset, width, height, depth,
-                  _mesa_enum_to_string(format),
-                  _mesa_enum_to_string(type), pixels);
-
    /* Get the texture object by Name. */
    if (!no_error) {
       if (!ext_dsa) {
@@ -3883,7 +3904,7 @@ texturesubimage(struct gl_context *ctx, GLuint dims,
 
    /* Must handle special case GL_TEXTURE_CUBE_MAP. */
    if (texObj->Target == GL_TEXTURE_CUBE_MAP) {
-      GLint imageStride;
+      intptr_t imageStride;
 
       /*
        * What do we do if the user created a texture with the following code
@@ -4357,6 +4378,8 @@ copy_texture_sub_image(struct gl_context *ctx, GLuint dims,
 {
    struct gl_texture_image *texImage;
 
+   MESA_TRACE_FUNC();
+
    _mesa_lock_texture(ctx, texObj);
 
    texImage = _mesa_select_tex_image(texObj, target, level);
@@ -4405,11 +4428,6 @@ copy_texture_sub_image_err(struct gl_context *ctx, GLuint dims,
 {
    FLUSH_VERTICES(ctx, 0, 0);
 
-   if (MESA_VERBOSE & (VERBOSE_API|VERBOSE_TEXTURE))
-      _mesa_debug(ctx, "%s %s %d %d %d %d %d %d %d %d\n", caller,
-                  _mesa_enum_to_string(target),
-                  level, xoffset, yoffset, zoffset, x, y, width, height);
-
    _mesa_update_pixel(ctx);
 
    if (ctx->NewState & _NEW_BUFFERS)
@@ -4457,14 +4475,9 @@ copyteximage(struct gl_context *ctx, GLuint dims, struct gl_texture_object *texO
    struct gl_texture_image *texImage;
    mesa_format texFormat;
 
-   FLUSH_VERTICES(ctx, 0, 0);
+   MESA_TRACE_FUNC();
 
-   if (MESA_VERBOSE & (VERBOSE_API|VERBOSE_TEXTURE))
-      _mesa_debug(ctx, "glCopyTexImage%uD %s %d %s %d %d %d %d %d\n",
-                  dims,
-                  _mesa_enum_to_string(target), level,
-                  _mesa_enum_to_string(internalFormat),
-                  x, y, width, height, border);
+   FLUSH_VERTICES(ctx, 0, 0);
 
    _mesa_update_pixel(ctx);
 
@@ -4538,22 +4551,33 @@ copyteximage(struct gl_context *ctx, GLuint dims, struct gl_texture_object *texO
                return;
          }
       }
-      /* From Page 139 of OpenGL ES 3.0 spec:
-       *    "If internalformat is sized, the internal format of the new texel
-       *    array is internalformat, and this is also the new texel array’s
-       *    effective internal format. If the component sizes of internalformat
-       *    do not exactly match the corresponding component sizes of the source
-       *    buffer’s effective internal format, described below, an
-       *    INVALID_OPERATION error is generated. If internalformat is unsized,
-       *    the internal format of the new texel array is the effective internal
-       *    format of the source buffer, and this is also the new texel array’s
-       *    effective internal format.
-       */
-      else if (formats_differ_in_component_sizes (texFormat, rb->Format)) {
+      else {
+         /* From Page 139 of OpenGL ES 3.0 spec:
+         *    "If internalformat is sized, the internal format of the new texel
+         *    array is internalformat, and this is also the new texel array’s
+         *    effective internal format. If the component sizes of internalformat
+         *    do not exactly match the corresponding component sizes of the source
+         *    buffer’s effective internal format, described below, an
+         *    INVALID_OPERATION error is generated. If internalformat is unsized,
+         *    the internal format of the new texel array is the effective internal
+         *    format of the source buffer, and this is also the new texel array’s
+         *    effective internal format.
+         */
+         enum pipe_format rb_format = st_choose_format(ctx->st, rb->InternalFormat,
+                                                       GL_NONE, GL_NONE,
+                                                       PIPE_TEXTURE_2D, 0, 0, 0,
+                                                       false, false);
+         enum pipe_format new_format = st_choose_format(ctx->st, internalFormat,
+                                                        GL_NONE, GL_NONE,
+                                                        PIPE_TEXTURE_2D, 0, 0, 0,
+                                                        false, false);
+         /* this comparison must be done on the API format, not the driver format */
+         if (formats_differ_in_component_sizes (new_format, rb_format)) {
             _mesa_error(ctx, GL_INVALID_OPERATION,
                         "glCopyTexImage%uD(component size changed in"
                         " internal format)", dims);
             return;
+         }
       }
    }
 
@@ -5176,9 +5200,23 @@ check_clear_tex_image(struct gl_context *ctx,
       return false;
    }
 
-   if (_mesa_is_compressed_format(ctx, internalFormat)) {
+   if (_mesa_is_compressed_format(ctx, internalFormat) ||
+       _mesa_is_generic_compressed_format(ctx, internalFormat)) {
       _mesa_error(ctx, GL_INVALID_OPERATION,
                   "%s(compressed texture)", function);
+      return false;
+   }
+
+   /* This is a special case where we might throw GL_INVALID_ENUM
+    * below but should do GL_INVALID_OPERATION with glClearTexImage.
+    */
+   if (_mesa_is_color_format(internalFormat) &&
+       _mesa_is_depthstencil_format(format)) {
+      _mesa_error(ctx, GL_INVALID_OPERATION,
+                  "%s(incompatible internalFormat = %s, format = %s)",
+                  function,
+                  _mesa_enum_to_string(internalFormat),
+                  _mesa_enum_to_string(format));
       return false;
    }
 
@@ -5329,12 +5367,19 @@ _mesa_ClearTexSubImage(GLuint texture, GLint level,
       maxDepth = numImages;
    }
 
+   /* Nothing to clear, skip. */
+   if (width == 0 || height == 0 || depth == 0)
+      goto out;
+
+   if (width < 0 || height < 0 || depth < 0) {
+      _mesa_error(ctx, GL_INVALID_VALUE,
+                  "glClearSubTexImage(invalid dimensions)");
+      goto out;
+   }
+
    if (xoffset < -(GLint) texImages[0]->Border ||
        yoffset < -(GLint) texImages[0]->Border ||
        zoffset < minDepth ||
-       width < 0 ||
-       height < 0 ||
-       depth < 0 ||
        xoffset + width > texImages[0]->Width ||
        yoffset + height > texImages[0]->Height ||
        zoffset + depth > maxDepth) {
@@ -5518,11 +5563,16 @@ compressed_subtexture_target_check(struct gl_context *ctx, GLenum target,
           *
           *    "Modify the "3D Tex." column to be checked for all ASTC formats."
           */
-         format = _mesa_glenum_to_compressed_format(intFormat);
+         format = _mesa_glenum_to_compressed_format(ctx, intFormat);
          layout = _mesa_get_format_layout(format);
          switch (layout) {
          case MESA_FORMAT_LAYOUT_BPTC:
             /* valid format */
+            break;
+         case MESA_FORMAT_LAYOUT_S3TC:
+            targetOK =
+               ctx->Extensions.EXT_texture_compression_s3tc &&
+               _mesa_is_gles3_compatible(ctx);
             break;
          case MESA_FORMAT_LAYOUT_ASTC:
             targetOK =
@@ -5569,11 +5619,11 @@ compressed_subtexture_error_check(struct gl_context *ctx, GLint dims,
                                   GLenum target, GLint level,
                                   GLint xoffset, GLint yoffset, GLint zoffset,
                                   GLsizei width, GLsizei height, GLsizei depth,
-                                  GLenum format, GLsizei imageSize,
+                                  GLenum format, size_t imageSize,
                                   const GLvoid *data, const char *callerName)
 {
    struct gl_texture_image *texImage;
-   GLint expectedSize;
+   size_t expectedSize;
 
    GLenum is_generic_compressed_token =
       _mesa_generic_compressed_format_to_uncompressed_format(format) !=
@@ -5615,9 +5665,9 @@ compressed_subtexture_error_check(struct gl_context *ctx, GLint dims,
       return GL_TRUE;
    }
 
-   expectedSize = compressed_tex_size(width, height, depth, format);
+   expectedSize = compressed_tex_size(ctx, width, height, depth, format);
    if (expectedSize != imageSize) {
-      _mesa_error(ctx, GL_INVALID_VALUE, "%s(size=%d)", callerName, imageSize);
+      _mesa_error(ctx, GL_INVALID_VALUE, "%s(size=%zu)", callerName, imageSize);
       return GL_TRUE;
    }
 
@@ -5852,7 +5902,7 @@ compressed_texture_sub_image(struct gl_context *ctx, GLuint dims,
                              GLenum target, GLint level, GLint xoffset,
                              GLint yoffset, GLint zoffset, GLsizei width,
                              GLsizei height, GLsizei depth, GLenum format,
-                             GLsizei imageSize, const GLvoid *data)
+                             size_t imageSize, const GLvoid *data)
 {
    FLUSH_VERTICES(ctx, 0, 0);
 
@@ -5893,7 +5943,7 @@ static void
 compressed_tex_sub_image(unsigned dim, GLenum target, GLuint textureOrIndex,
                          GLint level, GLint xoffset, GLint yoffset,
                          GLint zoffset, GLsizei width, GLsizei height,
-                         GLsizei depth, GLenum format, GLsizei imageSize,
+                         GLsizei depth, GLenum format, size_t imageSize,
                          const GLvoid *data, enum tex_mode mode,
                          const char *caller)
 {
@@ -5963,7 +6013,7 @@ compressed_tex_sub_image(unsigned dim, GLenum target, GLuint textureOrIndex,
        (mode == TEX_MODE_DSA_ERROR || mode == TEX_MODE_DSA_NO_ERROR) &&
        texObj->Target == GL_TEXTURE_CUBE_MAP) {
       const char *pixels = data;
-      GLint image_stride;
+      size_t image_stride;
 
       /* Make sure the texture object is a proper cube.
        * (See texturesubimage in teximage.c for details on why this check is
@@ -5991,6 +6041,7 @@ compressed_tex_sub_image(unsigned dim, GLenum target, GLuint textureOrIndex,
                                                 texImage->Height, 1);
 
          pixels += image_stride;
+         assert(imageSize >= image_stride);
          imageSize -= image_stride;
       }
    } else {
@@ -6263,7 +6314,7 @@ _mesa_CompressedMultiTexSubImage3DEXT(GLenum texunit, GLenum target,
 mesa_format
 _mesa_get_texbuffer_format(const struct gl_context *ctx, GLenum internalFormat)
 {
-   if (ctx->API == API_OPENGL_COMPAT) {
+   if (_mesa_is_desktop_gl_compat(ctx)) {
       switch (internalFormat) {
       case GL_ALPHA8:
          return MESA_FORMAT_A_UNORM8;
@@ -6350,8 +6401,7 @@ _mesa_get_texbuffer_format(const struct gl_context *ctx, GLenum internalFormat)
       }
    }
 
-   if (_mesa_has_ARB_texture_buffer_object_rgb32(ctx) ||
-       _mesa_has_OES_texture_buffer(ctx)) {
+   if (_mesa_has_texture_buffer_object(ctx)) {
       switch (internalFormat) {
       case GL_RGB32F:
          return MESA_FORMAT_RGB_FLOAT32;
@@ -6497,14 +6547,8 @@ texture_buffer_range(struct gl_context *ctx,
    mesa_format format;
    mesa_format old_format;
 
-   /* NOTE: ARB_texture_buffer_object might not be supported in
-    * the compatibility profile.
-    */
-   if (!_mesa_has_ARB_texture_buffer_object(ctx) &&
-       !_mesa_has_OES_texture_buffer(ctx)) {
-      _mesa_error(ctx, GL_INVALID_OPERATION,
-                  "%s(ARB_texture_buffer_object is not"
-                  " implemented for the compatibility profile)", caller);
+   if (!_mesa_has_texture_buffer_object(ctx)) {
+      _mesa_error(ctx, GL_INVALID_OPERATION, "%s(not supported)", caller);
       return;
    }
 
@@ -6551,7 +6595,7 @@ texture_buffer_range(struct gl_context *ctx,
       }
    }
 
-   ctx->NewDriverState |= ST_NEW_SAMPLER_VIEWS;
+   ST_SET_SHADER_STATES(ctx->NewDriverState, SAMPLER_VIEWS);
 
    if (bufObj) {
       bufObj->UsageHistory |= USAGE_TEXTURE_BUFFER;
@@ -6933,11 +6977,6 @@ texture_image_multisample(struct gl_context *ctx, GLuint dims,
    GLenum sample_count_error;
    bool dsa = strstr(func, "ture") ? true : false;
 
-   if (MESA_VERBOSE & (VERBOSE_API|VERBOSE_TEXTURE)) {
-      _mesa_debug(ctx, "%s(target=%s, samples=%d, internalformat=%s)\n", func,
-                  _mesa_enum_to_string(target), samples, _mesa_enum_to_string(internalformat));
-   }
-
    if (!((ctx->Extensions.ARB_texture_multisample
          && _mesa_is_desktop_gl(ctx))) && !_mesa_is_gles31(ctx)) {
       _mesa_error(ctx, GL_INVALID_OPERATION, "%s(unsupported)", func);
@@ -6982,7 +7021,7 @@ texture_image_multisample(struct gl_context *ctx, GLuint dims,
    }
 
    sample_count_error = _mesa_check_sample_count(ctx, target,
-         internalformat, samples, samples);
+         internalformat, samples);
    samplesOK = sample_count_error == GL_NO_ERROR;
 
    /* Page 254 of OpenGL 4.4 spec says:
@@ -7073,14 +7112,14 @@ texture_image_multisample(struct gl_context *ctx, GLuint dims,
             if (!st_SetTextureStorageForMemoryObject(ctx, texObj,
                                                      memObj, 1, width,
                                                      height, depth,
-                                                     offset)) {
+                                                     offset, func)) {
 
                _mesa_init_teximage_fields(ctx, texImage, 0, 0, 0, 0,
                                           internalformat, texFormat);
             }
          } else {
             if (!st_AllocTextureStorage(ctx, texObj, 1,
-                                        width, height, depth)) {
+                                        width, height, depth, func)) {
                /* tidy up the texture image state. strictly speaking,
                 * we're allowed to just leave this in whatever state we
                 * like, but being tidy is good.

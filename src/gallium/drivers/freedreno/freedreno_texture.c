@@ -1,24 +1,6 @@
 /*
- * Copyright (C) 2012 Rob Clark <robclark@freedesktop.org>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * Copyright © 2012 Rob Clark <robclark@freedesktop.org>
+ * SPDX-License-Identifier: MIT
  *
  * Authors:
  *    Rob Clark <robclark@freedesktop.org>
@@ -48,13 +30,14 @@ fd_sampler_view_destroy(struct pipe_context *pctx,
    FREE(view);
 }
 
-static void
-bind_sampler_states(struct fd_texture_stateobj *tex, unsigned start,
-                    unsigned nr, void **hwcso)
+void
+fd_sampler_states_bind(struct pipe_context *pctx, mesa_shader_stage shader,
+                       unsigned start, unsigned nr, void **hwcso) in_dt
 {
-   unsigned i;
+   struct fd_context *ctx = fd_context(pctx);
+   struct fd_texture_stateobj *tex = &ctx->tex[shader];
 
-   for (i = 0; i < nr; i++) {
+   for (unsigned i = 0; i < nr; i++) {
       unsigned p = i + start;
       tex->samplers[p] = hwcso ? hwcso[i] : NULL;
       if (tex->samplers[p])
@@ -64,28 +47,30 @@ bind_sampler_states(struct fd_texture_stateobj *tex, unsigned start,
    }
 
    tex->num_samplers = util_last_bit(tex->valid_samplers);
+
+   fd_context_dirty_shader(ctx, shader, FD_DIRTY_SHADER_TEX);
 }
 
-static void
-set_sampler_views(struct fd_texture_stateobj *tex, unsigned start, unsigned nr,
-                  unsigned unbind_num_trailing_slots, bool take_ownership,
-                  struct pipe_sampler_view **views)
+void
+fd_set_sampler_views(struct pipe_context *pctx, mesa_shader_stage shader,
+                     unsigned start, unsigned nr,
+                     unsigned unbind_num_trailing_slots,
+                     struct pipe_sampler_view **views) in_dt
 {
+   struct fd_context *ctx = fd_context(pctx);
+   struct fd_texture_stateobj *tex = &ctx->tex[shader];
    unsigned i;
 
    for (i = 0; i < nr; i++) {
       struct pipe_sampler_view *view = views ? views[i] : NULL;
       unsigned p = i + start;
 
-      if (take_ownership) {
-         pipe_sampler_view_reference(&tex->textures[p], NULL);
-         tex->textures[p] = view;
-      } else {
-         pipe_sampler_view_reference(&tex->textures[p], view);
-      }
+      pipe_sampler_view_reference(&tex->textures[p], view);
 
       if (tex->textures[p]) {
          fd_resource_set_usage(tex->textures[p]->texture, FD_DIRTY_TEX);
+         fd_dirty_shader_resource(ctx, tex->textures[p]->texture,
+                                  shader, FD_DIRTY_SHADER_TEX, false);
          tex->valid_textures |= (1 << p);
       } else {
          tex->valid_textures &= ~(1 << p);
@@ -98,29 +83,7 @@ set_sampler_views(struct fd_texture_stateobj *tex, unsigned start, unsigned nr,
    }
 
    tex->num_textures = util_last_bit(tex->valid_textures);
-}
 
-void
-fd_sampler_states_bind(struct pipe_context *pctx, enum pipe_shader_type shader,
-                       unsigned start, unsigned nr, void **hwcso) in_dt
-{
-   struct fd_context *ctx = fd_context(pctx);
-
-   bind_sampler_states(&ctx->tex[shader], start, nr, hwcso);
-   fd_context_dirty_shader(ctx, shader, FD_DIRTY_SHADER_TEX);
-}
-
-void
-fd_set_sampler_views(struct pipe_context *pctx, enum pipe_shader_type shader,
-                     unsigned start, unsigned nr,
-                     unsigned unbind_num_trailing_slots,
-                     bool take_ownership,
-                     struct pipe_sampler_view **views) in_dt
-{
-   struct fd_context *ctx = fd_context(pctx);
-
-   set_sampler_views(&ctx->tex[shader], start, nr, unbind_num_trailing_slots,
-                     take_ownership, views);
    fd_context_dirty_shader(ctx, shader, FD_DIRTY_SHADER_TEX);
 }
 
@@ -131,6 +94,8 @@ fd_texture_init(struct pipe_context *pctx)
       pctx->delete_sampler_state = fd_sampler_state_delete;
    if (!pctx->sampler_view_destroy)
       pctx->sampler_view_destroy = fd_sampler_view_destroy;
+   pctx->sampler_view_release = u_default_sampler_view_release;
+   pctx->resource_release = u_default_resource_release;
 }
 
 /* helper for setting up border-color buffer for a3xx/a4xx: */

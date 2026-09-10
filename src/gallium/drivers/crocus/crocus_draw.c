@@ -36,8 +36,8 @@
 #include "util/u_inlines.h"
 #include "util/u_transfer.h"
 #include "util/u_upload_mgr.h"
-#include "intel/compiler/brw_compiler.h"
-#include "intel/compiler/brw_eu_defines.h"
+#include "intel/compiler/elk/elk_compiler.h"
+#include "intel/compiler/elk/elk_eu_defines.h"
 #include "compiler/shader_info.h"
 #include "crocus_context.h"
 #include "crocus_defines.h"
@@ -45,15 +45,15 @@
 #include "util/u_prim.h"
 
 static bool
-prim_is_points_or_lines(enum pipe_prim_type mode)
+prim_is_points_or_lines(enum mesa_prim mode)
 {
    /* We don't need to worry about adjacency - it can only be used with
     * geometry shaders, and we don't care about this info when GS is on.
     */
-   return mode == PIPE_PRIM_POINTS ||
-          mode == PIPE_PRIM_LINES ||
-          mode == PIPE_PRIM_LINE_LOOP ||
-          mode == PIPE_PRIM_LINE_STRIP;
+   return mode == MESA_PRIM_POINTS ||
+          mode == MESA_PRIM_LINES ||
+          mode == MESA_PRIM_LINE_LOOP ||
+          mode == MESA_PRIM_LINE_STRIP;
 }
 
 static bool
@@ -68,7 +68,7 @@ can_cut_index_handle_restart_index(struct crocus_context *ice,
    case 4:
       return draw->restart_index == 0xffffffff;
    default:
-      unreachable("illegal index size\n");
+      UNREACHABLE("illegal index size\n");
    }
 
    return false;
@@ -89,15 +89,15 @@ can_cut_index_handle_prim(struct crocus_context *ice,
       return false;
 
    switch (draw->mode) {
-   case PIPE_PRIM_POINTS:
-   case PIPE_PRIM_LINES:
-   case PIPE_PRIM_LINE_STRIP:
-   case PIPE_PRIM_TRIANGLES:
-   case PIPE_PRIM_TRIANGLE_STRIP:
-   case PIPE_PRIM_LINES_ADJACENCY:
-   case PIPE_PRIM_LINE_STRIP_ADJACENCY:
-   case PIPE_PRIM_TRIANGLES_ADJACENCY:
-   case PIPE_PRIM_TRIANGLE_STRIP_ADJACENCY:
+   case MESA_PRIM_POINTS:
+   case MESA_PRIM_LINES:
+   case MESA_PRIM_LINE_STRIP:
+   case MESA_PRIM_TRIANGLES:
+   case MESA_PRIM_TRIANGLE_STRIP:
+   case MESA_PRIM_LINES_ADJACENCY:
+   case MESA_PRIM_LINE_STRIP_ADJACENCY:
+   case MESA_PRIM_TRIANGLES_ADJACENCY:
+   case MESA_PRIM_TRIANGLE_STRIP_ADJACENCY:
       return true;
    default:
       break;
@@ -118,28 +118,28 @@ crocus_update_draw_info(struct crocus_context *ice,
                         const struct pipe_draw_start_count_bias *draw)
 {
    struct crocus_screen *screen = (struct crocus_screen *)ice->ctx.screen;
-   enum pipe_prim_type mode = info->mode;
+   enum mesa_prim mode = info->mode;
 
    if (screen->devinfo.ver < 6) {
       /* Slight optimization to avoid the GS program when not needed:
        */
       struct pipe_rasterizer_state *rs_state = crocus_get_rast_state(ice);
-      if (mode == PIPE_PRIM_QUAD_STRIP && !rs_state->flatshade &&
+      if (mode == MESA_PRIM_QUAD_STRIP && !rs_state->flatshade &&
           rs_state->fill_front == PIPE_POLYGON_MODE_FILL &&
           rs_state->fill_back == PIPE_POLYGON_MODE_FILL)
-         mode = PIPE_PRIM_TRIANGLE_STRIP;
-      if (mode == PIPE_PRIM_QUADS &&
+         mode = MESA_PRIM_TRIANGLE_STRIP;
+      if (mode == MESA_PRIM_QUADS &&
           draw->count == 4 &&
           !rs_state->flatshade &&
           rs_state->fill_front == PIPE_POLYGON_MODE_FILL &&
           rs_state->fill_back == PIPE_POLYGON_MODE_FILL)
-         mode = PIPE_PRIM_TRIANGLE_FAN;
+         mode = MESA_PRIM_TRIANGLE_FAN;
    }
 
    if (ice->state.prim_mode != mode) {
       ice->state.prim_mode = mode;
 
-      enum pipe_prim_type reduced = u_reduced_prim(mode);
+      enum mesa_prim reduced = u_reduced_prim(mode);
       if (ice->state.reduced_prim_mode != reduced) {
          if (screen->devinfo.ver < 6)
             ice->state.dirty |= CROCUS_DIRTY_GEN4_CLIP_PROG | CROCUS_DIRTY_GEN4_SF_PROG;
@@ -165,7 +165,7 @@ crocus_update_draw_info(struct crocus_context *ice,
       }
    }
 
-   if (info->mode == PIPE_PRIM_PATCHES &&
+   if (info->mode == MESA_PRIM_PATCHES &&
        ice->state.vertices_per_patch != ice->state.patch_vertices) {
       ice->state.vertices_per_patch = ice->state.patch_vertices;
 
@@ -229,7 +229,7 @@ crocus_update_draw_parameters(struct crocus_context *ice,
             ice->draw.params.baseinstance = info->start_instance;
             ice->draw.params_valid = true;
 
-            u_upload_data(ice->ctx.stream_uploader, 0,
+            u_upload_data_ref(ice->ctx.stream_uploader, 0,
                           sizeof(ice->draw.params), 4, &ice->draw.params,
                           &draw_params->offset, &draw_params->res);
          }
@@ -247,7 +247,7 @@ crocus_update_draw_parameters(struct crocus_context *ice,
          ice->draw.derived_params.drawid = drawid_offset;
          ice->draw.derived_params.is_indexed_draw = is_indexed_draw;
 
-         u_upload_data(ice->ctx.stream_uploader, 0,
+         u_upload_data_ref(ice->ctx.stream_uploader, 0,
                        sizeof(ice->draw.derived_params), 4,
                        &ice->draw.derived_params, &derived_params->offset,
                        &derived_params->res);
@@ -396,7 +396,7 @@ crocus_draw_vbo(struct pipe_context *ctx,
     * trifans/tristrips.
     */
    if (screen->devinfo.ver < 6) {
-      if (info->mode == PIPE_PRIM_QUADS || info->mode == PIPE_PRIM_QUAD_STRIP) {
+      if (info->mode == MESA_PRIM_QUADS || info->mode == MESA_PRIM_QUAD_STRIP) {
          bool trim = u_trim_pipe_prim(info->mode, (unsigned *)&draws[0].count);
          if (!trim)
             return;
@@ -421,8 +421,8 @@ crocus_draw_vbo(struct pipe_context *ctx,
       return;
 
    if (ice->state.dirty & CROCUS_DIRTY_RENDER_RESOLVES_AND_FLUSHES) {
-      bool draw_aux_buffer_disabled[BRW_MAX_DRAW_BUFFERS] = { };
-      for (gl_shader_stage stage = 0; stage < MESA_SHADER_COMPUTE; stage++) {
+      bool draw_aux_buffer_disabled[ELK_MAX_DRAW_BUFFERS] = { };
+      for (mesa_shader_stage stage = 0; stage < MESA_SHADER_COMPUTE; stage++) {
          if (ice->shaders.prog[stage])
             crocus_predraw_resolve_inputs(ice, batch, draw_aux_buffer_disabled,
                                           stage, true);
@@ -463,7 +463,7 @@ crocus_update_grid_size_resource(struct crocus_context *ice,
       memset(ice->state.last_grid, 0, sizeof(ice->state.last_grid));
    } else if (memcmp(ice->state.last_grid, grid->grid, sizeof(grid->grid)) != 0) {
       memcpy(ice->state.last_grid, grid->grid, sizeof(grid->grid));
-      u_upload_data(ice->ctx.const_uploader, 0, sizeof(grid->grid), 4,
+      u_upload_data_ref(ice->ctx.const_uploader, 0, sizeof(grid->grid), 4,
                     grid->grid, &grid_ref->offset, &grid_ref->res);
    }
 

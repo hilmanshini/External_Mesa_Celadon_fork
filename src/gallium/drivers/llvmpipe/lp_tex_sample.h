@@ -1,5 +1,5 @@
 /**************************************************************************
- * 
+ *
  * Copyright 2007 VMware, Inc.
  * All Rights Reserved.
  *
@@ -10,11 +10,11 @@
  * distribute, sub license, and/or sell copies of the Software, and to
  * permit persons to whom the Software is furnished to do so, subject to
  * the following conditions:
- * 
+ *
  * The above copyright notice and this permission notice (including the
  * next paragraph) shall be included in all copies or substantial portions
  * of the Software.
- * 
+ *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
  * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
  * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT.
@@ -22,7 +22,7 @@
  * ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
  * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- * 
+ *
  **************************************************************************/
 
 #ifndef LP_TEX_SAMPLE_H
@@ -31,37 +31,14 @@
 
 #include "gallivm/lp_bld.h"
 
-
+struct lp_build_sampler_soa;
 struct lp_sampler_static_state;
-struct lp_image_static_state;
-
 /**
  * Whether texture cache is used for s3tc textures.
  */
 #define LP_USE_TEXTURE_CACHE 0
 
-/**
- * Pure-LLVM texture sampling code generator.
- *
- */
 struct lp_build_sampler_soa *
-lp_llvm_sampler_soa_create(const struct lp_sampler_static_state *key,
+lp_llvm_sampler_soa_create(const struct lp_sampler_static_state *static_state,
                            unsigned nr_samplers);
-
-static inline void
-lp_llvm_sampler_soa_destroy(struct lp_build_sampler_soa *sampler)
-{
-   FREE(sampler);
-}
-
-struct lp_build_image_soa *
-lp_llvm_image_soa_create(const struct lp_image_static_state *key,
-                         unsigned nr_images);
-
-static inline void
-lp_llvm_image_soa_destroy(struct lp_build_image_soa *image)
-{
-   FREE(image);
-}
-
 #endif /* LP_TEX_SAMPLE_H */

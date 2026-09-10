@@ -308,12 +308,22 @@ fetch_state(struct gl_context *ctx, const gl_state_index16 state[],
       else
          COPY_4V(value, ctx->Fog.ColorUnclamped);
       return;
-   case STATE_FOG_PARAMS:
+   case STATE_FOG_PARAMS: {
+      float scale = 1.0f / (ctx->Fog.End - ctx->Fog.Start);
+      /* Pass +-FLT_MAX/2 to the shader instead of +-Inf because Infs have
+       * undefined behavior without GLSL 4.10 or GL_ARB_shader_precision
+       * enabled. Infs also have undefined behavior with Shader Model 3.
+       *
+       * The division by 2 makes it less likely that ALU ops will generate
+       * Inf.
+       */
+      scale = CLAMP(scale, -FLT_MAX / 2, FLT_MAX / 2);
       value[0] = ctx->Fog.Density;
       value[1] = ctx->Fog.Start;
       value[2] = ctx->Fog.End;
-      value[3] = 1.0f / (ctx->Fog.End - ctx->Fog.Start);
+      value[3] = scale;
       return;
+   }
    case STATE_CLIPPLANE:
       {
          const GLuint plane = (GLuint) state[1];
@@ -594,10 +604,10 @@ fetch_state(struct gl_context *ctx, const gl_state_index16 state[],
        * exp: 2^-(density/ln(2) * fogcoord)
        * exp2: 2^-((density/(sqrt(ln(2))) * fogcoord)^2)
        */
-      float val =  (ctx->Fog.End == ctx->Fog.Start)
+      float fogcoord =  (ctx->Fog.End == ctx->Fog.Start)
          ? 1.0f : (GLfloat)(-1.0F / (ctx->Fog.End - ctx->Fog.Start));
-      value[0] = val;
-      value[1] = ctx->Fog.End * -val;
+      value[0] = fogcoord;
+      value[1] = ctx->Fog.End * -fogcoord;
       value[2] = (GLfloat)(ctx->Fog.Density * M_LOG2E); /* M_LOG2E == 1/ln(2) */
       value[3] = (GLfloat)(ctx->Fog.Density * ONE_DIV_SQRT_LN2);
       return;
@@ -1607,22 +1617,28 @@ _mesa_optimize_state_parameters(struct gl_constants *consts,
          gl_state_index16 state = STATE_NOT_STATE_VAR;
          unsigned num_lights = 0;
 
-         for (unsigned state_iter = STATE_LIGHTPROD_ARRAY_FRONT;
+         for (gl_state_index state_iter = STATE_LIGHTPROD_ARRAY_FRONT;
               state_iter <= STATE_LIGHTPROD_ARRAY_TWOSIDE; state_iter++) {
             unsigned num_attribs, base_attrib, attrib_incr;
 
-            if (state_iter == STATE_LIGHTPROD_ARRAY_FRONT)  {
+            switch (state_iter) {
+            case STATE_LIGHTPROD_ARRAY_FRONT:
                num_attribs = 3;
                base_attrib = MAT_ATTRIB_FRONT_AMBIENT;
                attrib_incr = 2;
-            } else if (state_iter == STATE_LIGHTPROD_ARRAY_BACK) {
+               break;
+            case STATE_LIGHTPROD_ARRAY_BACK:
                num_attribs = 3;
                base_attrib = MAT_ATTRIB_BACK_AMBIENT;
                attrib_incr = 2;
-            } else if (state_iter == STATE_LIGHTPROD_ARRAY_TWOSIDE) {
+               break;
+            case STATE_LIGHTPROD_ARRAY_TWOSIDE:
                num_attribs = 6;
                base_attrib = MAT_ATTRIB_FRONT_AMBIENT;
                attrib_incr = 1;
+               break;
+            default:
+               UNREACHABLE("unexpected state-var");
             }
 
             /* Find all attributes for one light. */

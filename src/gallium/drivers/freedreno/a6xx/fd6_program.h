@@ -1,25 +1,7 @@
 /*
- * Copyright (C) 2016 Rob Clark <robclark@freedesktop.org>
+ * Copyright © 2016 Rob Clark <robclark@freedesktop.org>
  * Copyright © 2018 Google, Inc.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * SPDX-License-Identifier: MIT
  *
  * Authors:
  *    Rob Clark <robclark@freedesktop.org>
@@ -34,16 +16,18 @@
 #include "ir3/ir3_shader.h"
 #include "ir3_cache.h"
 
+class fd_cs;
+class fd_crb;
 struct fd6_emit;
 
 struct fd6_program_state {
    struct ir3_program_state base;
-   struct ir3_shader_variant *bs; /* binning pass vs */
-   struct ir3_shader_variant *vs;
-   struct ir3_shader_variant *hs;
-   struct ir3_shader_variant *ds;
-   struct ir3_shader_variant *gs;
-   struct ir3_shader_variant *fs;
+   const struct ir3_shader_variant *bs; /* binning pass vs */
+   const struct ir3_shader_variant *vs;
+   const struct ir3_shader_variant *hs;
+   const struct ir3_shader_variant *ds;
+   const struct ir3_shader_variant *gs;
+   const struct ir3_shader_variant *fs;
    struct fd_ringbuffer *config_stateobj;
    struct fd_ringbuffer *interp_stateobj;
    struct fd_ringbuffer *binning_stateobj;
@@ -56,7 +40,22 @@ struct fd6_program_state {
     * Whether multiple viewports are used is determined by whether
     * the last shader stage writes viewport id
     */
-   uint16_t num_viewports;
+   uint8_t num_viewports;
+
+   /**
+    * The # of shader stages that need driver params.
+    */
+   uint8_t num_driver_params;
+
+   /**
+    * The # of shader stages that need ubo driver params
+    */
+   uint8_t num_ubo_driver_params;
+
+   /**
+    * Is (num_driver_params num_ubo_driver_params) > 0
+    */
+   uint8_t needs_driver_params;
 
    /**
     * Output components from frag shader.  It is possible to have
@@ -70,6 +69,11 @@ struct fd6_program_state {
     * calculate it up-front.
     */
    uint32_t user_consts_cmdstream_size;
+
+   /**
+    * The FS contribution to LRZ state
+    */
+   struct fd6_lrz_state lrz_mask;
 };
 
 static inline struct fd6_program_state *
@@ -89,11 +93,36 @@ fd6_last_shader(const struct fd6_program_state *state)
       return state->vs;
 }
 
-void fd6_emit_shader(struct fd_context *ctx, struct fd_ringbuffer *ring,
+template <chip CHIP>
+static inline bool
+fd6_load_shader_consts_via_preamble(const struct ir3_shader_variant *v)
+{
+   if (CHIP == A8XX) {
+      assert(v->compiler->info->props.load_shader_consts_via_preamble);
+      return true;
+   }
+   return (CHIP == A7XX) && v->compiler->info->props.load_shader_consts_via_preamble;
+}
+
+template <chip CHIP>
+static inline bool
+fd6_load_inline_uniforms_via_preamble_ldgk(const struct ir3_shader_variant *v)
+{
+   if (CHIP == A8XX) {
+      assert(v->compiler->info->props.load_inline_uniforms_via_preamble_ldgk);
+      return true;
+   }
+   return (CHIP == A7XX) && v->compiler->info->props.load_inline_uniforms_via_preamble_ldgk;
+}
+
+template <chip CHIP>
+void fd6_emit_shader(struct fd_screen *screen, fd_cs &cs,
                      const struct ir3_shader_variant *so) assert_dt;
 
+template <chip CHIP>
 struct fd_ringbuffer *fd6_program_interp_state(struct fd6_emit *emit) assert_dt;
 
+template <chip CHIP>
 void fd6_prog_init(struct pipe_context *pctx);
 
 #endif /* FD6_PROGRAM_H_ */

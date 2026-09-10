@@ -25,6 +25,7 @@
 #define DISK_CACHE_OS_H
 
 #include "util/u_queue.h"
+#include "util/disk_cache.h"
 
 #if DETECT_OS_WINDOWS
 
@@ -34,6 +35,7 @@
 
 #include "util/fossilize_db.h"
 #include "util/mesa_cache_db.h"
+#include "util/mesa_cache_db_multipart.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -49,6 +51,7 @@ extern "C" {
 #define CACHE_INDEX_MAX_KEYS (1 << CACHE_INDEX_KEY_BITS)
 
 enum disk_cache_type {
+   DISK_CACHE_NONE,
    DISK_CACHE_MULTI_FILE,
    DISK_CACHE_SINGLE_FILE,
    DISK_CACHE_DATABASE,
@@ -64,7 +67,7 @@ struct disk_cache {
 
    struct foz_db foz_db;
 
-   struct mesa_cache_db cache_db;
+   struct mesa_cache_db_multipart cache_db;
 
    enum disk_cache_type type;
 
@@ -76,7 +79,7 @@ struct disk_cache {
    size_t index_mmap_size;
 
    /* Pointer to total size of all objects in cache (within index_mmap) */
-   uint64_t *size;
+   p_atomic_uint64_t *size;
 
    /* Pointer to stored keys, (within index_mmap). */
    uint8_t *stored_keys;
@@ -125,10 +128,12 @@ struct disk_cache_put_job {
    struct cache_item_metadata cache_item_metadata;
 };
 
-char *
+const char *
 disk_cache_generate_cache_dir(void *mem_ctx, const char *gpu_name,
                               const char *driver_id,
-                              enum disk_cache_type cache_type);
+                              const char *cache_dir_name_custom,
+                              enum disk_cache_type cache_type,
+                              bool mkdir);
 
 void
 disk_cache_evict_lru_item(struct disk_cache *cache);
@@ -159,9 +164,11 @@ disk_cache_enabled(void);
 bool
 disk_cache_load_cache_index_foz(void *mem_ctx, struct disk_cache *cache);
 
+void
+disk_cache_touch_cache_user_marker(char *path);
+
 bool
-disk_cache_mmap_cache_index(void *mem_ctx, struct disk_cache *cache,
-                            char *path);
+disk_cache_mmap_cache_index(void *mem_ctx, struct disk_cache *cache);
 
 void
 disk_cache_destroy_mmap(struct disk_cache *cache);
@@ -175,6 +182,9 @@ disk_cache_db_write_item_to_disk(struct disk_cache_put_job *dc_job);
 
 bool
 disk_cache_db_load_cache_index(void *mem_ctx, struct disk_cache *cache);
+
+void
+disk_cache_delete_old_cache(void);
 
 #ifdef __cplusplus
 }

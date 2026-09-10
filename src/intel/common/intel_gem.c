@@ -21,10 +21,12 @@
  */
 
 #include "intel_gem.h"
-#include "drm-uapi/i915_drm.h"
 
-#include "intel_engine_i915.h"
-#include "intel_gem_i915.h"
+#include "i915/intel_engine.h"
+#include "i915/intel_gem.h"
+#include "xe/intel_gem.h"
+
+#include "util/os_time.h"
 
 bool
 intel_gem_supports_syncobj_wait(int fd)
@@ -73,12 +75,14 @@ intel_gem_destroy_context(int fd, uint32_t context_id)
 
 bool
 intel_gem_create_context_engines(int fd,
+                                 enum intel_gem_create_context_flags flags,
                                  const struct intel_query_engine_info *info,
                                  int num_engines, enum intel_engine_class *engine_classes,
+                                 uint32_t vm_id,
                                  uint32_t *context_id)
 {
-   return i915_gem_create_context_engines(fd, info, num_engines,
-                                          engine_classes, context_id);
+   return i915_gem_create_context_engines(fd, flags, info, num_engines,
+                                          engine_classes, vm_id, context_id);
 }
 
 bool
@@ -95,9 +99,46 @@ intel_gem_get_context_param(int fd, uint32_t context, uint32_t param,
    return i915_gem_get_context_param(fd, context, param, value);
 }
 
-bool intel_gem_read_render_timestamp(int fd, uint64_t *value)
+bool
+intel_gem_read_render_timestamp(int fd,
+                                enum intel_kmd_type kmd_type,
+                                uint64_t *value)
 {
-   return i915_gem_read_render_timestamp(fd, value);
+   switch (kmd_type) {
+   case INTEL_KMD_TYPE_I915:
+      return i915_gem_read_render_timestamp(fd, value);
+   case INTEL_KMD_TYPE_XE:
+      return xe_gem_read_render_timestamp(fd, value);
+   default:
+      UNREACHABLE("Missing");
+      return false;
+   }
+}
+
+bool
+intel_gem_read_correlate_cpu_gpu_timestamp(int fd,
+                                           enum intel_kmd_type kmd_type,
+                                           enum intel_engine_class engine_class,
+                                           uint16_t engine_instance,
+                                           clockid_t cpu_clock_id,
+                                           uint64_t *cpu_timestamp,
+                                           uint64_t *gpu_timestamp,
+                                           uint64_t *cpu_delta)
+{
+   switch (kmd_type) {
+   case INTEL_KMD_TYPE_I915:
+      return false;
+   case INTEL_KMD_TYPE_XE:
+      return xe_gem_read_correlate_cpu_gpu_timestamp(fd, engine_class,
+                                                     engine_instance,
+                                                     cpu_clock_id,
+                                                     cpu_timestamp,
+                                                     gpu_timestamp,
+                                                     cpu_delta);
+   default:
+      UNREACHABLE("Missing");
+      return false;
+   }
 }
 
 bool
@@ -108,9 +149,37 @@ intel_gem_create_context_ext(int fd, enum intel_gem_create_context_flags flags,
 }
 
 bool
-intel_gem_supports_protected_context(int fd)
+intel_gem_supports_protected_context(int fd, enum intel_kmd_type kmd_type)
 {
-   return i915_gem_supports_protected_context(fd);
+   switch (kmd_type) {
+   case INTEL_KMD_TYPE_I915:
+      return i915_gem_supports_protected_context(fd);
+   case INTEL_KMD_TYPE_XE:
+      return xe_gem_supports_protected_exec_queue(fd);
+   default:
+      UNREACHABLE("Missing");
+      return false;
+   }
+}
+
+bool
+intel_gem_wait_on_get_param(int fd, uint32_t param, int target_val,
+                            uint32_t timeout_ms)
+{
+   int64_t start_time = os_time_get();
+   int64_t end_time = start_time + (timeout_ms * 1000);
+   int val = -1;
+
+   errno = 0;
+   do {
+      if (!intel_gem_get_param(fd, param, &val))
+         break;
+   } while (val != target_val && !os_time_timeout(start_time, end_time, os_time_get()));
+
+   if (errno || val != target_val)
+      return false;
+
+   return true;
 }
 
 bool
@@ -119,7 +188,16 @@ intel_gem_get_param(int fd, uint32_t param, int *value)
    return i915_gem_get_param(fd, param, value);
 }
 
-bool intel_gem_can_render_on_fd(int fd)
+bool
+intel_gem_can_render_on_fd(int fd, enum intel_kmd_type kmd_type)
 {
-   return i915_gem_can_render_on_fd(fd);
+   switch (kmd_type) {
+   case INTEL_KMD_TYPE_I915:
+      return i915_gem_can_render_on_fd(fd);
+   case INTEL_KMD_TYPE_XE:
+      return xe_gem_can_render_on_fd(fd);
+   default:
+      UNREACHABLE("Missing");
+      return false;
+   }
 }

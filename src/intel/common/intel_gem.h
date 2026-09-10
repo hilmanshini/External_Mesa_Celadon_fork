@@ -24,13 +24,8 @@
 #ifndef INTEL_GEM_H
 #define INTEL_GEM_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-#include "drm-uapi/i915_drm.h"
-
 #include <assert.h>
+#include <time.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -39,7 +34,12 @@ extern "C" {
 #include <sys/ioctl.h>
 
 #include "intel_engine.h"
+#include "drm-uapi/drm.h"
 #include "util/macros.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 #define RCS_TIMESTAMP 0x2358
 
@@ -71,6 +71,10 @@ intel_48b_address(uint64_t v)
    return (uint64_t)(v << shift) >> shift;
 }
 
+#ifdef HAVE_INTEL_VIRTIO
+extern int intel_virtio_ioctl(int fd, unsigned long request, void *arg);
+#endif
+
 /**
  * Call ioctl, restarting if it is interrupted
  */
@@ -80,93 +84,46 @@ intel_ioctl(int fd, unsigned long request, void *arg)
     int ret;
 
     do {
-        ret = ioctl(fd, request, arg);
+#ifdef HAVE_INTEL_VIRTIO
+      ret = intel_virtio_ioctl(fd, request, arg);
+#else
+      ret = ioctl(fd, request, arg);
+#endif
     } while (ret == -1 && (errno == EINTR || errno == EAGAIN));
     return ret;
 }
 
-/**
- * A wrapper around DRM_IOCTL_I915_QUERY
- *
- * Unfortunately, the error semantics of this ioctl are rather annoying so
- * it's better to have a common helper.
- */
-static inline int
-intel_i915_query_flags(int fd, uint64_t query_id, uint32_t flags,
-                       void *buffer, int32_t *buffer_len)
-{
-   struct drm_i915_query_item item = {
-      .query_id = query_id,
-      .length = *buffer_len,
-      .flags = flags,
-      .data_ptr = (uintptr_t)buffer,
-   };
-
-   struct drm_i915_query args = {
-      .num_items = 1,
-      .flags = 0,
-      .items_ptr = (uintptr_t)&item,
-   };
-
-   int ret = intel_ioctl(fd, DRM_IOCTL_I915_QUERY, &args);
-   if (ret != 0)
-      return -errno;
-   else if (item.length < 0)
-      return item.length;
-
-   *buffer_len = item.length;
-   return 0;
-}
-
-static inline int
-intel_i915_query(int fd, uint64_t query_id, void *buffer,
-                 int32_t *buffer_len)
-{
-   return intel_i915_query_flags(fd, query_id, 0, buffer, buffer_len);
-}
-
-/**
- * Query for the given data, allocating as needed
- *
- * The caller is responsible for freeing the returned pointer.
- */
-static inline void *
-intel_i915_query_alloc(int fd, uint64_t query_id, int32_t *query_length)
-{
-   if (query_length)
-      *query_length = 0;
-
-   int32_t length = 0;
-   int ret = intel_i915_query(fd, query_id, NULL, &length);
-   if (ret < 0)
-      return NULL;
-
-   void *data = calloc(1, length);
-   assert(data != NULL); /* This shouldn't happen in practice */
-   if (data == NULL)
-      return NULL;
-
-   ret = intel_i915_query(fd, query_id, data, &length);
-   assert(ret == 0); /* We should have caught the error above */
-   if (ret < 0) {
-      free(data);
-      return NULL;
-   }
-
-   if (query_length)
-      *query_length = length;
-
-   return data;
-}
-
 bool intel_gem_supports_syncobj_wait(int fd);
+
+bool
+intel_gem_read_render_timestamp(int fd, enum intel_kmd_type kmd_type,
+                                uint64_t *value);
+bool
+intel_gem_read_correlate_cpu_gpu_timestamp(int fd,
+                                           enum intel_kmd_type kmd_type,
+                                           enum intel_engine_class engine_class,
+                                           uint16_t engine_instance,
+                                           clockid_t cpu_clock_id,
+                                           uint64_t *cpu_timestamp,
+                                           uint64_t *gpu_timestamp,
+                                           uint64_t *cpu_delta);
+bool intel_gem_can_render_on_fd(int fd, enum intel_kmd_type kmd_type);
+
+/* Functions only used by i915 */
+enum intel_gem_create_context_flags {
+   INTEL_GEM_CREATE_CONTEXT_EXT_RECOVERABLE_FLAG = BITFIELD_BIT(0),
+   INTEL_GEM_CREATE_CONTEXT_EXT_PROTECTED_FLAG   = BITFIELD_BIT(1),
+   INTEL_GEM_CREATE_CONTEXT_EXT_LOW_LATENCY_FLAG = BITFIELD_BIT(2),
+};
 
 bool intel_gem_create_context(int fd, uint32_t *context_id);
 bool intel_gem_destroy_context(int fd, uint32_t context_id);
 bool
 intel_gem_create_context_engines(int fd,
+                                 enum intel_gem_create_context_flags flags,
                                  const struct intel_query_engine_info *info,
                                  int num_engines, enum intel_engine_class *engine_classes,
+                                 uint32_t vm_id,
                                  uint32_t *context_id);
 bool
 intel_gem_set_context_param(int fd, uint32_t context, uint32_t param,
@@ -174,36 +131,38 @@ intel_gem_set_context_param(int fd, uint32_t context, uint32_t param,
 bool
 intel_gem_get_context_param(int fd, uint32_t context, uint32_t param,
                             uint64_t *value);
-
-bool intel_gem_read_render_timestamp(int fd, uint64_t *value);
 bool intel_gem_get_param(int fd, uint32_t param, int *value);
-bool intel_gem_can_render_on_fd(int fd);
+bool intel_gem_wait_on_get_param(int fd, uint32_t param, int target_val,
+                                 uint32_t timeout_ms);
+
+bool intel_gem_create_context_ext(int fd, enum intel_gem_create_context_flags flags,
+                                  uint32_t *ctx_id);
+bool intel_gem_supports_protected_context(int fd,
+                                          enum intel_kmd_type kmd_type);
+
+/* Definitions used by the execbuf ioctl wrappers in the backends.
+ * With the values below, after 80 retries we have slept ~16s, and the warning
+ * is given at ~2s.
+ */
+#define INTEL_EXEC_IOCTL_MAX_RETRIES 80
+#define INTEL_EXEC_IOCTL_RETRY_WARN 40
+static inline int
+intel_exec_ioctl_sleep_us(int retries)
+{
+   return 100 * retries * retries;
+}
+
+#define DRM_IOCTL_I915_LAST             DRM_IO(DRM_COMMAND_END - 1)
+
+struct drm_intel_stub_devinfo {
+   uint64_t addr;
+   uint32_t size;
+};
+
+#define DRM_IOCTL_INTEL_STUB_DEVINFO    DRM_IOR(DRM_IOCTL_I915_LAST, struct drm_intel_stub_devinfo)
 
 #ifdef __cplusplus
 }
 #endif
-
-enum intel_gem_create_context_flags {
-   INTEL_GEM_CREATE_CONTEXT_EXT_RECOVERABLE_FLAG = BITFIELD_BIT(0),
-   INTEL_GEM_CREATE_CONTEXT_EXT_PROTECTED_FLAG   = BITFIELD_BIT(1),
-};
-bool intel_gem_create_context_ext(int fd, enum intel_gem_create_context_flags flags,
-                                  uint32_t *ctx_id);
-bool intel_gem_supports_protected_context(int fd);
-
-static inline void
-intel_gem_add_ext(__u64 *ptr, uint32_t ext_name,
-                  struct i915_user_extension *ext)
-{
-   __u64 *iter = ptr;
-
-   while (*iter != 0) {
-      iter = (__u64 *) &((struct i915_user_extension *)(uintptr_t)*iter)->next_extension;
-   }
-
-   ext->name = ext_name;
-
-   *iter = (uintptr_t) ext;
-}
 
 #endif /* INTEL_GEM_H */

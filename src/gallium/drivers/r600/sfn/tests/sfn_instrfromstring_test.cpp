@@ -51,7 +51,7 @@ TEST_F(TestInstrFromString, test_alu_lds_read_ret)
 {
    add_dest_from_string("R1999.x");
 
-   AluInstr expect(DS_OP_READ_RET, {new Register(1999, 0, pin_none)}, {});
+   AluInstr expect(DS_OP_READ_RET, {new Register(1999, 0, pin_none)}, AluInstr::empty);
 
    check("ALU LDS READ_RET __.x : R1999.x {}", expect);
 }
@@ -72,7 +72,8 @@ TEST_F(TestInstrFromString, test_alu_mov_neg)
    AluInstr expect(op1_mov,
                    new Register(2000, 1, pin_none),
                    new Register(1999, 0, pin_none),
-                   {alu_write, alu_last_instr, alu_src0_neg});
+                   {alu_write, alu_last_instr});
+   expect.set_source_mod(0, AluInstr::mod_neg);
 
    check("ALU MOV R2000.y : -R1999.x {WL}", expect);
 }
@@ -83,7 +84,8 @@ TEST_F(TestInstrFromString, test_alu_mov_abs)
    AluInstr expect(op1_mov,
                    new Register(2000, 1, pin_none),
                    new Register(1999, 0, pin_none),
-                   {alu_write, alu_last_instr, alu_src0_abs});
+                   {alu_write, alu_last_instr});
+   expect.set_source_mod(0, AluInstr::mod_abs);
 
    check("ALU MOV R2000.y : |R1999.x| {WL}", expect);
 }
@@ -94,7 +96,10 @@ TEST_F(TestInstrFromString, test_alu_mov_neg_abs)
    AluInstr expect(op1_mov,
                    new Register(2000, 1, pin_none),
                    new Register(1999, 0, pin_none),
-                   {alu_write, alu_src0_neg, alu_src0_abs});
+                   AluInstr::write);
+   expect.set_source_mod(0, AluInstr::mod_abs);
+   expect.set_source_mod(0, AluInstr::mod_neg);
+
    check("ALU MOV R2000.y : -|R1999.x| {W}", expect);
 }
 
@@ -104,9 +109,8 @@ TEST_F(TestInstrFromString, test_alu_add)
    add_dest_from_string("R1999.w");
 
    AluInstr expect(op2_add,
-                   new Register(2000, 1, pin_none),
-                   new Register(1999, 3, pin_none),
-                   new Register(1998, 2, pin_none),
+                   1,
+                   {new Register(1999, 3, pin_none), new Register(1998, 2, pin_none)},
                    {alu_last_instr});
    check("ALU ADD __.y : R1999.w R1998.z {L}", expect);
 }
@@ -116,9 +120,8 @@ TEST_F(TestInstrFromString, test_alu_add_clmap)
    add_dest_from_string("R1998.z");
    add_dest_from_string("R1999.w");
    AluInstr expect(op2_add,
-                   new Register(2000, 1, pin_none),
-                   new Register(1999, 3, pin_none),
-                   new Register(1998, 2, pin_none),
+                   1,
+                   {new Register(1999, 3, pin_none), new Register(1998, 2, pin_none)},
                    {alu_last_instr, alu_dst_clamp});
    check("ALU ADD CLAMP __.y : R1999.w R1998.z {L}", expect);
 }
@@ -128,10 +131,11 @@ TEST_F(TestInstrFromString, test_alu_add_neg2)
    add_dest_from_string("R1998.z");
    add_dest_from_string("R1999.w");
    AluInstr expect(op2_add,
-                   new Register(2000, 1, pin_none),
-                   new Register(1999, 3, pin_none),
-                   new Register(1998, 2, pin_none),
-                   {alu_last_instr, alu_src1_neg});
+                   1,
+                   {new Register(1999, 3, pin_none), new Register(1998, 2, pin_none)},
+                   {alu_last_instr});
+   expect.set_source_mod(1, AluInstr::mod_neg);
+
    check("ALU ADD __.y : R1999.w -R1998.z {L}", expect);
 }
 
@@ -140,10 +144,10 @@ TEST_F(TestInstrFromString, test_alu_sete_update_pref)
    add_dest_from_string("R1998.z");
    add_dest_from_string("R1999.w");
    AluInstr expect(op2_sete,
-                   new Register(2000, 1, pin_none),
-                   new Register(1999, 3, pin_none),
-                   new Register(1998, 2, pin_none),
-                   {alu_last_instr, alu_src1_neg, alu_update_pred});
+                   1,
+                   {new Register(1999, 3, pin_none), new Register(1998, 2, pin_none)},
+                   {alu_last_instr, alu_update_pred});
+   expect.set_source_mod(1, AluInstr::mod_neg);
    check("ALU SETE __.y : R1999.w -R1998.z {LP}", expect);
 }
 
@@ -152,9 +156,8 @@ TEST_F(TestInstrFromString, test_alu_sete_update_pref_empty_dest)
    add_dest_from_string("R1998.z");
    add_dest_from_string("R1999.w");
    AluInstr expect(op2_sete,
-                   new Register(2000, 0, pin_none),
-                   new Register(1999, 3, pin_none),
-                   new Register(1998, 2, pin_none),
+                   0,
+                   {new Register(1999, 3, pin_none), new Register(1998, 2, pin_none)},
                    {alu_last_instr, alu_update_pred});
    check("ALU SETE __.x : R1999.w R1998.z {LP}", expect);
 }
@@ -164,10 +167,10 @@ TEST_F(TestInstrFromString, test_alu_setne_update_exec)
    add_dest_from_string("R1998.z");
    add_dest_from_string("R1999.w");
    AluInstr expect(op2_setne,
-                   new Register(2000, 1, pin_none),
-                   new Register(1999, 3, pin_none),
-                   new Register(1998, 2, pin_none),
-                   {alu_last_instr, alu_src1_neg, alu_update_exec});
+                   1,
+                   {new Register(1999, 3, pin_none), new Register(1998, 2, pin_none)},
+                   {alu_last_instr, alu_update_exec});
+   expect.set_source_mod(1, AluInstr::mod_neg);
    check("ALU SETNE __.y : R1999.w -R1998.z {LE}", expect);
 }
 
@@ -179,7 +182,8 @@ TEST_F(TestInstrFromString, test_alu_add_abs2)
                    new Register(2000, 1, pin_none),
                    new Register(1999, 3, pin_none),
                    new Register(1998, 2, pin_none),
-                   {alu_write, alu_last_instr, alu_src1_abs});
+                   {alu_write, alu_last_instr});
+   expect.set_source_mod(1, AluInstr::mod_abs);
    check("ALU ADD R2000.y : R1999.w |R1998.z| {WL}", expect);
 }
 
@@ -191,7 +195,10 @@ TEST_F(TestInstrFromString, test_alu_add_abs2_neg2)
                    new Register(2000, 1, pin_none),
                    new Register(1999, 3, pin_none),
                    new Register(1998, 2, pin_none),
-                   {alu_write, alu_last_instr, alu_src1_abs, alu_src1_neg});
+                   {alu_write, alu_last_instr});
+   expect.set_source_mod(1, AluInstr::mod_neg);
+   expect.set_source_mod(1, AluInstr::mod_abs);
+
    check("ALU ADD R2000.y : R1999.w -|R1998.z| {WL}", expect);
 }
 
@@ -215,12 +222,12 @@ TEST_F(TestInstrFromString, test_alu_muladd_neg3)
    add_dest_from_string("R1999.w");
    add_dest_from_string("R2000.y");
    AluInstr expect(op3_muladd_ieee,
-                   new Register(2000, 1, pin_none),
+                   new Register(g_registers_unused, 1, pin_chan),
                    new Register(1999, 3, pin_none),
                    new Register(1998, 2, pin_none),
                    new Register(2000, 1, pin_none),
-                   {alu_last_instr, alu_src2_neg});
-   check("ALU MULADD_IEEE __.y : R1999.w R1998.z -R2000.y {L}", expect);
+                   {alu_last_instr});
+   check("ALU MULADD_IEEE __.y@chan : R1999.w R1998.z -R2000.y {L}", expect);
 }
 
 TEST_F(TestInstrFromString, test_alu_mov_bs)
@@ -268,6 +275,48 @@ TEST_F(TestInstrFromString, test_alu_dot4_ieee)
    check(init, expect);
 }
 
+TEST_F(TestInstrFromString, test_alu_dot4_with_mods)
+{
+   add_dest_from_string("R199.x");
+   add_dest_from_string("R199.y");
+   add_dest_from_string("R199.z");
+   add_dest_from_string("R199.w");
+   add_dest_from_string("R198.x");
+   add_dest_from_string("R198.y");
+   add_dest_from_string("R198.z");
+   add_dest_from_string("R198.w");
+   auto init = std::string("ALU DOT4_IEEE R2000.y : -R199.x R198.w + R199.y |R198.z| + "
+                           "-|R199.z| R198.y + -R199.w R198.x {WL}");
+
+   AluInstr expect(op2_dot4_ieee,
+                   new Register(2000, 1, pin_none),
+                   {new Register(199, 0, pin_none),
+                    new Register(198, 3, pin_none),
+                    new Register(199, 1, pin_none),
+                    new Register(198, 2, pin_none),
+                    new Register(199, 2, pin_none),
+                    new Register(198, 1, pin_none),
+                    new Register(199, 3, pin_none),
+                    new Register(198, 0, pin_none)},
+                   {alu_write, alu_last_instr},
+                   4);
+
+   expect.set_source_mod(0, AluInstr::mod_neg);
+   expect.set_source_mod(3, AluInstr::mod_abs);
+   expect.set_source_mod(4, AluInstr::mod_neg);
+   expect.set_source_mod(4, AluInstr::mod_abs);
+   expect.set_source_mod(7, AluInstr::mod_neg);
+
+   check(init, expect);
+   auto instr = from_string(init);
+
+   std::ostringstream print_str;
+   print_str << *instr;
+   EXPECT_EQ(print_str.str(), init);
+
+}
+
+
 TEST_F(TestInstrFromString, test_alu_mov_cf)
 {
    add_dest_from_string("R1999.x");
@@ -296,8 +345,24 @@ TEST_F(TestInstrFromString, test_alu_interp_xy)
                    new Register(1024, 2, pin_chan),
                    r0y,
                    new InlineConstant(ALU_SRC_PARAM_BASE, 2),
-                   {alu_write});
+                   AluInstr::write);
    expect.set_bank_swizzle(alu_vec_210);
+
+   check(init, expect);
+}
+
+TEST_F(TestInstrFromString, test_alu_add_d2)
+{
+   add_dest_from_string("R0.y@fully");
+   add_dest_from_string("R0.x@fully");
+   auto init = std::string("ALU ADD D2 R1024.z@chan : R0.y@fully R0.x@fully {W}");
+
+   auto r0x = new Register(0, 0, pin_fully);
+   auto r0y = new Register(0, 1, pin_fully);
+   r0y->set_flag(Register::pin_start);
+   r0x->set_flag(Register::pin_start);
+   AluInstr expect(op2_add, new Register(1024, 2, pin_chan), r0y, r0x, AluInstr::write);
+   expect.set_output_modifier(AluInstr::omod_div2);
 
    check(init, expect);
 }
@@ -305,16 +370,15 @@ TEST_F(TestInstrFromString, test_alu_interp_xy)
 TEST_F(TestInstrFromString, test_alu_interp_xy_no_write)
 {
    add_dest_from_string("R0.x@fully");
-   auto init = std::string("ALU INTERP_XY __.x@chan : R0.x@fully Param0.z {} VEC_210");
+   auto init = std::string("ALU INTERP_XY __.x : R0.x@fully Param0.z {} VEC_210");
 
    auto r0x = new Register(0, 0, pin_fully);
    r0x->set_flag(Register::pin_start);
 
    AluInstr expect(op2_interp_xy,
-                   new Register(1024, 0, pin_chan),
-                   r0x,
-                   new InlineConstant(ALU_SRC_PARAM_BASE, 2),
-                   {});
+                   0,
+                   {r0x, new InlineConstant(ALU_SRC_PARAM_BASE, 2)},
+                   AluInstr::empty);
    expect.set_bank_swizzle(alu_vec_210);
 
    check(init, expect);
@@ -338,7 +402,7 @@ TEST_F(TestInstrFromString, test_tex_sample_basic)
    add_dest_vec4_from_string("R2000.xyzw");
    auto init = std::string("TEX SAMPLE R1000.xyzw : R2000.xyzw RID:10 SID:1 NNNN");
    TexInstr expect(
-      TexInstr::sample, RegisterVec4(1000), {0, 1, 2, 3}, RegisterVec4(2000), 1, 10);
+      TexInstr::sample, RegisterVec4(1000), {0, 1, 2, 3}, RegisterVec4(2000), 10, nullptr, 1);
    check(init, expect);
 }
 
@@ -347,7 +411,7 @@ TEST_F(TestInstrFromString, test_tex_ld_basic)
    add_dest_vec4_from_string("R2002.xyzw");
    auto init = std::string("TEX LD R1001.xyzw : R2002.xyzw RID:27 SID:7 NNNN");
    TexInstr expect(
-      TexInstr::ld, RegisterVec4(1001), {0, 1, 2, 3}, RegisterVec4(2002), 7, 27);
+      TexInstr::ld, RegisterVec4(1001), {0, 1, 2, 3}, RegisterVec4(2002), 27, nullptr, 7);
    check(init, expect);
 }
 
@@ -358,7 +422,7 @@ TEST_F(TestInstrFromString, test_tex_sample_with_offset)
       std::string("TEX SAMPLE R1001.xyzw : R2002.xyzw RID:27 SID:2 OX:1 OY:-2 OZ:5 NNNN");
 
    TexInstr expect(
-      TexInstr::sample, RegisterVec4(1001), {0, 1, 2, 3}, RegisterVec4(2002), 2, 27);
+      TexInstr::sample, RegisterVec4(1001), {0, 1, 2, 3}, RegisterVec4(2002), 27, nullptr, 2);
    expect.set_offset(0, 1);
    expect.set_offset(1, -2);
    expect.set_offset(2, 5);
@@ -372,7 +436,7 @@ TEST_F(TestInstrFromString, test_tex_gather4_x)
    auto init =
       std::string("TEX GATHER4 R1001.xyzw : R2002.xyzw RID:7 SID:27 MODE:0 NNNN");
    TexInstr expect(
-      TexInstr::gather4, RegisterVec4(1001), {0, 1, 2, 3}, RegisterVec4(2002), 27, 7);
+      TexInstr::gather4, RegisterVec4(1001), {0, 1, 2, 3}, RegisterVec4(2002), 7, nullptr, 27);
    check(init, expect);
 }
 
@@ -382,7 +446,7 @@ TEST_F(TestInstrFromString, test_tex_gather4_y)
    auto init =
       std::string("TEX GATHER4 R1001.xyzw : R2002.xyzw RID:7 SID:27 MODE:1 NNNN");
    TexInstr expect(
-      TexInstr::gather4, RegisterVec4(1001), {0, 1, 2, 3}, RegisterVec4(2002), 27, 7);
+      TexInstr::gather4, RegisterVec4(1001), {0, 1, 2, 3}, RegisterVec4(2002), 7, nullptr, 27);
    expect.set_gather_comp(1);
    check(init, expect);
 }
@@ -396,8 +460,9 @@ TEST_F(TestInstrFromString, test_tex_sampler_with_offset)
                    RegisterVec4(1001),
                    {0, 1, 2, 3},
                    RegisterVec4(2002),
-                   27,
                    7,
+                   nullptr,
+                   27,
                    new Register(200, 2, pin_none));
    check(init, expect);
 }
@@ -529,7 +594,6 @@ TEST_F(TestInstrFromString, test_load_from_scratch)
    expect_fetch.set_print_skip(FetchInstr::EPrintSkip::ftype);
    expect_fetch.set_fetch_flag(FetchInstr::EFlags::uncached);
    expect_fetch.set_fetch_flag(FetchInstr::EFlags::indexed);
-   expect_fetch.set_fetch_flag(FetchInstr::EFlags::wait_ack);
    expect_fetch.set_array_size(19);
 
    check(init, expect_fetch);
@@ -589,7 +653,6 @@ TEST_F(TestInstrFromString, test_load_from_scratch_fixed_offset)
    expect_fetch.set_print_skip(FetchInstr::EPrintSkip::fmt);
    expect_fetch.set_print_skip(FetchInstr::EPrintSkip::ftype);
    expect_fetch.set_fetch_flag(FetchInstr::EFlags::uncached);
-   expect_fetch.set_fetch_flag(FetchInstr::EFlags::wait_ack);
    expect_fetch.set_array_base(10);
    expect_fetch.set_array_size(39);
 
@@ -711,7 +774,7 @@ TestInstrFromString::TestInstrFromString() {}
 PInst
 TestInstrFromString::from_string(const std::string& s)
 {
-   return m_instr_factory->from_string(s, 0);
+   return m_instr_factory->from_string(s, 0, false);
 }
 
 void

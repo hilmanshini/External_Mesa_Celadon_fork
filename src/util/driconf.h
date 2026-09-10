@@ -58,6 +58,12 @@
          .end = { ._int = max },                \
       }                                         \
 
+#define DRI_CONF_RANGE_U64(min, max)            \
+      .range = {                                \
+         .start = { ._uint64 = min },           \
+         .end = { ._uint64 = max },             \
+      }
+
 #define DRI_CONF_RANGE_F(min, max)              \
       .range = {                                \
          .start = { ._float = min },            \
@@ -86,6 +92,16 @@
          DRI_CONF_RANGE_I(min, max),                            \
       },                                                        \
       .value = { ._int = def },                                 \
+   },
+
+#define DRI_CONF_OPT_U64(_name, def, min, max, _desc) {         \
+      .desc = _desc,                                            \
+      .info = {                                                 \
+         .name = #_name,                                        \
+         .type = DRI_UINT64,                                    \
+         DRI_CONF_RANGE_U64(min, max),                          \
+      },                                                        \
+      .value = { ._uint64 = def },                                 \
    },
 
 #define DRI_CONF_OPT_F(_name, def, min, max, _desc) {           \
@@ -132,10 +148,6 @@
  */
 #define DRI_CONF_SECTION_DEBUG DRI_CONF_SECTION("Debugging")
 
-#define DRI_CONF_ALWAYS_FLUSH_BATCH(def) \
-   DRI_CONF_OPT_B(always_flush_batch, def,                              \
-                  "Enable flushing batchbuffer after each draw call")
-
 #define DRI_CONF_ALWAYS_FLUSH_CACHE(def) \
    DRI_CONF_OPT_B(always_flush_cache, def, \
                   "Enable flushing GPU caches with each draw call")
@@ -168,6 +180,13 @@
    DRI_CONF_OPT_B(disable_uniform_array_resize, def, \
                   "Disable the glsl optimisation that resizes uniform arrays")
 
+#define DRI_CONF_ALIAS_SHADER_EXTENSION() \
+   DRI_CONF_OPT_S_NODEF(alias_shader_extension, "Allow  alias for shader extensions")
+
+#define DRI_CONF_ALLOW_VERTEX_TEXTURE_BIAS(def) \
+   DRI_CONF_OPT_B(allow_vertex_texture_bias, def, \
+                  "Allow GL2 vertex shaders to have access to texture2D/textureCube with bias variants")
+
 #define DRI_CONF_FORCE_GLSL_VERSION(def) \
    DRI_CONF_OPT_I(force_glsl_version, def, 0, 999, \
                   "Force a default GLSL version for shaders that lack an explicit #version line")
@@ -183,6 +202,10 @@
 #define DRI_CONF_ALLOW_GLSL_120_SUBSET_IN_110(def) \
    DRI_CONF_OPT_B(allow_glsl_120_subset_in_110, def, \
                   "Allow a subset of GLSL 1.20 in GLSL 1.10 as needed by SPECviewperf13")
+
+#define DRI_CONF_ALLOW_GLSL_EMBEDDED_STRUCTURE_DECLARATIONS(def) \
+   DRI_CONF_OPT_B(allow_glsl_embedded_structure_declarations, def, \
+                  "Allow embedded structure declarations again in GLSL 1.20+")
 
 #define DRI_CONF_ALLOW_GLSL_BUILTIN_CONST_EXPRESSION(def) \
    DRI_CONF_OPT_B(allow_glsl_builtin_const_expression, def, \
@@ -232,6 +255,9 @@
    DRI_CONF_OPT_B(glthread_nop_check_framebuffer_status, def, \
                   "glthread always returns GL_FRAMEBUFFER_COMPLETE to prevent synchronization.")
 
+#define DRI_CONF_FORCE_EXPLICIT_UNIFORM_LOC_ZERO() \
+   DRI_CONF_OPT_S_NODEF(force_explicit_uniform_loc_zero, "Forces an explicit uniform location of zero for the uniform.")
+
 #define DRI_CONF_FORCE_GL_VENDOR() \
    DRI_CONF_OPT_S_NODEF(force_gl_vendor, "Override GPU vendor string.")
 
@@ -262,17 +288,20 @@
    DRI_CONF_OPT_I(override_vram_size, -1, -1, 2147483647, \
                   "Override the VRAM size advertised to the application in MiB (-1 = default)")
 
-#define DRI_CONF_FORCE_GL_NAMES_REUSE(def) \
-   DRI_CONF_OPT_B(force_gl_names_reuse, def, "Force GL names reuse")
-
 #define DRI_CONF_FORCE_GL_MAP_BUFFER_SYNCHRONIZED(def) \
    DRI_CONF_OPT_B(force_gl_map_buffer_synchronized, def, "Override GL_MAP_UNSYNCHRONIZED_BIT.")
+
+#define DRI_CONF_FORCE_GL_DEPTH_COMPONENT_TYPE_INT(def) \
+   DRI_CONF_OPT_B(force_gl_depth_component_type_int, def, "Override GL_DEPTH_COMPONENT type from unsigned short to unsigned int")
 
 #define DRI_CONF_TRANSCODE_ETC(def) \
    DRI_CONF_OPT_B(transcode_etc, def, "Transcode ETC formats to DXTC if unsupported")
 
 #define DRI_CONF_TRANSCODE_ASTC(def) \
    DRI_CONF_OPT_B(transcode_astc, def, "Transcode ASTC formats to DXTC if unsupported")
+
+#define DRI_CONF_ALLOW_COMPRESSED_FALLBACK(def) \
+   DRI_CONF_OPT_B(allow_compressed_fallback, def, "Allow fallback to uncompressed formats for unsupported compressed formats")
 
 #define DRI_CONF_MESA_EXTENSION_OVERRIDE() \
    DRI_CONF_OPT_S_NODEF(mesa_extension_override, \
@@ -281,6 +310,9 @@
 #define DRI_CONF_GLX_EXTENSION_OVERRIDE() \
    DRI_CONF_OPT_S_NODEF(glx_extension_override, \
                   "Allow enabling/disabling a list of GLX extensions")
+
+#define DRI_CONF_GLX_CLEAR_CONTEXT_RESET_ISOLATION_BIT(def) \
+   DRI_CONF_OPT_B(glx_clear_context_reset_isolation_bit, def, "Clear context reset isolation bit before creating context")
 
 #define DRI_CONF_INDIRECT_GL_EXTENSION_OVERRIDE() \
    DRI_CONF_OPT_S_NODEF(indirect_gl_extension_override, \
@@ -294,50 +326,64 @@
    DRI_CONF_OPT_B(ignore_map_unsynchronized, def, \
                   "Ignore GL_MAP_UNSYNCHRONIZED_BIT, workaround for games that use it incorrectly")
 
-#define DRI_CONF_VK_DONT_CARE_AS_LOAD(def) \
-   DRI_CONF_OPT_B(vk_dont_care_as_load, def, \
-                  "Treat VK_ATTACHMENT_LOAD_OP_DONT_CARE as LOAD_OP_LOAD, workaround on tiler GPUs for games that confuse these two load ops")
+#define DRI_CONF_ZERO_INVALIDATED_BUFFERS(def) \
+   DRI_CONF_OPT_B(zero_invalidated_buffers, def, \
+                  "Zero memory returned by glMapBufferRange with GL_MAP_INVALIDATE_*_BIT, workaround for games that rely on the undefined contents being zero")
 
 #define DRI_CONF_LIMIT_TRIG_INPUT_RANGE(def) \
    DRI_CONF_OPT_B(limit_trig_input_range, def, \
                   "Limit trig input range to [-2p : 2p] to improve sin/cos calculation precision on Intel")
 
+#define DRI_CONF_NO_16BIT(def) \
+   DRI_CONF_OPT_B(no_16bit, def, \
+                  "Disable 16-bit instructions")
+
+#define DRI_CONF_IGNORE_DISCARD_FRAMEBUFFER(def) \
+   DRI_CONF_OPT_B(ignore_discard_framebuffer, def, \
+                  "Ignore glDiscardFramebuffer/glInvalidateFramebuffer, workaround for games that use it incorrectly")
+
+#define DRI_CONF_FORCE_VK_VENDOR() \
+   DRI_CONF_OPT_I(force_vk_vendor, 0, -1, 2147483647, "Override GPU vendor id")
+
+#define DRI_CONFIG_INTEL_TBIMR(def) \
+   DRI_CONF_OPT_B(intel_tbimr, def, "Enable TBIMR tiled rendering")
+
+#define DRI_CONFIG_INTEL_FORCE_COMPUTE_SURFACE_PREFETCH(def) \
+   DRI_CONF_OPT_B(intel_force_compute_surface_prefetch, def, \
+                  "Enable binding table surface prefteching for compute shaders")
+
+#define DRI_CONFIG_INTEL_FORCE_SAMPLER_PREFETCH(def) \
+   DRI_CONF_OPT_B(intel_force_sampler_prefetch, def, \
+                  "Enable binding table sampler prefteching")
+
+#define DRI_CONFIG_INTEL_VF_DISTRIBUTION(def) \
+   DRI_CONF_OPT_B(intel_vf_distribution, def, "Enable geometry distribution")
+
+#define DRI_CONFIG_INTEL_TE_DISTRIBUTION(def) \
+   DRI_CONF_OPT_B(intel_te_distribution, def, "Enable tesselation distribution")
+
+#define DRI_CONFIG_INTEL_STORAGE_CACHE_POLICY_WT(def) \
+   DRI_CONF_OPT_B(intel_storage_cache_policy_wt, def, "Enable write-through cache policy for storage buffers/images.")
+
+#define DRI_CONF_INTEL_ENABLE_WA_14018912822(def) \
+   DRI_CONF_OPT_B(intel_enable_wa_14018912822, def, \
+                  "Intel workaround for using zero blend constants")
+
+#define DRI_CONF_INTEL_ENABLE_WA_14024015672_MSAA(def) \
+   DRI_CONF_OPT_B(intel_enable_wa_14024015672_msaa, def, \
+                  "Intel workaround for RHWO MSAA")
+
+#define DRI_CONF_INTEL_SAMPLER_ROUTE_TO_LSC(def) \
+   DRI_CONF_OPT_B(intel_sampler_route_to_lsc, def, \
+                  "Intel specific toggle to enable sampler route to LSC")
+
+#define DRI_CONF_INTEL_DISABLE_THREADED_CONTEXT(def) \
+   DRI_CONF_OPT_B(intel_disable_threaded_context, def, "Disable threaded context")
+
 /**
  * \brief Image quality-related options
  */
 #define DRI_CONF_SECTION_QUALITY DRI_CONF_SECTION("Image Quality")
-
-#define DRI_CONF_PRECISE_TRIG(def) \
-   DRI_CONF_OPT_B(precise_trig, def, \
-                  "Prefer accuracy over performance in trig functions")
-
-#define DRI_CONF_PP_CELSHADE(def) \
-   DRI_CONF_OPT_E(pp_celshade, def, 0, 1, \
-                  "A post-processing filter to cel-shade the output", \
-                  { 0 } )
-
-#define DRI_CONF_PP_NORED(def) \
-   DRI_CONF_OPT_E(pp_nored, def, 0, 1, \
-                  "A post-processing filter to remove the red channel", \
-                  { 0 } )
-
-#define DRI_CONF_PP_NOGREEN(def) \
-   DRI_CONF_OPT_E(pp_nogreen, def, 0, 1, \
-                  "A post-processing filter to remove the green channel", \
-                  { 0 } )
-
-#define DRI_CONF_PP_NOBLUE(def) \
-   DRI_CONF_OPT_E(pp_noblue, def, 0, 1, \
-                  "A post-processing filter to remove the blue channel", \
-                  { 0 } )
-
-#define DRI_CONF_PP_JIMENEZMLAA(def,min,max) \
-   DRI_CONF_OPT_I(pp_jimenezmlaa, def, min, max, \
-                  "Morphological anti-aliasing based on Jimenez' MLAA. 0 to disable, 8 for default quality")
-
-#define DRI_CONF_PP_JIMENEZMLAA_COLOR(def,min,max) \
-   DRI_CONF_OPT_I(pp_jimenezmlaa_color, def, min, max, \
-                  "Morphological anti-aliasing based on Jimenez' MLAA. 0 to disable, 8 for default quality. Color version, usable with 2d GL apps")
 
 #define DRI_CONF_PP_LOWER_DEPTH_RANGE_RATE() \
    DRI_CONF_OPT_F(lower_depth_range_rate, 1.0, 0.0, 1.0, \
@@ -368,39 +414,17 @@
    DRI_CONF_OPT_B(block_on_depleted_buffers, def, \
                   "Block clients using buffer backpressure until new buffer is available to reduce latency")
 
-#define DRI_CONF_VK_WSI_FORCE_BGRA8_UNORM_FIRST(def) \
-   DRI_CONF_OPT_B(vk_wsi_force_bgra8_unorm_first, def, \
-                  "Force vkGetPhysicalDeviceSurfaceFormatsKHR to return VK_FORMAT_B8G8R8A8_UNORM as the first format")
-
-#define DRI_CONF_VK_X11_OVERRIDE_MIN_IMAGE_COUNT(def) \
-   DRI_CONF_OPT_I(vk_x11_override_min_image_count, def, 0, 999, \
-                  "Override the VkSurfaceCapabilitiesKHR::minImageCount (0 = no override)")
-
-#define DRI_CONF_VK_X11_STRICT_IMAGE_COUNT(def) \
-   DRI_CONF_OPT_B(vk_x11_strict_image_count, def, \
-                  "Force the X11 WSI to create exactly the number of image specified by the application in VkSwapchainCreateInfoKHR::minImageCount")
-
-#define DRI_CONF_VK_X11_ENSURE_MIN_IMAGE_COUNT(def) \
-   DRI_CONF_OPT_B(vk_x11_ensure_min_image_count, def, \
-                  "Force the X11 WSI to create at least the number of image specified by the driver in VkSurfaceCapabilitiesKHR::minImageCount")
-
-#define DRI_CONF_VK_KHR_PRESENT_WAIT(def) \
-   DRI_CONF_OPT_B(vk_khr_present_wait, def, \
-                  "Expose VK_KHR_present_wait and id extensions despite them not being implemented for all supported surface types")
-
-#define DRI_CONF_VK_XWAYLAND_WAIT_READY(def) \
-   DRI_CONF_OPT_B(vk_xwayland_wait_ready, def, \
-                  "Wait for fences before submitting buffers to Xwayland")
-
-#define DRI_CONF_MESA_GLTHREAD(def) \
-   DRI_CONF_OPT_B(mesa_glthread, def, \
+#define DRI_CONF_MESA_GLTHREAD_DRIVER(def) \
+   DRI_CONF_OPT_B(mesa_glthread_driver, def, \
                   "Enable offloading GL driver work to a separate thread")
 
 #define DRI_CONF_MESA_NO_ERROR(def) \
    DRI_CONF_OPT_B(mesa_no_error, def, \
                   "Disable GL driver error checking")
 
-
+#define DRI_CONF_SHADER_SPILLING_RATE(def) \
+   DRI_CONF_OPT_I(shader_spilling_rate, def, 0, 100, \
+                  "Speed up shader compilation by increasing number of spilled registers after ra_allocate failure")
 /**
  * \brief Miscellaneous configuration options
  */
@@ -426,13 +450,28 @@
    DRI_CONF_OPT_B(allow_rgb10_configs, def, \
                   "Allow exposure of visuals and fbconfigs with rgb10a2 formats")
 
-#define DRI_CONF_ALLOW_RGB565_CONFIGS(def) \
-   DRI_CONF_OPT_B(allow_rgb565_configs, def, \
-                  "Allow exposure of visuals and fbconfigs with rgb565 formats")
+#define DRI_CONF_ALLOW_RGB16_CONFIGS(def) \
+   DRI_CONF_OPT_B(allow_rgb16_configs, def, \
+                  "Allow exposure of visuals and fbconfigs with rgb16 and rgba16 formats")
 
 #define DRI_CONF_FORCE_INTEGER_TEX_NEAREST(def) \
    DRI_CONF_OPT_B(force_integer_tex_nearest, def, \
                   "Force integer textures to use nearest filtering")
+
+/* The GL spec does not allow this but wine has translation bug:
+   https://bugs.winehq.org/show_bug.cgi?id=54787
+*/
+#define DRI_CONF_ALLOW_MULTISAMPLED_COPYTEXIMAGE(def) \
+   DRI_CONF_OPT_B(allow_multisampled_copyteximage, def, \
+                  "Allow CopyTexSubImage and other to copy sampled framebuffer")
+
+#define DRI_CONF_VERTEX_PROGRAM_DEFAULT_OUT(def) \
+   DRI_CONF_OPT_B(vertex_program_default_out, def, \
+                  "Initialize outputs of vertex program to a default value vec4(0, 0, 0, 1)")
+
+#define DRI_CONF_HEAP_MEMORY_PERCENT(def) \
+   DRI_CONF_OPT_F(heap_memory_percent, def, 0.0, 1.0, \
+                  "Percentage of total system memory to report as gpu heap memory (0 = driver default)")
 
 /**
  * \brief Initialization configuration options
@@ -445,55 +484,25 @@
 #define DRI_CONF_DRI_DRIVER() \
    DRI_CONF_OPT_S_NODEF(dri_driver, "Override the DRI driver to load")
 
-/**
- * \brief Gallium-Nine specific configuration options
- */
-
-#define DRI_CONF_SECTION_NINE DRI_CONF_SECTION("Gallium Nine")
-
-#define DRI_CONF_NINE_THROTTLE(def) \
-   DRI_CONF_OPT_I(throttle_value, def, 0, 0, \
-                  "Define the throttling value. -1 for no throttling, -2 for default (usually 2), 0 for glfinish behaviour")
-
-#define DRI_CONF_NINE_THREADSUBMIT(def) \
-   DRI_CONF_OPT_B(thread_submit, def, \
-                  "Use an additional thread to submit buffers.")
-
-#define DRI_CONF_NINE_OVERRIDEVENDOR(def) \
-   DRI_CONF_OPT_I(override_vendorid, def, 0, 0, \
-                  "Define the vendor_id to report. This allows faking another hardware vendor.")
-
-#define DRI_CONF_NINE_ALLOWDISCARDDELAYEDRELEASE(def) \
-   DRI_CONF_OPT_B(discard_delayed_release, def, \
-                  "Whether to allow the display server to release buffers with a delay when using d3d's presentation mode DISCARD. Default to true. Set to false if suffering from lag (thread_submit=true can also help in this situation).")
-
-#define DRI_CONF_NINE_TEARFREEDISCARD(def) \
-   DRI_CONF_OPT_B(tearfree_discard, def, \
-                  "Whether to make d3d's presentation mode DISCARD (games usually use that mode) Tear Free. If rendering above screen refresh, some frames will get skipped. true by default.")
-
-#define DRI_CONF_NINE_CSMT(def) \
-   DRI_CONF_OPT_I(csmt_force, def, 0, 0, \
-                  "If set to 1, force gallium nine CSMT. If set to 0, disable it. By default (-1) CSMT is enabled on known thread-safe drivers.")
-
-#define DRI_CONF_NINE_DYNAMICTEXTUREWORKAROUND(def) \
-   DRI_CONF_OPT_B(dynamic_texture_workaround, def, \
-                  "If set to true, use a ram intermediate buffer for dynamic textures. Increases ram usage, which can cause out of memory issues, but can fix glitches for some games.")
-
-#define DRI_CONF_NINE_SHADERINLINECONSTANTS(def) \
-   DRI_CONF_OPT_B(shader_inline_constants, def, \
-                  "If set to true, recompile shaders with integer or boolean constants when the values are known. Can cause stutter, but can increase slightly performance.")
-
-#define DRI_CONF_NINE_SHMEM_LIMIT() \
-   DRI_CONF_OPT_I(texture_memory_limit, 128, 0, 0, \
-                  "In MB the limit of virtual memory used for textures until shmem files are unmapped (default 128MB, 32bits only). If negative disables shmem. Set to a low amount to reduce virtual memory usage, but can incur a small perf hit if too low.")
-
-#define DRI_CONF_NINE_FORCESWRENDERINGONCPU(def) \
-   DRI_CONF_OPT_B(force_sw_rendering_on_cpu, def, \
-                  "If set to false, emulates software rendering on the requested device, else uses a software renderer.")
-
 #define DRI_CONF_V3D_NONMSAA_TEXTURE_SIZE_LIMIT(def) \
    DRI_CONF_OPT_B(v3d_nonmsaa_texture_size_limit, def, \
                   "Report the non-MSAA-only texture size limit")
+
+/**
+ * \brief wgl specific configuration options
+ */
+
+#define DRI_CONF_WGL_FRAME_LATENCY(def) \
+   DRI_CONF_OPT_I(wgl_frame_latency, def, 1, 16, \
+                  "Override default maximum frame latency")
+
+#define DRI_CONF_WGL_SWAP_INTERVAL(def) \
+   DRI_CONF_OPT_I(wgl_swap_interval, def, 1, 4, \
+                  "Override default swap interval")
+
+#define DRI_CONF_WGL_REQUIRE_GDI_COMPAT(def) \
+   DRI_CONF_OPT_B(wgl_require_gdi_compat, def, \
+                  "Require all pixel formats to have PFD_SUPPORT_GDI flag")
 
 /**
  * \brief virgl specific configuration options
@@ -515,118 +524,40 @@
    DRI_CONF_OPT_B(format_l8_srgb_enable_readback, def, \
                   "Force-enable reading back L8_SRGB textures")
 
-/**
- * \brief venus specific configuration options
- */
-#define DRI_CONF_VENUS_IMPLICIT_FENCING(def) \
-   DRI_CONF_OPT_B(venus_implicit_fencing, def, \
-                  "Assume the virtio-gpu kernel driver supports implicit fencing")
+#define DRI_CONF_VIRGL_SHADER_SYNC(def) \
+   DRI_CONF_OPT_B(virgl_shader_sync, def, \
+                  "Make shader compilation synchronous")
 
 /**
- * \brief RADV specific configuration options
+ * \brief freedreno specific configuration options
  */
 
-#define DRI_CONF_RADV_REPORT_LLVM9_VERSION_STRING(def) \
-   DRI_CONF_OPT_B(radv_report_llvm9_version_string, def, \
-                  "Report LLVM 9.0.1 for games that apply shader workarounds if missing (for ACO only)")
+#define DRI_CONF_DISABLE_CONSERVATIVE_LRZ(def) \
+   DRI_CONF_OPT_B(disable_conservative_lrz, def, \
+                  "Disable conservative LRZ")
 
-#define DRI_CONF_RADV_ENABLE_MRT_OUTPUT_NAN_FIXUP(def) \
-   DRI_CONF_OPT_B(radv_enable_mrt_output_nan_fixup, def, \
-                  "Replace NaN outputs from fragment shaders with zeroes for floating point render target")
-
-#define DRI_CONF_RADV_NO_DYNAMIC_BOUNDS(def) \
-   DRI_CONF_OPT_B(radv_no_dynamic_bounds, def, \
-                  "Disabling bounds checking for dynamic buffer descriptors")
-
-#define DRI_CONF_RADV_DISABLE_SHRINK_IMAGE_STORE(def) \
-   DRI_CONF_OPT_B(radv_disable_shrink_image_store, def, \
-                  "Disabling shrinking of image stores based on the format")
-
-#define DRI_CONF_RADV_ABSOLUTE_DEPTH_BIAS(def) \
-   DRI_CONF_OPT_B(radv_absolute_depth_bias, def, \
-                  "Consider depthBiasConstantFactor an absolute depth bias (like D3D9)")
-
-#define DRI_CONF_RADV_OVERRIDE_UNIFORM_OFFSET_ALIGNMENT(def) \
-   DRI_CONF_OPT_I(radv_override_uniform_offset_alignment, def, 0, 128, \
-                  "Override the minUniformBufferOffsetAlignment exposed to the application. (0 = default)")
-
-#define DRI_CONF_RADV_ZERO_VRAM(def) \
-   DRI_CONF_OPT_B(radv_zero_vram, def, \
-                  "Initialize to zero all VRAM allocations")
-
-#define DRI_CONF_RADV_LOWER_DISCARD_TO_DEMOTE(def) \
-   DRI_CONF_OPT_B(radv_lower_discard_to_demote, def, \
-                  "Lower discard instructions to demote")
-
-#define DRI_CONF_RADV_INVARIANT_GEOM(def) \
-   DRI_CONF_OPT_B(radv_invariant_geom, def, \
-                  "Mark geometry-affecting outputs as invariant")
-
-#define DRI_CONF_RADV_SPLIT_FMA(def) \
-   DRI_CONF_OPT_B(radv_split_fma, def, \
-                  "Split application-provided fused multiply-add in geometry stages")
-
-#define DRI_CONF_RADV_DISABLE_TC_COMPAT_HTILE_GENERAL(def) \
-   DRI_CONF_OPT_B(radv_disable_tc_compat_htile_general, def, \
-                  "Disable TC-compat HTILE in GENERAL layout")
-
-#define DRI_CONF_RADV_DISABLE_DCC(def) \
-   DRI_CONF_OPT_B(radv_disable_dcc, def, \
-                  "Disable DCC for color images")
-
-#define DRI_CONF_RADV_REQUIRE_ETC2(def)                                        \
-  DRI_CONF_OPT_B(radv_require_etc2, def,                                       \
-                 "Implement emulated ETC2 on HW that does not support it")
-
-#define DRI_CONF_RADV_DISABLE_ANISO_SINGLE_LEVEL(def) \
-  DRI_CONF_OPT_B(radv_disable_aniso_single_level, def, \
-                 "Disable anisotropic filtering for single level images")
-
-#define DRI_CONF_RADV_DISABLE_SINKING_LOAD_INPUT_FS(def) \
-   DRI_CONF_OPT_B(radv_disable_sinking_load_input_fs, def, \
-                  "Disable sinking load inputs for fragment shaders")
-
-#define DRI_CONF_RADV_DGC(def) \
-   DRI_CONF_OPT_B(radv_dgc, def, \
-                  "Expose an experimental implementation of VK_NV_device_generated_commands")
-
-#define DRI_CONF_RADV_FLUSH_BEFORE_QUERY_COPY(def) \
-  DRI_CONF_OPT_B( \
-      radv_flush_before_query_copy, def, \
-      "Wait for timestamps to be written before a query copy command")
-
-#define DRI_CONF_RADV_ENABLE_UNIFIED_HEAP_ON_APU(def) \
-   DRI_CONF_OPT_B(radv_enable_unified_heap_on_apu, def, \
-                  "Enable an unified heap with DEVICE_LOCAL on integrated GPUs")
-
-#define DRI_CONF_RADV_TEX_NON_UNIFORM(def) \
-   DRI_CONF_OPT_B(radv_tex_non_uniform, def, \
-                  "Always mark texture sample operations as non-uniform.")
-
-#define DRI_CONF_RADV_RT(def) \
-   DRI_CONF_OPT_B(radv_rt, def, \
-                  "Expose support for VK_KHR_ray_tracing_pipeline")
-
-#define DRI_CONF_RADV_APP_LAYER() DRI_CONF_OPT_S_NODEF(radv_app_layer, "Select an application layer.")
+#define DRI_CONF_DISABLE_EXPLICIT_SYNC_HEURISTIC(def) \
+   DRI_CONF_OPT_B(disable_explicit_sync_heuristic, def, \
+                  "Disable Explicit-sync heuristic")
 
 /**
- * \brief ANV specific configuration options
+ * \brief panfrost specific configuration options
  */
 
-#define DRI_CONF_ANV_ASSUME_FULL_SUBGROUPS(def) \
-   DRI_CONF_OPT_B(anv_assume_full_subgroups, def, \
-                  "Allow assuming full subgroups requirement even when it's not specified explicitly")
+#define DRI_CONF_PAN_COMPUTE_CORE_MASK(def) \
+   DRI_CONF_OPT_U64(pan_compute_core_mask, def, 0, UINT64_MAX, \
+                    "Bitmask of shader cores that may be used for compute jobs. If unset, defaults to scheduling across all available cores.")
 
-#define DRI_CONF_ANV_SAMPLE_MASK_OUT_OPENGL_BEHAVIOUR(def) \
-   DRI_CONF_OPT_B(anv_sample_mask_out_opengl_behaviour, def, \
-                  "Ignore sample mask out when having single sampled target")
+#define DRI_CONF_PAN_FRAGMENT_CORE_MASK(def) \
+   DRI_CONF_OPT_U64(pan_fragment_core_mask, def, 0, UINT64_MAX, \
+                    "Bitmask of shader cores that may be used for fragment jobs. If unset, defaults to scheduling across all available cores.")
 
-#define DRI_CONF_ANV_FP64_WORKAROUND_ENABLED(def) \
-   DRI_CONF_OPT_B(fp64_workaround_enabled, def, \
-                  "Use softpf64 when the shader uses float64, but the device doesn't support that type")
 
-#define DRI_CONF_ANV_GENERATED_INDIRECT_THRESHOLD(def) \
-   DRI_CONF_OPT_I(generated_indirect_threshold, def, 0, INT32_MAX, \
-                  "Indirect threshold count above which we start generating commands")
+/**
+ * \brief Asahi specific configuration options
+ */
+#define DRI_CONF_ASAHI_NO_FP16(def) \
+   DRI_CONF_OPT_B(asahi_no_fp16, def, \
+                  "Disable 16-bit float support")
 
 #endif

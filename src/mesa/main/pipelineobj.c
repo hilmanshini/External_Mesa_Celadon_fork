@@ -45,7 +45,6 @@
 #include "main/transformfeedback.h"
 #include "main/uniforms.h"
 #include "compiler/glsl/glsl_parser_extras.h"
-#include "compiler/glsl/ir_uniform.h"
 #include "program/program.h"
 #include "program/prog_parameter.h"
 #include "util/ralloc.h"
@@ -61,7 +60,7 @@ _mesa_delete_pipeline_object(struct gl_context *ctx,
 {
    unsigned i;
 
-   for (i = 0; i < MESA_SHADER_STAGES; i++) {
+   for (i = 0; i < MESA_SHADER_MESH_STAGES; i++) {
       _mesa_reference_program(ctx, &obj->CurrentProgram[i], NULL);
       _mesa_reference_shader_program(ctx, &obj->ReferencedPrograms[i], NULL);
    }
@@ -94,7 +93,7 @@ _mesa_new_pipeline_object(struct gl_context *ctx, GLuint name)
 void
 _mesa_init_pipeline(struct gl_context *ctx)
 {
-   ctx->Pipeline.Objects = _mesa_NewHashTable();
+   _mesa_InitHashTable(&ctx->Pipeline.Objects);
 
    ctx->Pipeline.Current = NULL;
 
@@ -105,7 +104,7 @@ _mesa_init_pipeline(struct gl_context *ctx)
 
 
 /**
- * Callback for deleting a pipeline object.  Called by _mesa_HashDeleteAll().
+ * Callback for deleting a pipeline object.  Called by _mesa_DeleteHashTable().
  */
 static void
 delete_pipelineobj_cb(void *data, void *userData)
@@ -123,10 +122,7 @@ void
 _mesa_free_pipeline_data(struct gl_context *ctx)
 {
    _mesa_reference_pipeline_object(ctx, &ctx->_Shader, NULL);
-
-   _mesa_HashDeleteAll(ctx->Pipeline.Objects, delete_pipelineobj_cb, ctx);
-   _mesa_DeleteHashTable(ctx->Pipeline.Objects);
-
+   _mesa_DeinitHashTable(&ctx->Pipeline.Objects, delete_pipelineobj_cb, ctx);
    _mesa_delete_pipeline_object(ctx, ctx->Pipeline.Default);
 }
 
@@ -145,7 +141,7 @@ _mesa_lookup_pipeline_object(struct gl_context *ctx, GLuint id)
       return NULL;
    else
       return (struct gl_pipeline_object *)
-         _mesa_HashLookupLocked(ctx->Pipeline.Objects, id);
+         _mesa_HashLookupLocked(&ctx->Pipeline.Objects, id);
 }
 
 /**
@@ -155,7 +151,7 @@ static void
 save_pipeline_object(struct gl_context *ctx, struct gl_pipeline_object *obj)
 {
    if (obj->Name > 0) {
-      _mesa_HashInsertLocked(ctx->Pipeline.Objects, obj->Name, obj, true);
+      _mesa_HashInsertLocked(&ctx->Pipeline.Objects, obj->Name, obj);
    }
 }
 
@@ -167,7 +163,7 @@ static void
 remove_pipeline_object(struct gl_context *ctx, struct gl_pipeline_object *obj)
 {
    if (obj->Name > 0) {
-      _mesa_HashRemoveLocked(ctx->Pipeline.Objects, obj->Name);
+      _mesa_HashRemoveLocked(&ctx->Pipeline.Objects, obj->Name);
    }
 }
 
@@ -211,7 +207,7 @@ static void
 use_program_stage(struct gl_context *ctx, GLenum type,
                   struct gl_shader_program *shProg,
                   struct gl_pipeline_object *pipe) {
-   gl_shader_stage stage = _mesa_shader_enum_to_shader_stage(type);
+   mesa_shader_stage stage = _mesa_shader_enum_to_shader_stage(type);
    struct gl_program *prog = NULL;
    if (shProg && shProg->_LinkedShaders[stage])
       prog = shProg->_LinkedShaders[stage]->Program;
@@ -254,6 +250,12 @@ use_program_stages(struct gl_context *ctx, struct gl_shader_program *shProg,
    if ((stages & GL_COMPUTE_SHADER_BIT) != 0)
       use_program_stage(ctx, GL_COMPUTE_SHADER, shProg, pipe);
 
+   if ((stages & GL_TASK_SHADER_BIT_EXT) != 0)
+      use_program_stage(ctx, GL_TASK_SHADER_EXT, shProg, pipe);
+
+   if ((stages & GL_MESH_SHADER_BIT_EXT) != 0)
+      use_program_stage(ctx, GL_MESH_SHADER_EXT, shProg, pipe);
+
    pipe->Validated = pipe->UserValidated = false;
 
    if (pipe == ctx->_Shader)
@@ -293,10 +295,6 @@ _mesa_UseProgramStages(GLuint pipeline, GLbitfield stages, GLuint program)
    struct gl_shader_program *shProg = NULL;
    GLbitfield any_valid_stages;
 
-   if (MESA_VERBOSE & VERBOSE_API)
-      _mesa_debug(ctx, "glUseProgramStages(%u, 0x%x, %u)\n",
-                  pipeline, stages, program);
-
    if (!pipe) {
       _mesa_error(ctx, GL_INVALID_OPERATION, "glUseProgramStages(pipeline)");
       return;
@@ -320,6 +318,8 @@ _mesa_UseProgramStages(GLuint pipeline, GLbitfield stages, GLuint program)
                           GL_TESS_EVALUATION_SHADER_BIT;
    if (_mesa_has_compute_shaders(ctx))
       any_valid_stages |= GL_COMPUTE_SHADER_BIT;
+   if (_mesa_has_EXT_mesh_shader(ctx))
+      any_valid_stages |= GL_TASK_SHADER_BIT_EXT | GL_MESH_SHADER_BIT_EXT;
 
    if (stages != GL_ALL_SHADER_BITS && (stages & ~any_valid_stages) != 0) {
       _mesa_error(ctx, GL_INVALID_VALUE, "glUseProgramStages(Stages)");
@@ -431,10 +431,6 @@ void GLAPIENTRY
 _mesa_ActiveShaderProgram(GLuint pipeline, GLuint program)
 {
    GET_CURRENT_CONTEXT(ctx);
-
-   if (MESA_VERBOSE & VERBOSE_API)
-      _mesa_debug(ctx, "glActiveShaderProgram(%u, %u)\n", pipeline, program);
-
    active_shader_program(ctx, pipeline, program, false);
 }
 
@@ -442,9 +438,6 @@ static ALWAYS_INLINE void
 bind_program_pipeline(struct gl_context *ctx, GLuint pipeline, bool no_error)
 {
    struct gl_pipeline_object *newObj = NULL;
-
-   if (MESA_VERBOSE & VERBOSE_API)
-      _mesa_debug(ctx, "glBindProgramPipeline(%u)\n", pipeline);
 
    /* Rebinding the same pipeline object: no change.
     */
@@ -534,7 +527,7 @@ _mesa_bind_pipeline(struct gl_context *ctx,
                                          ctx->Pipeline.Default);
       }
 
-      for (i = 0; i < MESA_SHADER_STAGES; i++) {
+      for (i = 0; i < MESA_SHADER_MESH_STAGES; i++) {
          struct gl_program *prog = ctx->_Shader->CurrentProgram[i];
          if (prog) {
             _mesa_program_init_subroutine_defaults(ctx, prog);
@@ -558,9 +551,6 @@ _mesa_DeleteProgramPipelines(GLsizei n, const GLuint *pipelines)
 {
    GET_CURRENT_CONTEXT(ctx);
    GLsizei i;
-
-   if (MESA_VERBOSE & VERBOSE_API)
-      _mesa_debug(ctx, "glDeleteProgramPipelines(%d, %p)\n", n, pipelines);
 
    if (n < 0) {
       _mesa_error(ctx, GL_INVALID_VALUE, "glDeleteProgramPipelines(n<0)");
@@ -609,7 +599,7 @@ create_program_pipelines(struct gl_context *ctx, GLsizei n, GLuint *pipelines,
    if (!pipelines)
       return;
 
-   _mesa_HashFindFreeKeys(ctx->Pipeline.Objects, pipelines, n);
+   _mesa_HashFindFreeKeys(&ctx->Pipeline.Objects, pipelines, n);
 
    for (i = 0; i < n; i++) {
       struct gl_pipeline_object *obj;
@@ -654,10 +644,6 @@ void GLAPIENTRY
 _mesa_GenProgramPipelines(GLsizei n, GLuint *pipelines)
 {
    GET_CURRENT_CONTEXT(ctx);
-
-   if (MESA_VERBOSE & VERBOSE_API)
-      _mesa_debug(ctx, "glGenProgramPipelines(%d, %p)\n", n, pipelines);
-
    create_program_pipelines_err(ctx, n, pipelines, false);
 }
 
@@ -672,10 +658,6 @@ void GLAPIENTRY
 _mesa_CreateProgramPipelines(GLsizei n, GLuint *pipelines)
 {
    GET_CURRENT_CONTEXT(ctx);
-
-   if (MESA_VERBOSE & VERBOSE_API)
-      _mesa_debug(ctx, "glCreateProgramPipelines(%d, %p)\n", n, pipelines);
-
    create_program_pipelines_err(ctx, n, pipelines, true);
 }
 
@@ -690,9 +672,6 @@ GLboolean GLAPIENTRY
 _mesa_IsProgramPipeline(GLuint pipeline)
 {
    GET_CURRENT_CONTEXT(ctx);
-
-   if (MESA_VERBOSE & VERBOSE_API)
-      _mesa_debug(ctx, "glIsProgramPipeline(%u)\n", pipeline);
 
    struct gl_pipeline_object *obj = _mesa_lookup_pipeline_object(ctx, pipeline);
    if (obj == NULL)
@@ -709,10 +688,6 @@ _mesa_GetProgramPipelineiv(GLuint pipeline, GLenum pname, GLint *params)
 {
    GET_CURRENT_CONTEXT(ctx);
    struct gl_pipeline_object *pipe = _mesa_lookup_pipeline_object(ctx, pipeline);
-
-   if (MESA_VERBOSE & VERBOSE_API)
-      _mesa_debug(ctx, "glGetProgramPipelineiv(%u, %d, %p)\n",
-                  pipeline, pname, params);
 
    /* Are geometry shaders available in this context?
     */
@@ -824,7 +799,7 @@ program_stages_interleaved_illegally(const struct gl_pipeline_object *pipe)
    /* Look for programs bound to stages: A -> B -> A, with any intervening
     * sequence of unrelated programs or empty stages.
     */
-   for (unsigned i = 0; i < MESA_SHADER_STAGES; i++) {
+   for (unsigned i = 0; i < MESA_SHADER_MESH_STAGES; i++) {
       struct gl_program *cur = pipe->CurrentProgram[i];
 
       /* Empty stages anywhere in the pipe are OK.  Also we can be confident
@@ -862,8 +837,7 @@ _mesa_validate_program_pipeline(struct gl_context* ctx,
 
    /* Release and reset the info log.
     */
-   if (pipe->InfoLog != NULL)
-      ralloc_free(pipe->InfoLog);
+   ralloc_free(pipe->InfoLog);
 
    pipe->InfoLog = NULL;
 
@@ -882,7 +856,7 @@ _mesa_validate_program_pipeline(struct gl_context* ctx,
     * bound to the vertex stage also has a fragment shader, the fragment
     * shader must also be bound to the fragment stage.
     */
-   for (i = 0; i < MESA_SHADER_STAGES; i++) {
+   for (i = 0; i < MESA_SHADER_MESH_STAGES; i++) {
       if (!program_stages_all_active(pipe, pipe->CurrentProgram[i])) {
          return GL_FALSE;
       }
@@ -943,7 +917,7 @@ _mesa_validate_program_pipeline(struct gl_context* ctx,
     *           applied to the pipeline object via UseProgramStages with the
     *           PROGRAM_SEPARABLE parameter set to FALSE.
     */
-   for (i = 0; i < MESA_SHADER_STAGES; i++) {
+   for (i = 0; i < MESA_SHADER_MESH_STAGES; i++) {
       if (pipe->CurrentProgram[i] &&
           !pipe->CurrentProgram[i]->info.separate_shader) {
          pipe->InfoLog = ralloc_asprintf(pipe,
@@ -966,7 +940,7 @@ _mesa_validate_program_pipeline(struct gl_context* ctx,
     *         there is a current program pipeline object, and that object is
     *         empty (no executable code is installed for any stage).
     */
-   for (i = 0; i < MESA_SHADER_STAGES; i++) {
+   for (i = 0; i < MESA_SHADER_MESH_STAGES; i++) {
       if (pipe->CurrentProgram[i]) {
          program_empty = false;
          break;
@@ -1048,9 +1022,6 @@ _mesa_ValidateProgramPipeline(GLuint pipeline)
 {
    GET_CURRENT_CONTEXT(ctx);
 
-   if (MESA_VERBOSE & VERBOSE_API)
-      _mesa_debug(ctx, "glValidateProgramPipeline(%u)\n", pipeline);
-
    struct gl_pipeline_object *pipe = _mesa_lookup_pipeline_object(ctx, pipeline);
 
    if (!pipe) {
@@ -1068,10 +1039,6 @@ _mesa_GetProgramPipelineInfoLog(GLuint pipeline, GLsizei bufSize,
                                 GLsizei *length, GLchar *infoLog)
 {
    GET_CURRENT_CONTEXT(ctx);
-
-   if (MESA_VERBOSE & VERBOSE_API)
-      _mesa_debug(ctx, "glGetProgramPipelineInfoLog(%u, %d, %p, %p)\n",
-                  pipeline, bufSize, length, infoLog);
 
    struct gl_pipeline_object *pipe = _mesa_lookup_pipeline_object(ctx, pipeline);
 

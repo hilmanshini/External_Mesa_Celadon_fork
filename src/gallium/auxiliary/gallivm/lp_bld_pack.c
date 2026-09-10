@@ -66,10 +66,8 @@
  */
 
 
-#include "util/u_debug.h"
-#include "util/u_math.h"
+#include "util/bitscan.h"
 #include "util/u_cpu_detect.h"
-#include "util/u_memory.h"
 
 #include "lp_bld_type.h"
 #include "lp_bld_const.h"
@@ -484,7 +482,10 @@ lp_build_unpack2_native(struct gallivm_state *gallivm,
 
    /* Interleave bits */
 #if UTIL_ARCH_LITTLE_ENDIAN
-   if (src_type.length * src_type.width == 256 && util_get_cpu_caps()->has_avx2) {
+   if (src_type.length * src_type.width == 256 &&
+       (dst_type.width == 16 || dst_type.width == 32) &&
+       util_get_cpu_caps()->has_avx2) {
+      /* This has to match the intrinsics in lp_build_pack2_native() */
       *dst_lo = lp_build_interleave2_half(gallivm, src_type, src, msb, 0);
       *dst_hi = lp_build_interleave2_half(gallivm, src_type, src, msb, 1);
    } else {
@@ -588,7 +589,7 @@ lp_build_pack2(struct gallivm_state *gallivm,
    if ((util_get_cpu_caps()->has_sse2 || util_get_cpu_caps()->has_altivec) &&
         src_type.width * src_type.length >= 128) {
       const char *intrinsic = NULL;
-      boolean swap_intrinsic_operands = FALSE;
+      bool swap_intrinsic_operands = false;
 
       switch(src_type.width) {
       case 32:
@@ -607,7 +608,7 @@ lp_build_pack2(struct gallivm_state *gallivm,
                intrinsic = "llvm.ppc.altivec.vpkuwus";
             }
 #if UTIL_ARCH_LITTLE_ENDIAN
-            swap_intrinsic_operands = TRUE;
+            swap_intrinsic_operands = true;
 #endif
          }
          break;
@@ -618,7 +619,7 @@ lp_build_pack2(struct gallivm_state *gallivm,
             } else if (util_get_cpu_caps()->has_altivec) {
                intrinsic = "llvm.ppc.altivec.vpkshss";
 #if UTIL_ARCH_LITTLE_ENDIAN
-               swap_intrinsic_operands = TRUE;
+               swap_intrinsic_operands = true;
 #endif
             }
          } else {
@@ -627,7 +628,7 @@ lp_build_pack2(struct gallivm_state *gallivm,
             } else if (util_get_cpu_caps()->has_altivec) {
                intrinsic = "llvm.ppc.altivec.vpkshus";
 #if UTIL_ARCH_LITTLE_ENDIAN
-               swap_intrinsic_operands = TRUE;
+               swap_intrinsic_operands = true;
 #endif
             }
          }
@@ -781,7 +782,7 @@ lp_build_packs2(struct gallivm_state *gallivm,
                 LLVMValueRef lo,
                 LLVMValueRef hi)
 {
-   boolean clamp;
+   bool clamp;
 
    assert(!src_type.floating);
    assert(!dst_type.floating);
@@ -789,7 +790,7 @@ lp_build_packs2(struct gallivm_state *gallivm,
    assert(src_type.width == dst_type.width * 2);
    assert(src_type.length * 2 == dst_type.length);
 
-   clamp = TRUE;
+   clamp = true;
 
    /* All X86 SSE non-interleaved pack instructions take signed inputs and
     * saturate them, so no need to clamp for those cases. */
@@ -797,7 +798,7 @@ lp_build_packs2(struct gallivm_state *gallivm,
       src_type.width * src_type.length >= 128 &&
       src_type.sign &&
       (src_type.width == 32 || src_type.width == 16))
-      clamp = FALSE;
+      clamp = false;
 
    if(clamp) {
       struct lp_build_context bld;
@@ -823,7 +824,7 @@ LLVMValueRef
 lp_build_pack(struct gallivm_state *gallivm,
               struct lp_type src_type,
               struct lp_type dst_type,
-              boolean clamped,
+              bool clamped,
               const LLVMValueRef *src, unsigned num_srcs)
 {
    LLVMValueRef (*pack2)(struct gallivm_state *gallivm,
@@ -923,7 +924,7 @@ lp_build_resize(struct gallivm_state *gallivm,
         /*
          * Register width remains constant -- use vector packing intrinsics
          */
-         tmp[0] = lp_build_pack(gallivm, src_type, dst_type, TRUE, src, num_srcs);
+         tmp[0] = lp_build_pack(gallivm, src_type, dst_type, true, src, num_srcs);
       }
       else {
          if (src_type.width / dst_type.width > num_srcs) {
@@ -943,7 +944,7 @@ lp_build_resize(struct gallivm_state *gallivm,
             }
             num_srcs *= size_ratio;
             src_type.length = new_length;
-            tmp[0] = lp_build_pack(gallivm, src_type, dst_type, TRUE, tmp, num_srcs);
+            tmp[0] = lp_build_pack(gallivm, src_type, dst_type, true, tmp, num_srcs);
          }
          else {
             /*
@@ -957,7 +958,7 @@ lp_build_resize(struct gallivm_state *gallivm,
             dst_type.length = dst_type.length / size_ratio;
 
             for (i = 0; i < size_ratio; i++) {
-               tmp[i] = lp_build_pack(gallivm, src_type, dst_type, TRUE,
+               tmp[i] = lp_build_pack(gallivm, src_type, dst_type, true,
                                       &src[i*num_pack_srcs], num_pack_srcs);
             }
             tmp[0] = lp_build_concat(gallivm, tmp, dst_type, size_ratio);

@@ -33,6 +33,8 @@
 #include "etnaviv_emit.h"
 #include "etnaviv_query_acc.h"
 
+#define MAX_PERFMON_SAMPLES 1022 /* (4KB / 4Byte/sample) - 1 reserved seqno */
+
 struct etna_pm_query
 {
    struct etna_acc_query base;
@@ -65,8 +67,8 @@ pm_query(struct etna_context *ctx, struct etna_acc_query *aq, unsigned flags)
    unsigned offset;
    assert(flags);
 
-   if (aq->samples > 127) {
-      aq->samples = 127;
+   if (aq->samples > MAX_PERFMON_SAMPLES) {
+      aq->samples = MAX_PERFMON_SAMPLES;
       BUG("samples overflow perfmon");
    }
 
@@ -81,20 +83,17 @@ pm_query(struct etna_context *ctx, struct etna_acc_query *aq, unsigned flags)
    struct etna_perf p = {
       .flags = flags,
       .sequence = pq->sequence,
-      .bo = etna_resource(aq->prsc)->bo,
+      .bo = etna_buffer_resource(aq->prsc)->bo,
       .signal = pq->signal,
       .offset = offset
    };
 
    etna_cmd_stream_perf(stream, &p);
    resource_written(ctx, aq->prsc);
-
-   /* force a flush in !wait case in etna_acc_get_query_result(..) */
-   aq->no_wait_cnt = 10;
 }
 
 static bool
-perfmon_supports(unsigned query_type)
+perfmon_supports(UNUSED struct etna_context *ctx, unsigned query_type)
 {
    return !!etna_pm_query_config(query_type);
 }
@@ -107,10 +106,10 @@ perfmon_allocate(struct etna_context *ctx, unsigned query_type)
 
    cfg = etna_pm_query_config(query_type);
    if (!cfg)
-      return false;
+      return NULL;
 
    if (!etna_pm_cfg_supported(ctx->screen->perfmon, cfg))
-      return false;
+      return NULL;
 
    pq = CALLOC_STRUCT(etna_pm_query);
    if (!pq)
@@ -126,12 +125,14 @@ static void
 perfmon_resume(struct etna_acc_query *aq, struct etna_context *ctx)
 {
    pm_query(ctx, aq, ETNA_PM_PROCESS_PRE);
+   aq->samples++;
 }
 
 static void
 perfmon_suspend(struct etna_acc_query *aq, struct etna_context *ctx)
 {
    pm_query(ctx, aq, ETNA_PM_PROCESS_POST);
+   aq->samples++;
 }
 
 static bool

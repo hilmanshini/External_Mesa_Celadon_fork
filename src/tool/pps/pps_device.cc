@@ -15,6 +15,8 @@
 #include <unistd.h>
 #include <xf86drm.h>
 
+#include "util/os_misc.h"
+
 namespace pps
 {
 #define MAX_DRM_DEVICES 64
@@ -53,6 +55,21 @@ std::optional<DrmDevice> create_drm_device(int fd, int32_t gpu_num)
    std::string name = query_drm_name(fd);
    if (name.empty()) {
       return std::nullopt;
+   }
+
+   const char *dri_prime = os_get_option("DRI_PRIME");
+   if (dri_prime != NULL) {
+      drmDevicePtr drm_device;
+      uint16_t vendor_id, device_id;
+      bool prime_is_vid_did =
+         sscanf(dri_prime, "%hx:%hx", &vendor_id, &device_id) == 2;
+
+      if (prime_is_vid_did && drmGetDevice2(fd, 0, &drm_device) == 0) {
+         if (drm_device->bustype == DRM_BUS_PCI &&
+             (drm_device->deviceinfo.pci->vendor_id != vendor_id ||
+              drm_device->deviceinfo.pci->device_id != device_id))
+            return std::nullopt;
+      }
    }
 
    auto ret = DrmDevice();

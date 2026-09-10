@@ -29,7 +29,7 @@
 #include "main/context.h"
 #include "main/macros.h"
 #include "math/m_eval.h"
-#include "main/dispatch.h"
+#include "dispatch.h"
 #include "vbo_exec.h"
 #include "vbo_private.h"
 
@@ -161,9 +161,9 @@ void vbo_exec_do_EvalCoord1f(struct vbo_exec_context *exec, GLfloat u)
 				map->Order);
 
       if (exec->eval.map1[0].sz == 4) 
-	 CALL_Vertex4fv(ctx->CurrentServerDispatch, ( vertex ));
+	 CALL_Vertex4fv(ctx->Dispatch.Current, ( vertex ));
       else
-	 CALL_Vertex3fv(ctx->CurrentServerDispatch, ( vertex ));
+	 CALL_Vertex3fv(ctx->Dispatch.Current, ( vertex ));
    }
 }
 
@@ -242,9 +242,9 @@ void vbo_exec_do_EvalCoord2f( struct vbo_exec_context *exec,
       }
 
       if (exec->vtx.attr[VBO_ATTRIB_POS].size == 4)
-	 CALL_Vertex4fv(ctx->CurrentServerDispatch, ( vertex ));
+	 CALL_Vertex4fv(ctx->Dispatch.Current, ( vertex ));
       else
-	 CALL_Vertex3fv(ctx->CurrentServerDispatch, ( vertex ));
+	 CALL_Vertex3fv(ctx->Dispatch.Current, ( vertex ));
    }
 }
 

@@ -28,6 +28,7 @@ import textwrap
 import xml.etree.ElementTree as et
 
 from mako.template import Template
+from vk_extensions import Extension, filter_api, get_all_required
 
 COPYRIGHT = textwrap.dedent(u"""\
     * Copyright © 2017 Intel Corporation
@@ -58,7 +59,7 @@ C_TEMPLATE = Template(textwrap.dedent(u"""\
      */
 
     #include <string.h>
-    #include <vulkan/vulkan.h>
+    #include <vulkan/vulkan_core.h>
     #include <vulkan/vk_android_native_buffer.h>
     #include <vulkan/vk_layer.h>
     #include "util/macros.h"
@@ -88,6 +89,29 @@ C_TEMPLATE = Template(textwrap.dedent(u"""\
       % endif
     %endfor
 
+    % for enum in bitmasks:
+
+      % if enum.guard:
+#ifdef ${enum.guard}
+      % endif
+    const char *
+    vk_${enum.name[2:]}_to_str(${enum.name} input)
+    {
+        switch((int64_t)input) {
+    % for v in sorted(enum.values.keys()):
+        case ${v}:
+            return "${enum.values[v]}";
+    % endfor
+        default:
+            return "Unknown ${enum.name} value.";
+        }
+    }
+
+      % if enum.guard:
+#endif
+      % endif
+    %endfor
+
     size_t vk_structure_type_size(const struct VkBaseInStructure *item)
     {
         switch((int)item->sType) {
@@ -103,7 +127,7 @@ C_TEMPLATE = Template(textwrap.dedent(u"""\
         case VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO: return sizeof(VkLayerInstanceCreateInfo);
         case VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO: return sizeof(VkLayerDeviceCreateInfo);
         default:
-            unreachable("Undefined struct type.");
+            UNREACHABLE("Undefined struct type.");
         }
     }
 
@@ -148,6 +172,16 @@ H_TEMPLATE = Template(textwrap.dedent(u"""\
       % endif
     % endfor
 
+    % for enum in bitmasks:
+      % if enum.guard:
+#ifdef ${enum.guard}
+      % endif
+    const char * vk_${enum.name[2:]}_to_str(${enum.name} input);
+      % if enum.guard:
+#endif
+      % endif
+    % endfor
+
     size_t vk_structure_type_size(const struct VkBaseInStructure *item);
 
     const char * vk_ObjectType_to_ObjectName(VkObjectType type);
@@ -156,7 +190,8 @@ H_TEMPLATE = Template(textwrap.dedent(u"""\
     } /* extern "C" */
     #endif
 
-    #endif"""))
+    #endif
+    """))
 
 
 H_DEFINE_TEMPLATE = Template(textwrap.dedent(u"""\
@@ -169,7 +204,7 @@ H_DEFINE_TEMPLATE = Template(textwrap.dedent(u"""\
     #ifndef MESA_VK_ENUM_DEFINES_H
     #define MESA_VK_ENUM_DEFINES_H
 
-    #include <vulkan/vulkan.h>
+    #include <vulkan/vulkan_core.h>
     #include <vulkan/vk_android_native_buffer.h>
 
     #ifdef __cplusplus
@@ -209,11 +244,18 @@ H_DEFINE_TEMPLATE = Template(textwrap.dedent(u"""\
       % endif
     % endfor
 
+    static inline VkFormatFeatureFlags
+    vk_format_features2_to_features(VkFormatFeatureFlags2 features2)
+    {
+       return features2 & VK_ALL_FORMAT_FEATURE_FLAG_BITS;
+    }
+
     #ifdef __cplusplus
     } /* extern "C" */
     #endif
 
-    #endif"""))
+    #endif
+    """))
 
 
 class NamedFactory(object):
@@ -247,10 +289,14 @@ def CamelCase_to_SHOUT_CASE(s):
    return (s[:1] + re.sub(r'(?<![A-Z])([A-Z])', r'_\1', s[1:])).upper()
 
 def compute_max_enum_name(s):
+    if s == "VkSwapchainImageUsageFlagBitsANDROID":
+        return "VK_SWAPCHAIN_IMAGE_USAGE_FLAG_BITS_MAX_ENUM"
+    if s == "VkTensorTilingARM":
+        return "VK_TENSOR_TILING_MAX_ENUM_ARM"
     max_enum_name = CamelCase_to_SHOUT_CASE(s)
     last_prefix = max_enum_name.rsplit('_', 1)[-1]
     # Those special prefixes need to be always at the end
-    if last_prefix in ['AMD', 'EXT', 'INTEL', 'KHR', 'NV', 'LUNARG'] :
+    if last_prefix in ['AMD', 'AMDX', 'EXT', 'INTEL', 'KHR', 'NV', 'LUNARG', 'QCOM', 'MSFT', 'ARM', 'SEC'] :
         max_enum_name = "_".join(max_enum_name.split('_')[:-1])
         max_enum_name = max_enum_name + "_MAX_ENUM_" + last_prefix
     else:
@@ -362,7 +408,7 @@ class VkObjectType(object):
 
 
 def parse_xml(enum_factory, ext_factory, struct_factory, bitmask_factory,
-              obj_type_factory, filename):
+              obj_type_factory, filename, beta):
     """Parse the XML file. Accumulate results into the factories.
 
     This parser is a memory efficient iterative XML parser that returns a list
@@ -370,30 +416,59 @@ def parse_xml(enum_factory, ext_factory, struct_factory, bitmask_factory,
     """
 
     xml = et.parse(filename)
+    api = 'vulkan'
+
+    required_types = get_all_required(xml, 'type', api, beta)
 
     for enum_type in xml.findall('./enums[@type="enum"]'):
-        enum = enum_factory(enum_type.attrib['name'])
+        if not filter_api(enum_type, api):
+            continue
+
+        type_name = enum_type.attrib['name']
+        if not type_name in required_types:
+            continue
+
+        enum = enum_factory(type_name)
         for value in enum_type.findall('./enum'):
-            enum.add_value_from_xml(value)
+            if filter_api(value, api):
+                enum.add_value_from_xml(value)
 
     # For bitmask we only add the Enum selected for convenience.
     for enum_type in xml.findall('./enums[@type="bitmask"]'):
-        bitwidth = int(enum_type.attrib.get('bitwidth', 32))
-        enum = bitmask_factory(enum_type.attrib['name'], bitwidth=bitwidth)
-        for value in enum_type.findall('./enum'):
-            enum.add_value_from_xml(value)
+        if not filter_api(enum_type, api):
+            continue
 
-    for value in xml.findall('./feature/require/enum[@extends]'):
-        extends = value.attrib['extends']
-        enum = enum_factory.get(extends)
-        if enum is not None:
-            enum.add_value_from_xml(value)
-        enum = bitmask_factory.get(extends)
-        if enum is not None:
-            enum.add_value_from_xml(value)
+        type_name = enum_type.attrib['name']
+        if not type_name in required_types:
+            continue
+
+        bitwidth = int(enum_type.attrib.get('bitwidth', 32))
+        enum = bitmask_factory(type_name, bitwidth=bitwidth)
+        for value in enum_type.findall('./enum'):
+            if filter_api(value, api):
+                enum.add_value_from_xml(value)
+
+    for feature in xml.findall('./feature'):
+        if not api in feature.attrib['api'].split(','):
+            continue
+
+        for value in feature.findall('./require/enum[@extends]'):
+            extends = value.attrib['extends']
+            enum = enum_factory.get(extends)
+            if enum is not None:
+                enum.add_value_from_xml(value)
+            enum = bitmask_factory.get(extends)
+            if enum is not None:
+                enum.add_value_from_xml(value)
 
     for struct_type in xml.findall('./types/type[@category="struct"]'):
+        if not filter_api(struct_type, api):
+            continue
+
         name = struct_type.attrib['name']
+        if name not in required_types:
+            continue
+
         stype = struct_get_stype(struct_type)
         if stype is not None:
             struct_factory(name, stype=stype)
@@ -404,50 +479,73 @@ def parse_xml(enum_factory, ext_factory, struct_factory, bitmask_factory,
         define = platform.attrib['protect']
         platform_define[name] = define
 
-    for ext_elem in xml.findall('./extensions/extension[@supported="vulkan"]'):
-        define = None
-        if "platform" in ext_elem.attrib:
-            define = platform_define[ext_elem.attrib['platform']]
-        extension = ext_factory(ext_elem.attrib['name'],
-                                number=int(ext_elem.attrib['number']),
-                                define=define)
+    for ext_elem in xml.findall('./extensions/extension'):
+        ext = Extension.from_xml(ext_elem)
+        if api not in ext.supported:
+            continue
 
-        for value in ext_elem.findall('./require/enum[@extends]'):
-            extends = value.attrib['extends']
-            enum = enum_factory.get(extends)
-            if enum is not None:
-                enum.add_value_from_xml(value, extension)
-            enum = bitmask_factory.get(extends)
-            if enum is not None:
-                enum.add_value_from_xml(value, extension)
-        for t in ext_elem.findall('./require/type'):
-            struct = struct_factory.get(t.attrib['name'])
-            if struct is not None:
-                struct.extension = extension
+        define = platform_define.get(ext.platform, None)
+        extension = ext_factory(ext.name, number=ext.number, define=define)
+
+        for req_elem in ext_elem.findall('./require'):
+            if not filter_api(req_elem, api):
+                continue
+
+            for value in req_elem.findall('./enum[@extends]'):
+                extends = value.attrib['extends']
+                enum = enum_factory.get(extends)
+                if enum is not None:
+                    enum.add_value_from_xml(value, extension)
+                enum = bitmask_factory.get(extends)
+                if enum is not None:
+                    enum.add_value_from_xml(value, extension)
+
+            for t in req_elem.findall('./type'):
+                struct = struct_factory.get(t.attrib['name'])
+                if struct is not None:
+                    struct.extension = extension
 
         if define:
             for value in ext_elem.findall('./require/type[@name]'):
                 enum = enum_factory.get(value.attrib['name'])
                 if enum is not None:
                     enum.set_guard(define)
+                enum = bitmask_factory.get(value.attrib['name'])
+                if enum is not None:
+                    enum.set_guard(define)
 
+    obj_type_enum = enum_factory.get("VkObjectType")
     obj_types = obj_type_factory("VkObjectType")
     for object_type in xml.findall('./types/type[@category="handle"]'):
         for object_name in object_type.findall('./name'):
             # Convert to int to avoid undefined enums
             enum = object_type.attrib['objtypeenum']
-            enum_val = enum_factory.get("VkObjectType").name_to_value[enum]
+
+            # Annoyingly, object types are hard to filter by API so just
+            # look for whether or not we can find the enum name in the
+            # VkObjectType enum.
+            if enum not in obj_type_enum.name_to_value:
+                continue
+
+            enum_val = obj_type_enum.name_to_value[enum]
             obj_types.enum_to_name[enum_val] = object_name.text
 
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument('--beta', required=True, help='Enable beta extensions.')
     parser.add_argument('--xml', required=True,
                         help='Vulkan API XML files',
                         action='append',
                         dest='xml_files')
-    parser.add_argument('--outdir',
-                        help='Directory to put the generated files in',
+    parser.add_argument('--out-c',
+                        help='Output C file',
+                        required=True)
+    parser.add_argument('--out-h',
+                        help='Output H file',
+                        required=True)
+    parser.add_argument('--out-d',
+                        help='Output defines H file',
                         required=True)
 
     args = parser.parse_args()
@@ -460,16 +558,16 @@ def main():
 
     for filename in args.xml_files:
         parse_xml(enum_factory, ext_factory, struct_factory, bitmask_factory,
-                  obj_type_factory, filename)
+                  obj_type_factory, filename, args.beta)
     enums = sorted(enum_factory.registry.values(), key=lambda e: e.name)
     extensions = sorted(ext_factory.registry.values(), key=lambda e: e.name)
     structs = sorted(struct_factory.registry.values(), key=lambda e: e.name)
     bitmasks = sorted(bitmask_factory.registry.values(), key=lambda e: e.name)
     object_types = sorted(obj_type_factory.registry.values(), key=lambda e: e.name)
 
-    for template, file_ in [(C_TEMPLATE, os.path.join(args.outdir, 'vk_enum_to_str.c')),
-                            (H_TEMPLATE, os.path.join(args.outdir, 'vk_enum_to_str.h')),
-                            (H_DEFINE_TEMPLATE, os.path.join(args.outdir, 'vk_enum_defines.h'))]:
+    for template, file_ in [(C_TEMPLATE, args.out_c),
+                            (H_TEMPLATE, args.out_h),
+                            (H_DEFINE_TEMPLATE, args.out_d)]:
         with open(file_, 'w', encoding='utf-8') as f:
             f.write(template.render(
                 file=os.path.basename(__file__),

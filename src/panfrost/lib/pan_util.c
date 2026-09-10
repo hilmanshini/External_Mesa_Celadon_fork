@@ -1,28 +1,10 @@
 /*
  * Copyright (C) 2019 Collabora, Ltd.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
+#include "pan_util.h"
 #include <stdio.h>
-#include "pan_texture.h"
 
 /* Translate a PIPE swizzle quad to a 12-bit Mali swizzle code. PIPE
  * swizzles line up with Mali swizzles for the XYZW01, but PIPE swizzles have
@@ -30,23 +12,25 @@
  * PIPE swizzles are sparse but Mali swizzles are packed */
 
 unsigned
-panfrost_translate_swizzle_4(const unsigned char swizzle[4])
+pan_translate_swizzle_4(const unsigned char swizzle[4])
 {
    unsigned out = 0;
 
    for (unsigned i = 0; i < 4; ++i) {
-      unsigned translated =
-         (swizzle[i] > PIPE_SWIZZLE_1) ? PIPE_SWIZZLE_0 : swizzle[i];
-      out |= (translated << (3 * i));
+      assert(swizzle[i] <= PIPE_SWIZZLE_1);
+      out |= (swizzle[i] << (3 * i));
    }
 
    return out;
 }
 
 void
-panfrost_invert_swizzle(const unsigned char *in, unsigned char *out)
+pan_invert_swizzle(const unsigned char *in, unsigned char *out)
 {
-   /* First, default to all zeroes to prevent uninitialized junk */
+   /* First, default to all zeroes, both to prevent uninitialized junk
+      and to provide a known baseline so we can tell when components
+      have been modified
+    */
 
    for (unsigned c = 0; c < 4; ++c)
       out[c] = PIPE_SWIZZLE_0;
@@ -61,24 +45,9 @@ panfrost_invert_swizzle(const unsigned char *in, unsigned char *out)
       if (i > PIPE_SWIZZLE_W)
          continue;
 
-      /* Invert */
+      /* Invert (only if we haven't already applied) */
       unsigned idx = i - PIPE_SWIZZLE_X;
-      out[idx] = PIPE_SWIZZLE_X + c;
+      if (out[idx] == PIPE_SWIZZLE_0)
+         out[idx] = PIPE_SWIZZLE_X + c;
    }
-}
-
-/* Formats requiring blend shaders are stored raw in the tilebuffer and will
- * have 0 as their pixel format. Assumes dithering is set, I don't know of a
- * case when it makes sense to turn off dithering. */
-
-unsigned
-panfrost_format_to_bifrost_blend(const struct panfrost_device *dev,
-                                 enum pipe_format format, bool dithered)
-{
-   mali_pixel_format pixfmt =
-      (dev->arch >= 7)
-         ? panfrost_blendable_formats_v7[format].bifrost[dithered]
-         : panfrost_blendable_formats_v6[format].bifrost[dithered];
-
-   return pixfmt ?: dev->formats[format].hw;
 }

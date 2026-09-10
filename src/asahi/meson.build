@@ -1,31 +1,35 @@
-# Copyright © 2018 Rob Clark
-# Copyright © 2019 Collabora
+# Copyright 2018 Rob Clark
+# Copyright 2019 Collabora, Ltd.
+# SPDX-License-Identifier: MIT
 
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-
-# The above copyright notice and this permission notice shall be included in
-# all copies or substantial portions of the Software.
-
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-# SOFTWARE.
+# This is used only for the r/e tooling on macOS
+dep_iokit = dependency('IOKit', required : false)
 
 inc_asahi = include_directories([
-   '.', 'layout', 'lib', 'compiler'
+   '.', 'layout', 'lib', 'genxml', 'compiler'
 ])
 
-subdir('layout')
-subdir('lib')
-subdir('compiler')
+subdir('isa')
+
+if with_gallium_asahi or with_asahi_vk or with_tools.contains('asahi')
+   subdir('genxml')
+   subdir('libagx')
+   subdir('compiler')
+   subdir('clc')
+endif
+
+if with_gallium_asahi or with_asahi_vk
+   subdir('layout')
+   subdir('lib')
+elif dep_iokit.found()
+   # Just build enough for libwrap.dylib
+   subdir('genxml')
+   subdir('lib')
+endif
+
+if with_asahi_vk
+   subdir('vulkan')
+endif
 
 if with_tools.contains('drm-shim')
   subdir('drm-shim')

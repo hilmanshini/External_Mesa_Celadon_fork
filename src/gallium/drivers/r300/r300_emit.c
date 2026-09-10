@@ -1,25 +1,8 @@
 /*
  * Copyright 2008 Corbin Simpson <MostAwesomeDude@gmail.com>
  * Copyright 2009 Marek Olšák <maraeo@gmail.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ * SPDX-License-Identifier: MIT
+ */
 
 /* r300_emit: Functions for emitting state. */
 
@@ -44,7 +27,7 @@ void r300_emit_blend_state(struct r300_context* r300,
     struct pipe_surface *cb;
     CS_LOCALS(r300);
 
-    cb = fb->nr_cbufs ? r300_get_nonnull_cb(fb, 0) : NULL;
+    cb = fb->nr_cbufs ? r300_get_nonnull_cb(r300, fb, 0) : NULL;
 
     if (cb) {
         if (cb->format == PIPE_FORMAT_R16G16B16A16_FLOAT) {
@@ -52,8 +35,26 @@ void r300_emit_blend_state(struct r300_context* r300,
         } else if (cb->format == PIPE_FORMAT_R16G16B16X16_FLOAT) {
             WRITE_CS_TABLE(blend->cb_noclamp_noalpha, size);
         } else {
+            struct r300_resource *tex = r300_resource(cb->texture);
+            unsigned colormask = blend->state.rt[0].colormask;
             unsigned swz = r300_surface(cb)->colormask_swizzle;
-            WRITE_CS_TABLE(blend->cb_clamp[swz], size);
+
+            /* Pre-R5xx can lose parts of unblended masked writes to microtiled
+             * color buffers. An identity blend with colorbuffer reads enabled
+             * makes the cache preserve untouched channels and pixels through
+             * read-modify-write.
+             */
+            if (!r300->screen->caps.is_r500 &&
+                tex->tex.microtile != RADEON_LAYOUT_LINEAR &&
+                cb->texture->nr_samples <= 1 &&
+                r300_is_blending_supported(r300->screen, cb->format) &&
+                !blend->state.rt[0].blend_enable &&
+                !blend->state.logicop_enable &&
+                colormask != 0 &&
+                colormask != PIPE_MASK_RGBA)
+                WRITE_CS_TABLE(blend->cb_clamp_masked_write[swz], size);
+            else
+                WRITE_CS_TABLE(blend->cb_clamp[swz], size);
         }
     } else {
         WRITE_CS_TABLE(blend->cb_no_readwrite, size);
@@ -83,14 +84,17 @@ void r300_emit_dsa_state(struct r300_context* r300, unsigned size, void* state)
     struct r300_dsa_state* dsa = (struct r300_dsa_state*)state;
     struct pipe_framebuffer_state* fb =
         (struct pipe_framebuffer_state*)r300->fb_state.state;
-    boolean is_r500 = r300->screen->caps.is_r500;
+    bool is_r500 = r300->screen->caps.is_r500;
     CS_LOCALS(r300);
     uint32_t alpha_func = dsa->alpha_function;
+    bool force_query_z =
+        r300->query_current &&
+        (!fb->zsbuf.texture || !dsa->dsa.depth_enabled);
 
     /* Choose the alpha ref value between 8-bit (FG_ALPHA_FUNC.AM_VAL) and
      * 16-bit (FG_ALPHA_VALUE). */
     if (is_r500 && (alpha_func & R300_FG_ALPHA_FUNC_ENABLE)) {
-        struct pipe_surface *cb = fb->nr_cbufs ? r300_get_nonnull_cb(fb, 0) : NULL;
+        struct pipe_surface *cb = fb->nr_cbufs ? r300_get_nonnull_cb(r300, fb, 0) : NULL;
 
         if (cb &&
             (cb->format == PIPE_FORMAT_R16G16B16A16_FLOAT ||
@@ -108,9 +112,30 @@ void r300_emit_dsa_state(struct r300_context* r300, unsigned size, void* state)
                       R300_FG_ALPHA_FUNC_CFG_3_OF_6;
     }
 
+    if (force_query_z) {
+        uint32_t z_buffer_control = dsa->z_buffer_control | R300_Z_ENABLE;
+        uint32_t z_stencil_control = dsa->z_stencil_control;
+
+        z_stencil_control &= ~(R300_ZS_MASK << R300_Z_FUNC_SHIFT);
+        z_stencil_control |= R300_ZS_ALWAYS << R300_Z_FUNC_SHIFT;
+
+        BEGIN_CS(size);
+        OUT_CS_REG(R300_FG_ALPHA_FUNC, alpha_func);
+        OUT_CS_REG_SEQ(R300_ZB_CNTL, 3);
+        OUT_CS(z_buffer_control);
+        OUT_CS(z_stencil_control);
+        OUT_CS(dsa->stencil_ref_mask);
+        if (is_r500) {
+            OUT_CS_REG(R500_ZB_STENCILREFMASK_BF, dsa->stencil_ref_bf);
+            OUT_CS_REG(R500_FG_ALPHA_VALUE, dsa->alpha_value);
+        }
+        END_CS;
+        return;
+    }
+
     BEGIN_CS(size);
     OUT_CS_REG(R300_FG_ALPHA_FUNC, alpha_func);
-    OUT_CS_TABLE(fb->zsbuf ? &dsa->cb_begin : dsa->cb_zb_no_readwrite, size-2);
+    OUT_CS_TABLE(fb->zsbuf.texture ? &dsa->cb_begin : dsa->cb_zb_no_readwrite, size-2);
     END_CS;
 }
 
@@ -229,9 +254,15 @@ void r300_emit_fs_constants(struct r300_context* r300, unsigned size, void *stat
     OUT_CS_REG_SEQ(R300_PFS_PARAM_0_X, count * 4);
     if (buf->remap_table){
         for (i = 0; i < count; i++) {
-            float *data = (float*)&buf->ptr[buf->remap_table[i]*4];
-            for (j = 0; j < 4; j++)
-                OUT_CS(pack_float24(data[j]));
+            for (j = 0; j < 4; j++) {
+                unsigned swz = buf->remap_table[i].swizzle[j];
+                unsigned index = buf->remap_table[i].index[j];
+                if (index == -1)
+                    OUT_CS(pack_float24(0.0f));
+                else {
+                    OUT_CS(pack_float24(*(float*)&buf->ptr[index * 4 + swz]));
+                }
+            }
         }
     } else {
         for (i = 0; i < count; i++)
@@ -294,7 +325,11 @@ void r500_emit_fs_constants(struct r300_context* r300, unsigned size, void *stat
     OUT_CS_ONE_REG(R500_GA_US_VECTOR_DATA, count * 4);
     if (buf->remap_table){
         for (unsigned i = 0; i < count; i++) {
-            uint32_t *data = &buf->ptr[buf->remap_table[i]*4];
+            uint32_t data[4] = {};
+            for (unsigned chan = 0; chan < 4; chan++){
+                if (buf->remap_table[i].swizzle[chan] != RC_SWIZZLE_UNUSED)
+                data[chan] = buf->ptr[buf->remap_table[i].index[chan] * 4 + buf->remap_table[i].swizzle[chan]];
+            }
             OUT_CS_TABLE(data, 4);
         }
     } else {
@@ -343,7 +378,7 @@ void r300_emit_gpu_flush(struct r300_context *r300, unsigned size, void *state)
     CS_LOCALS(r300);
 
     if (r300->cbzb_clear) {
-        struct r300_surface *surf = r300_surface(fb->cbufs[0]);
+        struct r300_surface *surf = r300_surface(r300->fb_cbufs[0]);
 
         height = surf->cbzb_height;
         width = surf->cbzb_width;
@@ -399,6 +434,7 @@ void r300_emit_aa_state(struct r300_context *r300, unsigned size, void *state)
 void r300_emit_fb_state(struct r300_context* r300, unsigned size, void* state)
 {
     struct pipe_framebuffer_state* fb = (struct pipe_framebuffer_state*)state;
+    struct r300_aa_state *aa = (struct r300_aa_state*)r300->aa_state.state;
     struct r300_surface* surf;
     unsigned i;
     uint32_t rb3d_cctl = 0;
@@ -423,12 +459,19 @@ void r300_emit_fb_state(struct r300_context* r300, unsigned size, void* state)
 
     /* Set up colorbuffers. */
     for (i = 0; i < fb->nr_cbufs; i++) {
-        surf = r300_surface(r300_get_nonnull_cb(fb, i));
+        surf = r300_surface(r300_get_nonnull_cb(r300, fb, i));
 
         OUT_CS_REG(R300_RB3D_COLOROFFSET0 + (4 * i), surf->offset);
         OUT_CS_RELOC(surf);
 
-        OUT_CS_REG(R300_RB3D_COLORPITCH0 + (4 * i), surf->pitch);
+        /* COLORPITCH should contain the tiling info of the resolve buffer.
+         * The tiling of the AA buffer isn't programmable anyway. */
+        uint32_t pitch = surf->pitch;
+        if (aa->dest) {
+            pitch &= ~(R300_COLOR_TILE(1) | R300_COLOR_MICROTILE(3));
+            pitch |= aa->dest->pitch & (R300_COLOR_TILE(1) | R300_COLOR_MICROTILE(3));
+        }
+        OUT_CS_REG(R300_RB3D_COLORPITCH0 + (4 * i), pitch);
         OUT_CS_RELOC(surf);
 
         if (r300->cmask_in_use && i == 0) {
@@ -445,7 +488,7 @@ void r300_emit_fb_state(struct r300_context* r300, unsigned size, void* state)
 
     /* Set up the ZB part of the CBZB clear. */
     if (r300->cbzb_clear) {
-        surf = r300_surface(fb->cbufs[0]);
+        surf = r300_surface(r300->fb_cbufs[0]);
 
         OUT_CS_REG(R300_ZB_FORMAT, surf->cbzb_format);
 
@@ -460,8 +503,8 @@ void r300_emit_fb_state(struct r300_context* r300, unsigned size, void* state)
             surf->cbzb_pitch);
     }
     /* Set up a zbuffer. */
-    else if (fb->zsbuf) {
-        surf = r300_surface(fb->zsbuf);
+    else if (fb->zsbuf.texture) {
+        surf = r300_surface(r300->fb_zsbuf);
 
         OUT_CS_REG(R300_ZB_FORMAT, surf->format);
 
@@ -604,7 +647,7 @@ void r300_emit_fb_state_pipelined(struct r300_context *r300,
      * (must be written after unpipelined regs) */
     OUT_CS_REG_SEQ(R300_US_OUT_FMT_0, 4);
     for (i = 0; i < num_cbufs; i++) {
-        OUT_CS(r300_surface(r300_get_nonnull_cb(fb, i))->format);
+        OUT_CS(r300_surface(r300_get_nonnull_cb(r300, fb, i))->format);
     }
     for (; i < 1; i++) {
         OUT_CS(R300_US_OUT_FMT_C4_8 |
@@ -646,20 +689,58 @@ void r300_emit_fb_state_pipelined(struct r300_context *r300,
 void r300_emit_query_start(struct r300_context *r300, unsigned size, void*state)
 {
     struct r300_query *query = r300->query_current;
+    struct pipe_framebuffer_state *fb =
+        (struct pipe_framebuffer_state *)r300->fb_state.state;
+    struct r300_surface *surf = NULL;
+    bool use_dummy_z = false;
+    unsigned dwords = 4;
     CS_LOCALS(r300);
 
     if (!query)
 	return;
 
-    BEGIN_CS(size);
+    /* If there is no depth buffer, bind a temporary dummy one to satisfy
+     * ZPASS accounting and the CS checker.
+     */
+    if (fb && !fb->zsbuf.texture && fb->nr_cbufs) {
+        struct pipe_surface *cb = r300_get_nonnull_cb(r300, fb, 0);
+
+        if (cb) {
+            surf = r300_surface(cb);
+            use_dummy_z = true;
+        }
+    }
+
+    if (use_dummy_z) {
+        dwords += 10;
+    }
+
+    BEGIN_CS(dwords);
     if (r300->screen->caps.family == CHIP_RV530) {
         OUT_CS_REG(RV530_FG_ZBREG_DEST, RV530_FG_ZBREG_DEST_PIPE_SELECT_ALL);
     } else {
         OUT_CS_REG(R300_SU_REG_DEST, R300_RASTER_PIPE_SELECT_ALL);
     }
+
+    if (use_dummy_z) {
+        unsigned depthpitch = 4 | R300_DEPTHMICROTILE_TILED_SQUARE;
+
+#if UTIL_ARCH_BIG_ENDIAN
+        depthpitch |= R300_DEPTHENDIAN(R300_SURF_DWORD_SWAP);
+#endif
+
+        OUT_CS_REG(R300_ZB_FORMAT, R300_DEPTHFORMAT_16BIT_INT_Z);
+
+        OUT_CS_REG(R300_ZB_DEPTHOFFSET, 0);
+        OUT_CS_RELOC(surf);
+
+        OUT_CS_REG(R300_ZB_DEPTHPITCH, depthpitch);
+        OUT_CS_RELOC(surf);
+    }
+
     OUT_CS_REG(R300_ZB_ZPASS_DATA, 0);
     END_CS;
-    query->begin_emitted = TRUE;
+    query->begin_emitted = true;
 }
 
 static void r300_emit_query_end_frag_pipes(struct r300_context *r300,
@@ -755,7 +836,7 @@ void r300_emit_query_end(struct r300_context* r300)
     if (!query)
 	return;
 
-    if (query->begin_emitted == FALSE)
+    if (query->begin_emitted == false)
         return;
 
     if (caps->family == CHIP_RV530) {
@@ -766,7 +847,7 @@ void r300_emit_query_end(struct r300_context* r300)
     } else 
         r300_emit_query_end_frag_pipes(r300, query);
 
-    query->begin_emitted = FALSE;
+    query->begin_emitted = false;
     query->num_results += query->num_pipes;
 
     /* XXX grab all the results and reset the counter. */
@@ -866,24 +947,50 @@ void r300_emit_sample_mask(struct r300_context *r300,
     END_CS;
 }
 
+void r300_emit_guardband_state(struct r300_context *r300,
+                               unsigned size, void *state)
+{
+    struct r300_guardband_state *guard = (struct r300_guardband_state *)state;
+    CS_LOCALS(r300);
+
+    if (!guard)
+        return;
+
+    BEGIN_CS(size);
+    OUT_CS_REG_SEQ(R300_VAP_GB_VERT_CLIP_ADJ, 4);
+    OUT_CS_32F(guard->vert_clip);
+    OUT_CS_32F(guard->vert_disc);
+    OUT_CS_32F(guard->horz_clip);
+    OUT_CS_32F(guard->horz_disc);
+    END_CS;
+}
+
 void r300_emit_scissor_state(struct r300_context* r300,
                              unsigned size, void* state)
 {
     struct pipe_scissor_state* scissor = (struct pipe_scissor_state*)state;
+    struct pipe_scissor_state final = r300->viewport_scissor;
     CS_LOCALS(r300);
+
+    if (r300->scissor_enabled && scissor) {
+        final.minx = MAX2(final.minx, scissor->minx);
+        final.miny = MAX2(final.miny, scissor->miny);
+        final.maxx = MIN2(final.maxx, scissor->maxx);
+        final.maxy = MIN2(final.maxy, scissor->maxy);
+    }
 
     BEGIN_CS(size);
     OUT_CS_REG_SEQ(R300_SC_CLIPRECT_TL_0, 2);
     if (r300->screen->caps.is_r500) {
-        OUT_CS((scissor->minx << R300_CLIPRECT_X_SHIFT) |
-               (scissor->miny << R300_CLIPRECT_Y_SHIFT));
-        OUT_CS(((scissor->maxx - 1) << R300_CLIPRECT_X_SHIFT) |
-               ((scissor->maxy - 1) << R300_CLIPRECT_Y_SHIFT));
+        OUT_CS((final.minx << R300_CLIPRECT_X_SHIFT) |
+               (final.miny << R300_CLIPRECT_Y_SHIFT));
+        OUT_CS(((final.maxx - 1) << R300_CLIPRECT_X_SHIFT) |
+               ((final.maxy - 1) << R300_CLIPRECT_Y_SHIFT));
     } else {
-        OUT_CS(((scissor->minx + 1440) << R300_CLIPRECT_X_SHIFT) |
-               ((scissor->miny + 1440) << R300_CLIPRECT_Y_SHIFT));
-        OUT_CS(((scissor->maxx + 1440-1) << R300_CLIPRECT_X_SHIFT) |
-               ((scissor->maxy + 1440-1) << R300_CLIPRECT_Y_SHIFT));
+        OUT_CS(((final.minx + 1440) << R300_CLIPRECT_X_SHIFT) |
+               ((final.miny + 1440) << R300_CLIPRECT_Y_SHIFT));
+        OUT_CS(((final.maxx + 1440-1) << R300_CLIPRECT_X_SHIFT) |
+               ((final.maxy + 1440-1) << R300_CLIPRECT_Y_SHIFT));
     }
     END_CS;
 }
@@ -895,7 +1002,7 @@ void r300_emit_textures_state(struct r300_context *r300,
     struct r300_texture_sampler_state *texstate;
     struct r300_resource *tex;
     unsigned i;
-    boolean has_us_format = r300->screen->caps.has_us_format;
+    bool has_us_format = r300->screen->caps.has_us_format;
     CS_LOCALS(r300);
 
     BEGIN_CS(size);
@@ -928,7 +1035,7 @@ void r300_emit_textures_state(struct r300_context *r300,
 }
 
 void r300_emit_vertex_arrays(struct r300_context* r300, int offset,
-                             boolean indexed, int instance_id)
+                             bool indexed, int instance_id)
 {
     struct pipe_vertex_buffer *vbuf = r300->vertex_buffer;
     struct pipe_vertex_element *velem = r300->velems->velem;
@@ -953,18 +1060,18 @@ void r300_emit_vertex_arrays(struct r300_context* r300, int offset,
             size1 = hw_format_size[i];
             size2 = hw_format_size[i+1];
 
-            OUT_CS(R300_VBPNTR_SIZE0(size1) | R300_VBPNTR_STRIDE0(vb1->stride) |
-                   R300_VBPNTR_SIZE1(size2) | R300_VBPNTR_STRIDE1(vb2->stride));
-            OUT_CS(vb1->buffer_offset + velem[i].src_offset   + offset * vb1->stride);
-            OUT_CS(vb2->buffer_offset + velem[i+1].src_offset + offset * vb2->stride);
+            OUT_CS(R300_VBPNTR_SIZE0(size1) | R300_VBPNTR_STRIDE0(velem[i].src_stride) |
+                   R300_VBPNTR_SIZE1(size2) | R300_VBPNTR_STRIDE1(velem[i+1].src_stride));
+            OUT_CS(vb1->buffer_offset + velem[i].src_offset   + offset * velem[i].src_stride);
+            OUT_CS(vb2->buffer_offset + velem[i+1].src_offset + offset * velem[i+1].src_stride);
         }
 
         if (vertex_array_count & 1) {
             vb1 = &vbuf[velem[i].vertex_buffer_index];
             size1 = hw_format_size[i];
 
-            OUT_CS(R300_VBPNTR_SIZE0(size1) | R300_VBPNTR_STRIDE0(vb1->stride));
-            OUT_CS(vb1->buffer_offset + velem[i].src_offset + offset * vb1->stride);
+            OUT_CS(R300_VBPNTR_SIZE0(size1) | R300_VBPNTR_STRIDE0(velem[i].src_stride));
+            OUT_CS(vb1->buffer_offset + velem[i].src_offset + offset * velem[i].src_stride);
         }
 
         for (i = 0; i < vertex_array_count; i++) {
@@ -982,18 +1089,18 @@ void r300_emit_vertex_arrays(struct r300_context* r300, int offset,
             if (velem[i].instance_divisor) {
                 stride1 = 0;
                 offset1 = vb1->buffer_offset + velem[i].src_offset +
-                          (instance_id / velem[i].instance_divisor) * vb1->stride;
+                          (instance_id / velem[i].instance_divisor) * velem[i].src_stride;
             } else {
-                stride1 = vb1->stride;
-                offset1 = vb1->buffer_offset + velem[i].src_offset + offset * vb1->stride;
+                stride1 = velem[i].src_stride;
+                offset1 = vb1->buffer_offset + velem[i].src_offset + offset * velem[i].src_stride;
             }
             if (velem[i+1].instance_divisor) {
                 stride2 = 0;
                 offset2 = vb2->buffer_offset + velem[i+1].src_offset +
-                          (instance_id / velem[i+1].instance_divisor) * vb2->stride;
+                          (instance_id / velem[i+1].instance_divisor) * velem[i+1].src_stride;
             } else {
-                stride2 = vb2->stride;
-                offset2 = vb2->buffer_offset + velem[i+1].src_offset + offset * vb2->stride;
+                stride2 = velem[i+1].src_stride;
+                offset2 = vb2->buffer_offset + velem[i+1].src_offset + offset * velem[i+1].src_stride;
             }
 
             OUT_CS(R300_VBPNTR_SIZE0(size1) | R300_VBPNTR_STRIDE0(stride1) |
@@ -1009,10 +1116,10 @@ void r300_emit_vertex_arrays(struct r300_context* r300, int offset,
             if (velem[i].instance_divisor) {
                 stride1 = 0;
                 offset1 = vb1->buffer_offset + velem[i].src_offset +
-                          (instance_id / velem[i].instance_divisor) * vb1->stride;
+                          (instance_id / velem[i].instance_divisor) * velem[i].src_stride;
             } else {
-                stride1 = vb1->stride;
-                offset1 = vb1->buffer_offset + velem[i].src_offset + offset * vb1->stride;
+                stride1 = velem[i].src_stride;
+                offset1 = vb1->buffer_offset + velem[i].src_offset + offset * velem[i].src_stride;
             }
 
             OUT_CS(R300_VBPNTR_SIZE0(size1) | R300_VBPNTR_STRIDE0(stride1));
@@ -1027,7 +1134,7 @@ void r300_emit_vertex_arrays(struct r300_context* r300, int offset,
     END_CS;
 }
 
-void r300_emit_vertex_arrays_swtcl(struct r300_context *r300, boolean indexed)
+void r300_emit_vertex_arrays_swtcl(struct r300_context *r300, bool indexed)
 {
     CS_LOCALS(r300);
 
@@ -1179,9 +1286,14 @@ void r300_emit_vs_constants(struct r300_context* r300,
                    R500_PVS_CONST_START : R300_PVS_CONST_START) + buf->buffer_base);
         OUT_CS_ONE_REG(R300_VAP_PVS_UPLOAD_DATA, count * 4);
         if (buf->remap_table){
+            uint32_t *data = buf->ptr;
             for (i = 0; i < count; i++) {
-                uint32_t *data = &buf->ptr[buf->remap_table[i]*4];
-                OUT_CS_TABLE(data, 4);
+                uint32_t constant[4];
+                for (unsigned chan = 0; chan < 4; chan++) {
+                    constant[chan] = data[buf->remap_table[i].index[chan] * 4 +
+                                           buf->remap_table[i].swizzle[chan]];
+                }
+                OUT_CS_TABLE(constant, 4);
             }
         } else {
             OUT_CS_TABLE(buf->ptr, count * 4);
@@ -1220,20 +1332,29 @@ void r300_emit_hiz_clear(struct r300_context *r300, unsigned size, void *state)
 {
     struct pipe_framebuffer_state *fb =
         (struct pipe_framebuffer_state*)r300->fb_state.state;
-    struct r300_resource* tex;
+    struct r300_resource *tex = r300_resource(fb->zsbuf.texture);
+    unsigned remaining = tex->tex.hiz_dwords[fb->zsbuf.level];
+    unsigned start = 0;
     CS_LOCALS(r300);
 
-    tex = r300_resource(fb->zsbuf->texture);
+    /* 3D_CLEAR_HIZ COUNT is 14-bit (max 0x3fff), so large surfaces must be
+     * split into multiple packets. */
+    while (remaining) {
+        unsigned count = MIN2(remaining, R300_CLEAR_HIZ_COUNT_MAX);
 
-    BEGIN_CS(size);
-    OUT_CS_PKT3(R300_PACKET3_3D_CLEAR_HIZ, 2);
-    OUT_CS(0);
-    OUT_CS(tex->tex.hiz_dwords[fb->zsbuf->u.tex.level]);
-    OUT_CS(r300->hiz_clear_value);
-    END_CS;
+        BEGIN_CS(4);
+        OUT_CS_PKT3(R300_PACKET3_3D_CLEAR_HIZ, 2);
+        OUT_CS(start);
+        OUT_CS(count);
+        OUT_CS(r300->hiz_clear_value);
+        END_CS;
+
+        start += count;
+        remaining -= count;
+    }
 
     /* Mark the current zbuffer's hiz ram as in use. */
-    r300->hiz_in_use = TRUE;
+    r300->hiz_in_use = true;
     r300->hiz_func = HIZ_FUNC_NONE;
     r300_mark_atom_dirty(r300, &r300->hyperz_state);
 }
@@ -1245,17 +1366,17 @@ void r300_emit_zmask_clear(struct r300_context *r300, unsigned size, void *state
     struct r300_resource *tex;
     CS_LOCALS(r300);
 
-    tex = r300_resource(fb->zsbuf->texture);
+    tex = r300_resource(fb->zsbuf.texture);
 
     BEGIN_CS(size);
     OUT_CS_PKT3(R300_PACKET3_3D_CLEAR_ZMASK, 2);
     OUT_CS(0);
-    OUT_CS(tex->tex.zmask_dwords[fb->zsbuf->u.tex.level]);
+    OUT_CS(tex->tex.zmask_dwords[fb->zsbuf.level]);
     OUT_CS(0);
     END_CS;
 
     /* Mark the current zbuffer's zmask as in use. */
-    r300->zmask_in_use = TRUE;
+    r300->zmask_in_use = true;
     r300_mark_atom_dirty(r300, &r300->hyperz_state);
 }
 
@@ -1266,7 +1387,7 @@ void r300_emit_cmask_clear(struct r300_context *r300, unsigned size, void *state
     struct r300_resource *tex;
     CS_LOCALS(r300);
 
-    tex = r300_resource(fb->cbufs[0]->texture);
+    tex = r300_resource(fb->cbufs[0].texture);
 
     BEGIN_CS(size);
     OUT_CS_PKT3(R300_PACKET3_3D_CLEAR_CMASK, 2);
@@ -1276,7 +1397,7 @@ void r300_emit_cmask_clear(struct r300_context *r300, unsigned size, void *state
     END_CS;
 
     /* Mark the current zbuffer's zmask as in use. */
-    r300->cmask_in_use = TRUE;
+    r300->cmask_in_use = true;
     r300_mark_fb_state_dirty(r300, R300_CHANGED_CMASK_ENABLE);
 }
 
@@ -1300,9 +1421,9 @@ void r300_emit_texture_cache_inval(struct r300_context* r300, unsigned size, voi
     END_CS;
 }
 
-boolean r300_emit_buffer_validate(struct r300_context *r300,
-                                  boolean do_validate_vertex_buffers,
-                                  struct pipe_resource *index_buffer)
+bool r300_emit_buffer_validate(struct r300_context *r300,
+                               bool do_validate_vertex_buffers,
+                               struct pipe_resource *index_buffer)
 {
     struct pipe_framebuffer_state *fb =
         (struct pipe_framebuffer_state*)r300->fb_state.state;
@@ -1311,33 +1432,33 @@ boolean r300_emit_buffer_validate(struct r300_context *r300,
         (struct r300_textures_state*)r300->textures_state.state;
     struct r300_resource *tex;
     unsigned i;
-    boolean flushed = FALSE;
+    bool flushed = false;
 
 validate:
     if (r300->fb_state.dirty) {
         /* Color buffers... */
         for (i = 0; i < fb->nr_cbufs; i++) {
-            if (!fb->cbufs[i])
+            if (!fb->cbufs[i].texture)
                 continue;
-            tex = r300_resource(fb->cbufs[i]->texture);
+            tex = r300_resource(fb->cbufs[i].texture);
             assert(tex && tex->buf && "cbuf is marked, but NULL!");
             r300->rws->cs_add_buffer(&r300->cs, tex->buf,
                                     RADEON_USAGE_READWRITE | RADEON_USAGE_SYNCHRONIZED |
                                     (tex->b.nr_samples > 1 ?
                                         RADEON_PRIO_COLOR_BUFFER_MSAA :
                                         RADEON_PRIO_COLOR_BUFFER),
-                                    r300_surface(fb->cbufs[i])->domain);
+                                    r300_surface(r300->fb_cbufs[i])->domain);
         }
         /* ...depth buffer... */
-        if (fb->zsbuf) {
-            tex = r300_resource(fb->zsbuf->texture);
+        if (fb->zsbuf.texture) {
+            tex = r300_resource(fb->zsbuf.texture);
             assert(tex && tex->buf && "zsbuf is marked, but NULL!");
             r300->rws->cs_add_buffer(&r300->cs, tex->buf,
                                     RADEON_USAGE_READWRITE | RADEON_USAGE_SYNCHRONIZED |
                                     (tex->b.nr_samples > 1 ?
                                         RADEON_PRIO_DEPTH_BUFFER_MSAA :
                                         RADEON_PRIO_DEPTH_BUFFER),
-                                    r300_surface(fb->zsbuf)->domain);
+                                    r300_surface(r300->fb_zsbuf)->domain);
         }
     }
     /* The AA resolve buffer. */
@@ -1404,13 +1525,13 @@ validate:
     if (!r300->rws->cs_validate(&r300->cs)) {
         /* Ooops, an infinite loop, give up. */
         if (flushed)
-            return FALSE;
+            return false;
 
-        flushed = TRUE;
+        flushed = true;
         goto validate;
     }
 
-    return TRUE;
+    return true;
 }
 
 unsigned r300_get_num_dirty_dwords(struct r300_context *r300)
@@ -1439,6 +1560,8 @@ unsigned r300_get_num_cs_end_dwords(struct r300_context *r300)
     dwords += r300->hyperz_state.size + 2; /* emit_hyperz_end + zcache flush */
     if (r300->screen->caps.is_r500)
         dwords += 2; /* emit_index_bias */
+    if (!r300->screen->caps.has_tcl && r300->screen->caps.has_hardware_tcl)
+        dwords += 2; /* VAP status reset for other GL users/DDX */
     dwords += 3; /* MSPOS */
 
     return dwords;
@@ -1452,7 +1575,7 @@ void r300_emit_dirty_state(struct r300_context* r300)
     foreach_dirty_atom(r300, atom) {
         if (atom->dirty) {
             atom->emit(r300, atom->size, atom->state);
-            atom->dirty = FALSE;
+            atom->dirty = false;
         }
     }
 

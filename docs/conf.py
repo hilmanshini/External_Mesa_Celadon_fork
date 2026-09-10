@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import sphinx_rtd_theme
-
 #
 # The Mesa 3D Graphics Library documentation build configuration file, created by
 # sphinx-quickstart on Wed Mar 29 14:08:51 2017.
@@ -21,13 +19,18 @@ import sphinx_rtd_theme
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 #
 import os
+import shutil
 import sys
+import pathlib
+
+from hawkmoth.util import compiler
 
 # If extensions (or modules to document with autodoc) are in another directory,
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 sys.path.append(os.path.abspath('_exts'))
 
+GENERATED_FILES_DIR = '_generated'
 
 # -- General configuration ------------------------------------------------
 
@@ -38,7 +41,14 @@ sys.path.append(os.path.abspath('_exts'))
 # Add any Sphinx extension module names here, as strings. They can be
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
 # ones.
-extensions = ['sphinx.ext.graphviz', 'breathe', 'formatting', 'nir', 'redirects']
+extensions = [
+    'bootstrap',
+    'depfile',
+    'formatting',
+    'hawkmoth',
+    'nir',
+    'sphinx.ext.graphviz',
+]
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ['_templates']
@@ -58,7 +68,7 @@ copyright = '1995-2018, Brian Paul'
 author = 'Brian Paul'
 html_show_copyright = False
 
-html_theme_path = [sphinx_rtd_theme.get_html_theme_path()]
+html_theme_path = ['.']
 
 # The version info for the project you're documenting, acts as replacement for
 # |version| and |release|, also used in various other places throughout the
@@ -79,10 +89,7 @@ language = 'en'
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
 # This patterns also effect to html_static_path and html_extra_path
-exclude_patterns = []
-
-# The name of the Pygments (syntax highlighting) style to use.
-pygments_style = 'sphinx'
+exclude_patterns = ['header-stubs', '_generated']
 
 # If true, `todo` and `todoList` produce output, else they produce nothing.
 todo_include_todos = False
@@ -98,26 +105,9 @@ default_role = 'c:expr'
 # The theme to use for HTML and HTML Help pages.  See the documentation for
 # a list of builtin themes.
 #
-html_theme = 'sphinx_rtd_theme'
+html_theme = 'mesa3d_theme'
 
 html_favicon = 'favicon.ico'
-
-# Theme options are theme-specific and customize the look and feel of a theme
-# further.  For a list of options available for each theme, see the
-# documentation.
-#
-html_theme_options = {
-  'display_version': False,
-}
-
-html_context = {
-  'display_gitlab': True,
-  'gitlab_host': 'gitlab.freedesktop.org',
-  'gitlab_user': 'mesa',
-  'gitlab_repo': 'mesa',
-  'gitlab_version': 'main',
-  'conf_py_path': '/docs/',
-}
 
 html_copy_source = False
 
@@ -127,30 +117,52 @@ html_copy_source = False
 html_static_path = []
 
 html_extra_path = [
-  '_extra/',
-  'release-maintainers-keys.asc',
-  'features.txt',
-  'libGL.txt',
-  'README.UVD',
-  'README.VCE',
-]
-
-html_redirects = [
-  ('webmaster', 'https://www.mesa3d.org/website/'),
+    '_extra/',
+    'release-maintainers-keys.asc',
+    'features.txt',
+    'libGL.txt',
+    'README.UVD',
+    'README.VCE',
 ]
 
 
 # -- Options for linkcheck ------------------------------------------------
 
 linkcheck_ignore = [
-  r'specs/.*\.spec', # gets copied during the build process
-  r'news:.*', # seems linkcheck doesn't like the news: URI-scheme...
-  r'http://mesa-ci-results.jf.intel.com', # only available for Intel employees
-  r'https://gitlab.com/.*#.*', # needs JS eval
-  r'https://gitlab.freedesktop.org/.*#.*', # needs JS eval
-  r'https://github.com/.*#.*', # needs JS eval
+    r'specs/.*\.spec',  # gets copied during the build process
+    r'news:.*',  # seems linkcheck doesn't like the news: URI-scheme...
+    r'http://mesa-ci-results.jf.intel.com',  # only available for Intel employees
+    r'https://gitlab.com/.*#.*',  # needs JS eval
+    r'https://gitlab.freedesktop.org/.*#.*',  # needs JS eval
+    r'https://github.com/.*#.*',  # needs JS eval
+    r'https://www.intel.com/.*',  # intel.com is blocking the linkcheck user-agent; maybe it can be customized to look like a browser?
+    r'https://sourceforge.net/.*',  # blocking the linkcheck user-agent
+    r'https://.*\.sourceforge\.(net|io)/.*',  # blocking the linkcheck user-agent
+    r'https://stackoverflow.com/.*',  # blocking the linkcheck user-agent
+    r'https://(www|dev)\.vulkan\.org/.*',  # blocking the linkcheck user-agent
+    r'https://crates.io/.*',  # blocking the linkcheck user-agent
+    r'https://docs.vulkan.org/.*',  # blocking the linkcheck user-agent
+    r'https://wikis.khronos.org/.*',  # blocking the linkcheck user-agent
+    r'https://en.wikipedia.org/.*',  # rate-limited, which linkcheck doesn't respect
+    r'https://www.freedesktop.org/.*',  # protected by anubis
+    r'https://docs.redhat.com/.*',  # blocking the linkcheck user-agent
+    r'https://registry.khronos.org/.*',  # blocking the linkcheck user-agent
+    r'https://alt.3dcenter.org/.*',  # blocking the linkcheck user-agent
 ]
 linkcheck_exclude_documents = [r'relnotes/.*']
+
+linkcheck_allowed_redirects = {
+    # Pages that forward the front-page to a wiki or some explore-page
+    'https://www.freedesktop.org': 'https://www.freedesktop.org/wiki/',
+    'https://dri.freedesktop.org/': 'https://dri.freedesktop.org/wiki/',
+    'https://gitlab.freedesktop.org/': 'https://gitlab.freedesktop.org/explore/groups',
+    'https://www.sphinx-doc.org/': 'https://www.sphinx-doc.org/en/master/',
+
+    # Pages that requires authentication
+    'https://gitlab.freedesktop.org/admin/runners': 'https://gitlab.freedesktop.org/users/sign_in',
+    'https://gitlab.freedesktop.org/profile/personal_access_tokens': 'https://gitlab.freedesktop.org/users/sign_in',
+    'https://support.broadcom.com/group/ecx/free-downloads': 'https://support.broadcom.com/c/portal/login',
+}
 
 
 # -- Options for HTMLHelp output ------------------------------------------
@@ -213,10 +225,46 @@ texinfo_documents = [
 
 graphviz_output_format = 'svg'
 
-# -- Options for breathe --------------------------------------------------
-breathe_projects = {
-    'mesa' : 'doxygen_xml',
-}
-breathe_default_project = 'mesa'
-breathe_show_define_initializer = True
-breathe_show_enumvalue_initializer = True
+# -- Options for hawkmoth -------------------------------------------------
+
+hawkmoth_root = os.path.abspath(os.pardir)
+mesa_root = os.path.join(os.path.dirname(__file__), os.pardir)
+mesa_build_root = os.environ.get('MESA_BUILD_ROOT')
+hawkmoth_clang = [
+    '-I{}/docs/header-stubs/'.format(mesa_root),
+    '-I{}/include/'.format(mesa_root),
+    '-I{}/src/'.format(mesa_root),
+    '-I{}/src/gallium/include/'.format(mesa_root),
+    '-I{}/src/intel/'.format(mesa_root),
+    '-I{}/src/mesa/'.format(mesa_root),
+    '-I{}/src/vulkan/util'.format(mesa_root),
+    '-I{}/src/'.format(mesa_build_root),
+    '-DHAVE_STRUCT_TIMESPEC',
+    '-DHAVE_PTHREAD',
+    '-DHAVE_ENDIAN_H',
+]
+hawkmoth_clang.extend(compiler.get_include_args())
+
+# helpers for definining parameter direction
+rst_prolog = '''
+.. |in| replace:: **[in]**
+.. |out| replace:: **[out]**
+.. |inout| replace:: **[inout]**
+'''
+
+def _copy_generated_rst(app):
+    if not mesa_build_root:
+        return
+
+    generated = [
+        'radv_drirc.rst',
+    ]
+
+    gen_dir = pathlib.Path(app.srcdir) / GENERATED_FILES_DIR
+    gen_dir.mkdir(exist_ok=True)
+
+    for file in generated:
+        shutil.copy(pathlib.Path(mesa_build_root) / 'docs' / file, gen_dir)
+
+def setup(app):
+    app.connect('builder-inited', _copy_generated_rst)

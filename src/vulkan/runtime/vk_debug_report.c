@@ -58,8 +58,8 @@ vk_common_CreateDebugReportCallbackEXT(VkInstance _instance,
    if (!cb)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
 
-   vk_object_base_init(NULL, &cb->base,
-                       VK_OBJECT_TYPE_DEBUG_REPORT_CALLBACK_EXT);
+   vk_object_base_instance_init(instance, &cb->base,
+                                VK_OBJECT_TYPE_DEBUG_REPORT_CALLBACK_EXT);
 
    cb->flags = pCreateInfo->flags;
    cb->callback = pCreateInfo->pfnCallback;
@@ -94,20 +94,20 @@ vk_common_DestroyDebugReportCallbackEXT(VkInstance _instance,
 }
 
 static void
-debug_report(struct vk_instance *instance,
-             VkDebugReportFlagsEXT flags,
-             VkDebugReportObjectTypeEXT object_type,
-             uint64_t handle,
-             size_t location,
-             int32_t messageCode,
-             const char* pLayerPrefix,
-             const char *pMessage)
+debug_report_message(struct vk_debug_report *debug_report,
+                     VkDebugReportFlagsEXT flags,
+                     VkDebugReportObjectTypeEXT object_type,
+                     uint64_t handle,
+                     size_t location,
+                     int32_t messageCode,
+                     const char* pLayerPrefix,
+                     const char *pMessage)
 {
-   /* Allow NULL for convinience, return if no callbacks registered. */
-   if (!instance || list_is_empty(&instance->debug_report.callbacks))
+   /* Return if no callbacks registered. */
+   if (list_is_empty(&debug_report->callbacks))
       return;
 
-   mtx_lock(&instance->debug_report.callbacks_mutex);
+   mtx_lock(&debug_report->callbacks_mutex);
 
    /* Section 33.2 of the Vulkan 1.0.59 spec says:
     *
@@ -117,13 +117,13 @@ debug_report(struct vk_instance *instance,
     *    is active."
     */
    list_for_each_entry(struct vk_debug_report_callback, cb,
-                       &instance->debug_report.callbacks, link) {
+                       &debug_report->callbacks, link) {
       if (cb->flags & flags)
          cb->callback(flags, object_type, handle, location, messageCode,
                       pLayerPrefix, pMessage, cb->data);
    }
 
-   mtx_unlock(&instance->debug_report.callbacks_mutex);
+   mtx_unlock(&debug_report->callbacks_mutex);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -137,12 +137,12 @@ vk_common_DebugReportMessageEXT(VkInstance _instance,
                                 const char* pMessage)
 {
    VK_FROM_HANDLE(vk_instance, instance, _instance);
-   debug_report(instance, flags, objectType,
-                object, location, messageCode, pLayerPrefix, pMessage);
+   debug_report_message(&instance->debug_report, flags, objectType,
+                        object, location, messageCode, pLayerPrefix, pMessage);
 }
 
 void
-vk_debug_report(struct vk_instance *instance,
+vk_debug_report(struct vk_debug_report *debug_report,
                 VkDebugReportFlagsEXT flags,
                 const struct vk_object_base *object,
                 size_t location,
@@ -152,7 +152,8 @@ vk_debug_report(struct vk_instance *instance,
 {
    VkObjectType object_type =
       object ? object->type : VK_OBJECT_TYPE_UNKNOWN;
-   debug_report(instance, flags, (VkDebugReportObjectTypeEXT)object_type,
-                (uint64_t)(uintptr_t)object, location, messageCode,
-                pLayerPrefix, pMessage);
+
+   debug_report_message(debug_report, flags, (VkDebugReportObjectTypeEXT)object_type,
+                       (uint64_t)(uintptr_t)object, location, messageCode,
+                       pLayerPrefix, pMessage);
 }

@@ -1,28 +1,12 @@
 /*
  * Copyright © 2020 Valve Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 #include "helpers.h"
 
-TEST_F(spirv_test, opload_volatile)
+class Volatile : public spirv_test {};
+
+TEST_F(Volatile, opload_volatile)
 {
    /*
                OpCapability Shader
@@ -78,7 +62,7 @@ TEST_F(spirv_test, opload_volatile)
    EXPECT_NE(nir_intrinsic_access(intrinsic) & ACCESS_VOLATILE, 0);
 }
 
-TEST_F(spirv_test, opstore_volatile)
+TEST_F(Volatile, opstore_volatile)
 {
    /*
                OpCapability Shader
@@ -134,7 +118,7 @@ TEST_F(spirv_test, opstore_volatile)
    EXPECT_NE(nir_intrinsic_access(intrinsic) & ACCESS_VOLATILE, 0);
 }
 
-TEST_F(spirv_test, opcopymemory_volatile_both)
+TEST_F(Volatile, opcopymemory_volatile_both)
 {
    /*
                OpCapability Shader
@@ -192,7 +176,7 @@ TEST_F(spirv_test, opcopymemory_volatile_both)
    EXPECT_NE(nir_intrinsic_access(intrinsic) & ACCESS_VOLATILE, 0);
 }
 
-TEST_F(spirv_test, opcopymemory_volatile_target)
+TEST_F(Volatile, opcopymemory_volatile_target)
 {
    /*
                OpCapability Shader
@@ -250,7 +234,7 @@ TEST_F(spirv_test, opcopymemory_volatile_target)
    EXPECT_NE(nir_intrinsic_access(intrinsic) & ACCESS_VOLATILE, 0);
 }
 
-TEST_F(spirv_test, opcopymemory_volatile_source)
+TEST_F(Volatile, opcopymemory_volatile_source)
 {
    /*
                OpCapability Shader
@@ -308,7 +292,7 @@ TEST_F(spirv_test, opcopymemory_volatile_source)
    EXPECT_EQ(nir_intrinsic_access(intrinsic) & ACCESS_VOLATILE, 0);
 }
 
-TEST_F(spirv_test, opimageread_volatile)
+TEST_F(Volatile, opimageread_volatile)
 {
    /*
                OpCapability Shader
@@ -371,7 +355,7 @@ TEST_F(spirv_test, opimageread_volatile)
    EXPECT_NE(nir_intrinsic_access(intrinsic) & ACCESS_VOLATILE, 0);
 }
 
-TEST_F(spirv_test, opimagewrite_volatile)
+TEST_F(Volatile, opimagewrite_volatile)
 {
    /*
                OpCapability Shader
@@ -434,7 +418,7 @@ TEST_F(spirv_test, opimagewrite_volatile)
    EXPECT_NE(nir_intrinsic_access(intrinsic) & ACCESS_VOLATILE, 0);
 }
 
-TEST_F(spirv_test, opatomicload_image_volatile)
+TEST_F(Volatile, opatomicload_image_volatile)
 {
    /*
                OpCapability Shader
@@ -504,7 +488,7 @@ TEST_F(spirv_test, opatomicload_image_volatile)
    EXPECT_NE(nir_intrinsic_access(intrinsic) & ACCESS_VOLATILE, 0);
 }
 
-TEST_F(spirv_test, opatomicstore_image_volatile)
+TEST_F(Volatile, opatomicstore_image_volatile)
 {
    /*
                OpCapability Shader

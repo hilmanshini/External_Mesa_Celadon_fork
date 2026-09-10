@@ -51,26 +51,13 @@
  * lower register pressure.
  */
 
-static inline bool
-src_is_ssa(nir_src *src, void *state)
-{
-   return src->is_ssa;
-}
-
-static inline bool
-instr_reads_register(nir_instr *instr)
-{
-   return !nir_foreach_src(instr, src_is_ssa, NULL);
-}
-
 static bool
 nir_opt_move_block(nir_block *block, nir_move_options options)
 {
    bool progress = false;
-   nir_instr *last_instr = nir_block_ends_in_jump(block) ?
-                           nir_block_last_instr(block) : NULL;
+   nir_instr *last_instr = nir_block_ends_in_jump(block) ? nir_block_last_instr(block) : NULL;
    const nir_if *iff = nir_block_get_following_if(block);
-   const nir_instr *if_cond_instr = iff ? iff->condition.parent_instr : NULL;
+   const nir_instr *if_cond_instr = iff ? nir_def_instr(iff->condition.ssa) : NULL;
 
    /* Walk the instructions backwards.
     * The instructions get indexed while iterating.
@@ -79,26 +66,29 @@ nir_opt_move_block(nir_block *block, nir_move_options options)
     * If multiple instructions have the same user,
     * the original order is kept.
     */
-   unsigned index =  1;
-   unsigned last_reg_def_index = 0;
+   unsigned index = 1;
    nir_foreach_instr_reverse_safe(instr, block) {
       instr->index = index++;
 
-      /* Don't move register defs  */
-      if (nir_instr_def_is_register(instr)) {
-         last_reg_def_index = instr->index;
+      /* Check if this instruction can be moved downwards */
+      if (!nir_can_move_instr(instr, options)) {
+         if (instr->type == nir_instr_type_intrinsic) {
+            nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
+            if (intrin->intrinsic == nir_intrinsic_export_amd ||
+                intrin->intrinsic == nir_intrinsic_export_row_amd ||
+                intrin->intrinsic == nir_intrinsic_begin_invocation_interlock) {
+               /* Moving past these increases a critical section. */
+               last_instr = instr;
+            }
+         }
          continue;
       }
 
-      /* Check if this instruction can be moved downwards */
-      if (!nir_can_move_instr(instr, options))
-         continue;
-
       /* Check all users in this block which is the first */
-      const nir_ssa_def *def = nir_instr_ssa_def(instr);
+      const nir_def *def = nir_instr_def(instr);
       nir_instr *first_user = instr == if_cond_instr ? NULL : last_instr;
       nir_foreach_use(use, def) {
-         nir_instr *parent = use->parent_instr;
+         nir_instr *parent = nir_src_use_instr(use);
          if (parent->type == nir_instr_type_phi || parent->block != block)
             continue;
          if (!first_user || parent->index > first_user->index)
@@ -113,12 +103,6 @@ nir_opt_move_block(nir_block *block, nir_move_options options)
          /* check if the user is already the immediate successor */
          if (nir_instr_prev(first_user) == instr)
             continue;
-
-         /* Don't move register reads past register defs  */
-         if (first_user->index < last_reg_def_index &&
-             instr_reads_register(instr)) {
-            continue;
-         }
 
          /* Insert the instruction before it's first user */
          exec_node_remove(&instr->node);
@@ -153,23 +137,22 @@ nir_opt_move(nir_shader *shader, nir_move_options options)
 {
    bool progress = false;
 
-   nir_foreach_function(func, shader) {
-      if (!func->impl)
-         continue;
+   nir_foreach_function_impl(impl, shader) {
+      if (options & (nir_move_only_convergent | nir_move_only_divergent))
+         nir_metadata_require(impl, nir_metadata_divergence);
 
       bool impl_progress = false;
-      nir_foreach_block(block, func->impl) {
+      nir_foreach_block(block, impl) {
          if (nir_opt_move_block(block, options))
             impl_progress = true;
       }
 
       if (impl_progress) {
-         nir_metadata_preserve(func->impl, nir_metadata_block_index |
-                                           nir_metadata_dominance |
-                                           nir_metadata_live_ssa_defs);
-         progress = true;
+         progress = nir_progress(true, impl,
+                                 nir_metadata_control_flow | nir_metadata_live_defs);
       } else {
-         nir_metadata_preserve(func->impl, nir_metadata_all);
+         nir_progress(true, impl,
+                      nir_metadata_all & ~nir_metadata_instr_index);
       }
    }
 

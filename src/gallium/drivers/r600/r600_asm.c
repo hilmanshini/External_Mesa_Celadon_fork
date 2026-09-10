@@ -1,42 +1,31 @@
 /*
  * Copyright 2010 Jerome Glisse <glisse@freedesktop.org>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
+
+#include "r600_asm.h"
 #include "r600_sq.h"
 #include "r600_opcodes.h"
 #include "r600_formats.h"
-#include "r600_shader.h"
 #include "r600d.h"
+#include "r600d_common.h"
 
 #include <errno.h>
-#include "util/u_bitcast.h"
-#include "util/u_dump.h"
+#include <string.h>
+#include "compiler/shader_enums.h"
 #include "util/u_memory.h"
 #include "util/u_math.h"
-#include "pipe/p_shader_tokens.h"
-
-#include "sb/sb_public.h"
 
 #define NUM_OF_CYCLES 3
 #define NUM_OF_COMPONENTS 4
+
+/* This GPR is sacrificed for the cases where we write to a op3, but
+ * actually use the result only via PS/PV.
+ * TODO: consider tracking this better in RA and by assigning
+ * a live range only consisting of the one group. With that we might not
+ * need to completely sacrifice this register.
+ */
+#define R600_DUMMY_GPR 123
 
 static inline bool alu_writes(struct r600_bytecode_alu *alu)
 {
@@ -295,7 +284,7 @@ r600_bytecode_write_export_ack_type(struct r600_bytecode *bc, bool indirect)
 	}
 }
 
-/* alu instructions that can ony exits once per group */
+/* alu instructions that can only exits once per group */
 static int is_alu_once_inst(struct r600_bytecode_alu *alu)
 {
 	return r600_isa_alu(alu->op)->flags & (AF_KILL | AF_PRED) || alu->is_lds_idx_op || alu->op == ALU_OP0_GROUP_BARRIER;
@@ -591,7 +580,7 @@ static int check_and_set_bank_swizzle(const struct r600_bytecode *bc,
 	struct alu_bank_swizzle bs;
 	int bank_swizzle[5];
 	int i, r = 0, forced = 1;
-	boolean scalar_only = bc->gfx_level == CAYMAN ? false : true;
+	bool scalar_only = bc->gfx_level == CAYMAN ? false : true;
 	int max_slots = bc->gfx_level == CAYMAN ? 4 : 5;
 	int max_checks = max_slots * 1000;
 
@@ -611,7 +600,7 @@ static int check_and_set_bank_swizzle(const struct r600_bytecode *bc,
 		return 0;
 
 	/* Just check every possible combination of bank swizzle.
-	 * Not very efficent, but works on the first try in most of the cases. */
+	 * Not very efficient, but works on the first try in most of the cases. */
 	for (i = 0; i < 4; i++)
 		if (!slots[i] || !slots[i]->bank_swizzle_force || slots[i]->is_lds_idx_op)
 			bank_swizzle[i] = SQ_ALU_VEC_012;
@@ -962,7 +951,7 @@ static int merge_inst_groups(struct r600_bytecode *bc, struct r600_bytecode_alu 
 				if (!prev[j] || !alu_writes(prev[j]))
 					continue;
 
-				/* If it's relative then we can't determin which gpr is really used. */
+				/* If it's relative then we can't determine which gpr is really used. */
 				if (prev[j]->dst.chan == alu->src[src].chan &&
 					(prev[j]->dst.sel == alu->src[src].sel ||
 					prev[j]->dst.rel || alu->src[src].rel))
@@ -982,7 +971,7 @@ static int merge_inst_groups(struct r600_bytecode *bc, struct r600_bytecode_alu 
 
 	/* looks like everything worked out right, apply the changes */
 
-	/* undo adding previus literals */
+	/* undo adding previous literals */
 	bc->cf_last->ndw -= align(prev_nliteral, 2);
 
 	/* sort instructions */
@@ -1088,9 +1077,9 @@ static int r600_bytecode_alloc_inst_kcache_lines(struct r600_bytecode *bc,
 			continue;
 
 		bank = alu->src[i].kc_bank;
-		assert(bank < R600_MAX_HW_CONST_BUFFERS);
+		assert(bank < R600_MAX_ALU_CONST_BUFFERS);
 		line = (sel-512)>>4;
-		index_mode = alu->src[i].kc_rel ? 1 : 0; // V_SQ_CF_INDEX_0 / V_SQ_CF_INDEX_NONE
+		index_mode = alu->src[i].kc_rel;
 
 		if ((r = r600_bytecode_alloc_kcache_line(bc, kcache, bank, line, index_mode)))
 			return r;
@@ -1119,7 +1108,7 @@ static int r600_bytecode_assign_kcache_banks(
 			switch (kcache[j].mode) {
 			case V_SQ_CF_KCACHE_NOP:
 			case V_SQ_CF_KCACHE_LOCK_LOOP_INDEX:
-				R600_ERR("unexpected kcache line mode\n");
+				R600_ASM_ERR("unexpected kcache line mode\n");
 				return -ENOMEM;
 			default:
 				if (kcache[j].bank == alu->src[i].kc_bank &&
@@ -1211,7 +1200,7 @@ static int load_ar_r6xx(struct r600_bytecode *bc, bool for_src)
 		return 0;
 
 	/* hack to avoid making MOVA the last instruction in the clause */
-	if ((bc->cf_last->ndw>>1) >= 110)
+	if (bc->cf_last == NULL || (bc->cf_last->ndw>>1) >= 110)
 		bc->force_add_cf = 1;
    else if (for_src) {
       insert_nop_r6xx(bc, 4);
@@ -1246,7 +1235,7 @@ int r600_load_ar(struct r600_bytecode *bc, bool for_src)
 		return 0;
 
 	/* hack to avoid making MOVA the last instruction in the clause */
-	if ((bc->cf_last->ndw>>1) >= 110)
+	if (bc->cf_last == NULL || (bc->cf_last->ndw>>1) >= 110)
 		bc->force_add_cf = 1;
 
 	memset(&alu, 0, sizeof(alu));
@@ -1267,7 +1256,6 @@ int r600_bytecode_add_alu_type(struct r600_bytecode *bc,
 		const struct r600_bytecode_alu *alu, unsigned type)
 {
 	struct r600_bytecode_alu *nalu = r600_bytecode_alu();
-	struct r600_bytecode_alu *lalu;
 	int i, r;
 
 	if (!nalu)
@@ -1279,19 +1267,12 @@ int r600_bytecode_add_alu_type(struct r600_bytecode *bc,
 		assert(!alu->src[0].abs && !alu->src[1].abs && !alu->src[2].abs);
 	}
 
-	if (bc->cf_last != NULL && bc->cf_last->op != type) {
+	if (bc->cf_last != NULL && bc->cf_last->op != type && !bc->force_add_cf) {
 		/* check if we could add it anyway */
-		if ((bc->cf_last->op == CF_OP_ALU && type == CF_OP_ALU_PUSH_BEFORE) ||
-		 	(bc->cf_last->op == CF_OP_ALU_PUSH_BEFORE && type == CF_OP_ALU)) {
-		 	LIST_FOR_EACH_ENTRY(lalu, &bc->cf_last->alu, list) {
-		 		if (lalu->execute_mask) {
-					bc->force_add_cf = 1;
-					break;
-				}
-		 		type = CF_OP_ALU_PUSH_BEFORE;
-			}
-		} else
-			bc->force_add_cf = 1;
+		if (bc->cf_last->op == CF_OP_ALU_PUSH_BEFORE && type == CF_OP_ALU)
+			type = CF_OP_ALU_PUSH_BEFORE;
+		else
+			assert(!"Try adding ALU with unsipported CF type to ALU_PUSH_BEFORE");
 	}
 
 	/* cf can contains only alu or only vtx or only tex */
@@ -1306,11 +1287,10 @@ int r600_bytecode_add_alu_type(struct r600_bytecode *bc,
 	}
 	bc->cf_last->op = type;
 
-	/* Load index register if required */
 	if (bc->gfx_level >= EVERGREEN) {
 		for (i = 0; i < 3; i++)
 			if (nalu->src[i].kc_bank &&  nalu->src[i].kc_rel)
-				egcm_load_index_reg(bc, 0, true);
+				assert(bc->index_loaded[nalu->src[i].kc_rel - 1]);
 	}
 
 	/* Check AR usage and load it if required */
@@ -1333,14 +1313,14 @@ int r600_bytecode_add_alu_type(struct r600_bytecode *bc,
 	}
 	/* number of gpr == the last gpr used in any alu */
 	for (i = 0; i < 3; i++) {
-		if (nalu->src[i].sel >= bc->ngpr && nalu->src[i].sel < 124) {
+		if (nalu->src[i].sel >= bc->ngpr && nalu->src[i].sel < R600_DUMMY_GPR) {
 			bc->ngpr = nalu->src[i].sel + 1;
 		}
 		if (nalu->src[i].sel == V_SQ_ALU_SRC_LITERAL)
 			r600_bytecode_special_constants(nalu->src[i].value,
 				&nalu->src[i].sel);
 	}
-	if (nalu->dst.write && nalu->dst.sel >= bc->ngpr && nalu->dst.sel < 124) {
+	if (nalu->dst.write && nalu->dst.sel >= bc->ngpr && nalu->dst.sel < R600_DUMMY_GPR) {
 		bc->ngpr = nalu->dst.sel + 1;
 	}
 	list_addtail(&nalu->list, &bc->cf_last->alu);
@@ -1385,12 +1365,6 @@ int r600_bytecode_add_alu_type(struct r600_bytecode *bc,
 			}
 		}
 		bc->cf_last->ndw += align(nliteral, 2);
-
-		/* at most 128 slots, one add alu can add 5 slots + 4 constants(2 slots)
-		 * worst case */
-		if ((bc->cf_last->ndw >> 1) >= 120) {
-			bc->force_add_cf = 1;
-		}
 
 		bc->cf_last->prev2_bs_head = bc->cf_last->prev_bs_head;
 		bc->cf_last->prev_bs_head = bc->cf_last->curr_bs_head;
@@ -1438,16 +1412,16 @@ static unsigned r600_bytecode_num_tex_and_vtx_instructions(const struct r600_byt
 		return 16;
 
 	default:
-		R600_ERR("Unknown gfx level %d.\n", bc->gfx_level);
+		R600_ASM_ERR("Unknown gfx level %d.\n", bc->gfx_level);
 		return 8;
 	}
 }
 
-static inline boolean last_inst_was_not_vtx_fetch(struct r600_bytecode *bc)
+static inline bool last_inst_was_not_vtx_fetch(struct r600_bytecode *bc, bool use_tc)
 {
 	return !((r600_isa_cf(bc->cf_last->op)->flags & CF_FETCH) &&
 		 bc->cf_last->op != CF_OP_GDS &&
-		 (bc->gfx_level == CAYMAN ||
+		 (bc->gfx_level == CAYMAN || use_tc ||
 		  bc->cf_last->op != CF_OP_TEX));
 }
 
@@ -1461,15 +1435,15 @@ static int r600_bytecode_add_vtx_internal(struct r600_bytecode *bc, const struct
 		return -ENOMEM;
 	memcpy(nvtx, vtx, sizeof(struct r600_bytecode_vtx));
 
-	/* Load index register if required */
 	if (bc->gfx_level >= EVERGREEN) {
-		if (vtx->buffer_index_mode)
-			egcm_load_index_reg(bc, vtx->buffer_index_mode - 1, false);
+		assert(!vtx->buffer_index_mode ||
+		       bc->index_loaded[vtx->buffer_index_mode - 1]);
 	}
+
 
 	/* cf can contains only alu or only vtx or only tex */
 	if (bc->cf_last == NULL ||
-	    last_inst_was_not_vtx_fetch(bc) ||
+	    last_inst_was_not_vtx_fetch(bc, use_tc) ||
 	    bc->force_add_cf) {
 		r = r600_bytecode_add_cf(bc);
 		if (r) {
@@ -1491,7 +1465,7 @@ static int r600_bytecode_add_vtx_internal(struct r600_bytecode *bc, const struct
 			bc->cf_last->op = CF_OP_TEX;
 			break;
 		default:
-			R600_ERR("Unknown gfx level %d.\n", bc->gfx_level);
+			R600_ASM_ERR("Unknown gfx level %d.\n", bc->gfx_level);
 			free(nvtx);
 			return -EINVAL;
 		}
@@ -1528,32 +1502,38 @@ int r600_bytecode_add_tex(struct r600_bytecode *bc, const struct r600_bytecode_t
 		return -ENOMEM;
 	memcpy(ntex, tex, sizeof(struct r600_bytecode_tex));
 
-	/* Load index register if required */
 	if (bc->gfx_level >= EVERGREEN) {
-		if (tex->sampler_index_mode || tex->resource_index_mode)
-			egcm_load_index_reg(bc, 1, false);
+		assert(!tex->sampler_index_mode ||
+		       bc->index_loaded[tex->sampler_index_mode - 1]);
+		assert(!tex->resource_index_mode ||
+                       bc->index_loaded[tex->resource_index_mode - 1]);
 	}
 
 	/* we can't fetch data und use it as texture lookup address in the same TEX clause */
 	if (bc->cf_last != NULL &&
 		bc->cf_last->op == CF_OP_TEX) {
 		struct r600_bytecode_tex *ttex;
+                uint8_t use_mask = ((1 << ntex->src_sel_x) |
+                                    (1 << ntex->src_sel_y) |
+                                    (1 << ntex->src_sel_z) |
+                                    (1 << ntex->src_sel_w)) & 0xf;
+
 		LIST_FOR_EACH_ENTRY(ttex, &bc->cf_last->tex, list) {
-			if (ttex->dst_gpr == ntex->src_gpr &&
-                            (ttex->dst_sel_x < 4 || ttex->dst_sel_y < 4 ||
-                             ttex->dst_sel_z < 4 || ttex->dst_sel_w < 4)) {
-				bc->force_add_cf = 1;
-				break;
+			if (ttex->dst_gpr == ntex->src_gpr) {
+                           uint8_t write_mask = (ttex->dst_sel_x < 6 ? 1 : 0) |
+                                                (ttex->dst_sel_y < 6 ? 2 : 0) |
+                                                (ttex->dst_sel_z < 6 ? 4 : 0) |
+                                                (ttex->dst_sel_w < 6 ? 8 : 0);
+                           if (use_mask & write_mask) {
+                              bc->force_add_cf = 1;
+                              break;
+                           }
 			}
 		}
 		/* vtx instrs get inserted after tex, so make sure we aren't moving the tex
 		 * before (say) the instr fetching the texcoord.
 		 */
 		if (!list_is_empty(&bc->cf_last->vtx))
-			bc->force_add_cf = 1;
-
-		/* slight hack to make gradients always go into same cf */
-		if (ntex->op == FETCH_OP_SET_GRADIENTS_H)
 			bc->force_add_cf = 1;
 	}
 
@@ -1593,8 +1573,15 @@ int r600_bytecode_add_gds(struct r600_bytecode *bc, const struct r600_bytecode_g
 	memcpy(ngds, gds, sizeof(struct r600_bytecode_gds));
 
 	if (bc->gfx_level >= EVERGREEN) {
-		if (gds->uav_index_mode)
-			egcm_load_index_reg(bc, gds->uav_index_mode - 1, false);
+		assert(!gds->uav_index_mode ||
+		       bc->index_loaded[gds->uav_index_mode - 1]);
+	}
+
+	if (gds->src_gpr >= bc->ngpr) {
+		bc->ngpr = gds->src_gpr + 1;
+	}
+	if (gds->dst_gpr >= bc->ngpr) {
+		bc->ngpr = gds->dst_gpr + 1;
 	}
 
 	if (bc->cf_last == NULL ||
@@ -1844,9 +1831,9 @@ int r600_bytecode_build(struct r600_bytecode *bc)
 	if (!bc->nstack) { // If not 0, Stack_size already provided by llvm
 		if (bc->stack.max_entries)
 			bc->nstack = bc->stack.max_entries;
-		else if (bc->type == PIPE_SHADER_VERTEX ||
-			 bc->type == PIPE_SHADER_TESS_EVAL ||
-			 bc->type == PIPE_SHADER_TESS_CTRL)
+		else if (bc->type == MESA_SHADER_VERTEX ||
+			 bc->type == MESA_SHADER_TESS_EVAL ||
+			 bc->type == MESA_SHADER_TESS_CTRL)
 			bc->nstack = 1;
 	}
 
@@ -1897,7 +1884,7 @@ int r600_bytecode_build(struct r600_bytecode *bc)
 					r = eg_bytecode_alu_build(bc, alu, addr);
 					break;
 				default:
-					R600_ERR("unknown gfx level %d.\n", bc->gfx_level);
+					R600_ASM_ERR("unknown gfx level %d.\n", bc->gfx_level);
 					return -EINVAL;
 				}
 				if (r)
@@ -2004,7 +1991,8 @@ static int print_sel(unsigned sel, unsigned rel, unsigned index_mode,
 	if (rel || need_brackets) {
 		o += fprintf(stderr, "[");
 	}
-	o += fprintf(stderr, "%d", sel);
+	if (sel != R600_DUMMY_GPR)
+		o += fprintf(stderr, "%d", sel);
 	if (rel) {
 		if (index_mode == 0 || index_mode == 6)
 			o += fprintf(stderr, "+AR");
@@ -2017,19 +2005,22 @@ static int print_sel(unsigned sel, unsigned rel, unsigned index_mode,
 	return o;
 }
 
-static int print_dst(struct r600_bytecode_alu *alu)
+static int print_dst(struct r600_bytecode_alu *alu, bool is_t)
 {
 	int o = 0;
 	unsigned sel = alu->dst.sel;
 	char reg_char = 'R';
-	if (sel > 128 - 4) { /* clause temporary gpr */
+	if (sel >= 128 - 4) { /* clause temporary gpr */
 		sel -= 128 - 4;
 		reg_char = 'T';
+	} else if (sel == R600_DUMMY_GPR) {
+		reg_char = 'P';
 	}
 
 	if (alu_writes(alu)) {
 		o += fprintf(stderr, "%c", reg_char);
-		o += print_sel(alu->dst.sel, alu->dst.rel, alu->index_mode, 0);
+		o += print_sel(sel, alu->dst.rel, alu->index_mode, 0);
+		if (sel == R600_DUMMY_GPR) o += fprintf(stderr, "%c", (is_t ? 'S' : 'V'));
 	} else {
 		o += fprintf(stderr, "__");
 	}
@@ -2127,7 +2118,12 @@ static int print_src(struct r600_bytecode_alu *alu, unsigned idx)
 			need_chan = 1;
 			break;
 		case V_SQ_ALU_SRC_LITERAL:
-			o += fprintf(stderr, "[0x%08X %f]", src->value, u_bitcast_u2f(src->value));
+			{
+				const uint32_t value_uint32 = src->value;
+				float value_float;
+				memcpy(&value_float, &value_uint32, sizeof(float));
+				o += fprintf(stderr, "[0x%08X %f]", value_uint32, value_float);
+			}
 			break;
 		case V_SQ_ALU_SRC_0_5:
 			o += fprintf(stderr, "0.5");
@@ -2423,7 +2419,7 @@ void r600_bytecode_disasm(struct r600_bytecode *bc)
 			const char *omod_str[] = {"","*2","*4","/2"};
 			const struct alu_op_info *aop = r600_isa_alu(alu->op);
 			int o = 0;
-
+			bool is_t = false;
 			r600_bytecode_alu_nliterals(alu, literal, &nliteral);
 			o += fprintf(stderr, " %04d %08X %08X  ", id, bc->bytecode[id], bc->bytecode[id+1]);
 			if (last)
@@ -2432,9 +2428,10 @@ void r600_bytecode_disasm(struct r600_bytecode *bc)
 				o += fprintf(stderr, "     ");
 
 			if ((chan_mask & (1 << alu->dst.chan)) ||
-				((aop->slots[bc->isa->hw_class] == AF_S) && !(bc->isa->hw_class == ISA_CC_CAYMAN)))
+				((aop->slots[bc->isa->hw_class] == AF_S) && !(bc->isa->hw_class == ISA_CC_CAYMAN))) {
 				o += fprintf(stderr, "t:");
-			else
+				is_t = true;
+			} else
 				o += fprintf(stderr, "%c:", chan[alu->dst.chan]);
 			chan_mask |= 1 << alu->dst.chan;
 
@@ -2453,7 +2450,7 @@ void r600_bytecode_disasm(struct r600_bytecode *bc)
 				case 3: fprintf(stderr, "CF_IDX1"); break;
 				}
 			} else {
-				o += print_dst(alu);
+				o += print_dst(alu, is_t);
 			}
 			for (int i = 0; i < aop->src_count; ++i) {
 				o += fprintf(stderr, i == 0 ? ",  ": ", ");
@@ -2503,11 +2500,16 @@ void r600_bytecode_disasm(struct r600_bytecode *bc)
 			o += print_swizzle(tex->src_sel_z);
 			o += print_swizzle(tex->src_sel_w);
 
-			o += fprintf(stderr, ",  RID:%d", tex->resource_id);
+			o += fprintf(stderr, ",  RID:%d ", tex->resource_id);
+                        if (tex->resource_index_mode)
+				fprintf(stderr, "RQ_%s", index_mode[tex->resource_index_mode]);
+
 			o += fprintf(stderr, ", SID:%d  ", tex->sampler_id);
 
 			if (tex->sampler_index_mode)
 				fprintf(stderr, "SQ_%s ", index_mode[tex->sampler_index_mode]);
+
+
 
 			if (tex->lod_bias)
 				fprintf(stderr, "LB:%d ", tex->lod_bias);
@@ -2794,167 +2796,7 @@ void r600_vertex_data_type(enum pipe_format pformat,
 	}
 	return;
 out_unknown:
-	R600_ERR("unsupported vertex format %s\n", util_format_name(pformat));
-}
-
-void *r600_create_vertex_fetch_shader(struct pipe_context *ctx,
-				      unsigned count,
-				      const struct pipe_vertex_element *elements)
-{
-	struct r600_context *rctx = (struct r600_context *)ctx;
-	struct r600_bytecode bc;
-	struct r600_bytecode_vtx vtx;
-	const struct util_format_description *desc;
-	unsigned fetch_resource_start = rctx->b.gfx_level >= EVERGREEN ? 0 : 160;
-	unsigned format, num_format, format_comp, endian;
-	uint32_t *bytecode;
-	int i, j, r, fs_size;
-	struct r600_fetch_shader *shader;
-	unsigned no_sb = rctx->screen->b.debug_flags & (DBG_NO_SB | DBG_NIR);
-	unsigned sb_disasm = !no_sb || (rctx->screen->b.debug_flags & DBG_SB_DISASM);
-
-	assert(count < 32);
-
-	memset(&bc, 0, sizeof(bc));
-	r600_bytecode_init(&bc, rctx->b.gfx_level, rctx->b.family,
-			   rctx->screen->has_compressed_msaa_texturing);
-
-	bc.isa = rctx->isa;
-
-	for (i = 0; i < count; i++) {
-		if (elements[i].instance_divisor > 1) {
-			if (rctx->b.gfx_level == CAYMAN) {
-				for (j = 0; j < 4; j++) {
-					struct r600_bytecode_alu alu;
-					memset(&alu, 0, sizeof(alu));
-					alu.op = ALU_OP2_MULHI_UINT;
-					alu.src[0].sel = 0;
-					alu.src[0].chan = 3;
-					alu.src[1].sel = V_SQ_ALU_SRC_LITERAL;
-					alu.src[1].value = (1ll << 32) / elements[i].instance_divisor + 1;
-					alu.dst.sel = i + 1;
-					alu.dst.chan = j;
-					alu.dst.write = j == 3;
-					alu.last = j == 3;
-					if ((r = r600_bytecode_add_alu(&bc, &alu))) {
-						r600_bytecode_clear(&bc);
-						return NULL;
-					}
-				}
-			} else {
-				struct r600_bytecode_alu alu;
-				memset(&alu, 0, sizeof(alu));
-				alu.op = ALU_OP2_MULHI_UINT;
-				alu.src[0].sel = 0;
-				alu.src[0].chan = 3;
-				alu.src[1].sel = V_SQ_ALU_SRC_LITERAL;
-				alu.src[1].value = (1ll << 32) / elements[i].instance_divisor + 1;
-				alu.dst.sel = i + 1;
-				alu.dst.chan = 3;
-				alu.dst.write = 1;
-				alu.last = 1;
-				if ((r = r600_bytecode_add_alu(&bc, &alu))) {
-					r600_bytecode_clear(&bc);
-					return NULL;
-				}
-			}
-		}
-	}
-
-	for (i = 0; i < count; i++) {
-		r600_vertex_data_type(elements[i].src_format,
-				      &format, &num_format, &format_comp, &endian);
-
-		desc = util_format_description(elements[i].src_format);
-
-		if (elements[i].src_offset > 65535) {
-			r600_bytecode_clear(&bc);
-			R600_ERR("too big src_offset: %u\n", elements[i].src_offset);
-			return NULL;
-		}
-
-		memset(&vtx, 0, sizeof(vtx));
-		vtx.buffer_id = elements[i].vertex_buffer_index + fetch_resource_start;
-		vtx.fetch_type = elements[i].instance_divisor ? SQ_VTX_FETCH_INSTANCE_DATA : SQ_VTX_FETCH_VERTEX_DATA;
-		vtx.src_gpr = elements[i].instance_divisor > 1 ? i + 1 : 0;
-		vtx.src_sel_x = elements[i].instance_divisor ? 3 : 0;
-		vtx.mega_fetch_count = 0x1F;
-		vtx.dst_gpr = i + 1;
-		vtx.dst_sel_x = desc->swizzle[0];
-		vtx.dst_sel_y = desc->swizzle[1];
-		vtx.dst_sel_z = desc->swizzle[2];
-		vtx.dst_sel_w = desc->swizzle[3];
-		vtx.data_format = format;
-		vtx.num_format_all = num_format;
-		vtx.format_comp_all = format_comp;
-		vtx.offset = elements[i].src_offset;
-		vtx.endian = endian;
-
-		if ((r = r600_bytecode_add_vtx(&bc, &vtx))) {
-			r600_bytecode_clear(&bc);
-			return NULL;
-		}
-	}
-
-	r600_bytecode_add_cfinst(&bc, CF_OP_RET);
-
-	if ((r = r600_bytecode_build(&bc))) {
-		r600_bytecode_clear(&bc);
-		return NULL;
-	}
-
-	if (rctx->screen->b.debug_flags & DBG_FS) {
-		fprintf(stderr, "--------------------------------------------------------------\n");
-		fprintf(stderr, "Vertex elements state:\n");
-		for (i = 0; i < count; i++) {
-			fprintf(stderr, "   ");
-			util_dump_vertex_element(stderr, elements+i);
-			fprintf(stderr, "\n");
-		}
-
-		if (!sb_disasm) {
-			r600_bytecode_disasm(&bc);
-
-			fprintf(stderr, "______________________________________________________________\n");
-		} else {
-			r600_sb_bytecode_process(rctx, &bc, NULL, 1 /*dump*/, 0 /*optimize*/);
-		}
-	}
-
-	fs_size = bc.ndw*4;
-
-	/* Allocate the CSO. */
-	shader = CALLOC_STRUCT(r600_fetch_shader);
-	if (!shader) {
-		r600_bytecode_clear(&bc);
-		return NULL;
-	}
-
-	u_suballocator_alloc(&rctx->allocator_fetch_shader, fs_size, 256,
-			     &shader->offset,
-			     (struct pipe_resource**)&shader->buffer);
-	if (!shader->buffer) {
-		r600_bytecode_clear(&bc);
-		FREE(shader);
-		return NULL;
-	}
-
-	bytecode = r600_buffer_map_sync_with_rings
-		(&rctx->b, shader->buffer,
-		PIPE_MAP_WRITE | PIPE_MAP_UNSYNCHRONIZED | RADEON_MAP_TEMPORARY);
-	bytecode += shader->offset / 4;
-
-	if (R600_BIG_ENDIAN) {
-		for (i = 0; i < fs_size / 4; ++i) {
-			bytecode[i] = util_cpu_to_le32(bc.bytecode[i]);
-		}
-	} else {
-		memcpy(bytecode, bc.bytecode, fs_size);
-	}
-	rctx->b.ws->buffer_unmap(rctx->b.ws, shader->buffer->buf);
-
-	r600_bytecode_clear(&bc);
-	return shader;
+	R600_ASM_ERR("unsupported vertex format %s\n", util_format_name(pformat));
 }
 
 void r600_bytecode_alu_read(struct r600_bytecode *bc,

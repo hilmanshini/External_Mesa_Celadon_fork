@@ -42,12 +42,15 @@ u_driconf_fill_st_options(struct st_config_options *options,
    query_bool_option(disable_arb_gpu_shader5);
    query_bool_option(disable_glsl_line_continuations);
    query_bool_option(disable_uniform_array_resize);
+   query_string_option(alias_shader_extension);
+   query_bool_option(allow_vertex_texture_bias);
    query_bool_option(force_compat_shaders);
    query_bool_option(force_glsl_extensions_warn);
    query_int_option(force_glsl_version);
    query_bool_option(allow_extra_pp_tokens);
    query_bool_option(allow_glsl_extension_directive_midshader);
    query_bool_option(allow_glsl_120_subset_in_110);
+   query_bool_option(allow_glsl_embedded_structure_declarations);
    query_bool_option(allow_glsl_builtin_const_expression);
    query_bool_option(allow_glsl_relaxed_es);
    query_bool_option(allow_glsl_builtin_variable_redeclaration);
@@ -64,13 +67,19 @@ u_driconf_fill_st_options(struct st_config_options *options,
    query_bool_option(allow_draw_out_of_order);
    query_bool_option(glthread_nop_check_framebuffer_status);
    query_bool_option(ignore_map_unsynchronized);
-   query_bool_option(force_gl_names_reuse);
+   query_bool_option(zero_invalidated_buffers);
+   query_bool_option(ignore_discard_framebuffer);
    query_bool_option(force_gl_map_buffer_synchronized);
+   query_bool_option(force_gl_depth_component_type_int);
    query_bool_option(transcode_etc);
    query_bool_option(transcode_astc);
+   query_bool_option(allow_compressed_fallback);
+   query_string_option(force_explicit_uniform_loc_zero);
    query_string_option(force_gl_vendor);
    query_string_option(force_gl_renderer);
    query_string_option(mesa_extension_override);
+   query_bool_option(allow_multisampled_copyteximage);
+   query_bool_option(vertex_program_default_out);
 
-   driComputeOptionsSha1(optionCache, options->config_options_sha1);
+   driComputeOptionsBlake3(optionCache, options->config_options_blake3);
 }

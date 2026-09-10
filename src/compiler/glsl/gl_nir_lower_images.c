@@ -26,7 +26,7 @@
  *
  * Lower image operations by turning the image_deref_* into a image_* on an
  * index number or bindless_image_* intrinsic on a load_deref of the previous
- * deref source. All applicable indicies are also set so that fetching the
+ * deref source. All applicable indices are also set so that fetching the
  * variable in the backend wouldn't be needed anymore.
  */
 
@@ -35,6 +35,12 @@
 #include "compiler/nir/nir_deref.h"
 
 #include "compiler/glsl/gl_nir.h"
+#include "pipe/p_defines.h"
+
+typedef struct {
+   const struct pipe_caps *caps;
+   bool bindless_only;
+} lower_images_options;
 
 static void
 type_size_align_1(const struct glsl_type *type, unsigned *size, unsigned *align)
@@ -56,27 +62,15 @@ lower_instr(nir_builder *b, nir_instr *instr, void *cb_data)
    if (instr->type != nir_instr_type_intrinsic)
       return false;
 
-   bool bindless_only = *(bool *)cb_data;
-
+   const lower_images_options *options = (const lower_images_options *)cb_data;
    nir_intrinsic_instr *intrinsic = nir_instr_as_intrinsic(instr);
 
    nir_deref_instr *deref;
    nir_variable *var;
 
    switch (intrinsic->intrinsic) {
-   case nir_intrinsic_image_deref_atomic_add:
-   case nir_intrinsic_image_deref_atomic_imin:
-   case nir_intrinsic_image_deref_atomic_umin:
-   case nir_intrinsic_image_deref_atomic_imax:
-   case nir_intrinsic_image_deref_atomic_umax:
-   case nir_intrinsic_image_deref_atomic_and:
-   case nir_intrinsic_image_deref_atomic_or:
-   case nir_intrinsic_image_deref_atomic_xor:
-   case nir_intrinsic_image_deref_atomic_exchange:
-   case nir_intrinsic_image_deref_atomic_comp_swap:
-   case nir_intrinsic_image_deref_atomic_fadd:
-   case nir_intrinsic_image_deref_atomic_inc_wrap:
-   case nir_intrinsic_image_deref_atomic_dec_wrap:
+   case nir_intrinsic_image_deref_atomic:
+   case nir_intrinsic_image_deref_atomic_swap:
    case nir_intrinsic_image_deref_load:
    case nir_intrinsic_image_deref_samples:
    case nir_intrinsic_image_deref_size:
@@ -92,29 +86,45 @@ lower_instr(nir_builder *b, nir_instr *instr, void *cb_data)
    }
 
    bool bindless = var->data.mode != nir_var_image || var->data.bindless;
-   if (bindless_only && !bindless)
+   if (options->bindless_only && !bindless)
       return false;
 
    b->cursor = nir_before_instr(instr);
 
-   nir_ssa_def *src;
+   nir_def *src;
+   int range_base = 0;
    if (bindless) {
       src = nir_load_deref(b, deref);
+   } else if (b->shader->options->lower_image_offset_to_range_base) {
+      src = nir_build_deref_offset(b, deref, type_size_align_1);
+      range_base = var->data.driver_location;
    } else {
       src = nir_iadd_imm(b,
                          nir_build_deref_offset(b, deref, type_size_align_1),
                          var->data.driver_location);
    }
-   nir_rewrite_image_intrinsic(intrinsic, src, bindless);
+
+   if (bindless && options->caps->glsl_bindless_handles_are_32bit)
+      src = nir_u2u32(b, src);
+
+   nir_rewrite_image_intrinsic(intrinsic, src,
+      bindless ? nir_image_intrinsic_type_bindless : nir_image_intrinsic_type_default);
+   if (!bindless)
+      nir_intrinsic_set_range_base(intrinsic, range_base);
 
    return true;
 }
 
 bool
-gl_nir_lower_images(nir_shader *shader, bool bindless_only)
+gl_nir_lower_images(nir_shader *shader, const struct pipe_caps *caps,
+                    bool bindless_only)
 {
+   lower_images_options options = {
+      .caps = caps,
+      .bindless_only = bindless_only,
+   };
+
    return nir_shader_instructions_pass(shader, lower_instr,
-                                       nir_metadata_block_index |
-                                       nir_metadata_dominance,
-                                       &bindless_only);
+                                       nir_metadata_control_flow,
+                                       &options);
 }

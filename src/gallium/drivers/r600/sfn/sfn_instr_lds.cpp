@@ -1,27 +1,7 @@
 /* -*- mesa-c++  -*-
- *
- * Copyright (c) 2022 Collabora LTD
- *
+ * Copyright 2022 Collabora LTD
  * Author: Gert Wollny <gert.wollny@collabora.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include "sfn_instr_lds.h"
@@ -139,9 +119,10 @@ LDSReadInstr::split(std::vector<AluInstr *>& out_block, AluInstr *last_lds_instr
       auto instr = new AluInstr(op1_mov,
                                 dest,
                                 new InlineConstant(ALU_SRC_LDS_OQ_A_POP),
-                                AluInstr::last_write);
+                                AluInstr::write);
       instr->add_required_instr(last_lds_instr);
       instr->set_blockid(block_id(), index());
+      instr->set_always_keep();
       out_block.push_back(instr);
       last_lds_instr = instr;
    }
@@ -154,7 +135,7 @@ LDSReadInstr::split(std::vector<AluInstr *>& out_block, AluInstr *last_lds_instr
 bool
 LDSReadInstr::do_ready() const
 {
-   unreachable("This instruction is not handled by the schduler");
+   UNREACHABLE("This instruction is not handled by the scheduler");
    return false;
 }
 
@@ -204,7 +185,7 @@ LDSReadInstr::from_string(istream& is, ValueFactory& value_factory) -> Pointer
 
    is >> temp_str;
    while (temp_str != "]") {
-      auto dst = value_factory.dest_from_string(temp_str);
+      auto dst = value_factory.dest_from_string(temp_str, nullptr);
       assert(dst);
       dests.push_back(dst);
       is >> temp_str;
@@ -326,7 +307,7 @@ LDSAtomicInstr::split(std::vector<AluInstr *>& out_block, AluInstr *last_lds_ins
       }
    }
 
-   auto op_instr = new AluInstr(m_opcode, srcs, {});
+   auto op_instr = new AluInstr(m_opcode, srcs, AluInstr::empty);
    op_instr->set_blockid(block_id(), index());
 
    if (last_lds_instr) {
@@ -341,7 +322,7 @@ LDSAtomicInstr::split(std::vector<AluInstr *>& out_block, AluInstr *last_lds_ins
       auto read_instr = new AluInstr(op1_mov,
                                      m_dest,
                                      new InlineConstant(ALU_SRC_LDS_OQ_A_POP),
-                                     AluInstr::last_write);
+                                     AluInstr::write);
       read_instr->add_required_instr(op_instr);
       read_instr->set_blockid(block_id(), index());
       read_instr->set_alu_flag(alu_lds_group_end);
@@ -356,33 +337,32 @@ LDSAtomicInstr::replace_source(PRegister old_src, PVirtualValue new_src)
 {
    bool process = false;
 
-   if (new_src->as_uniform() && m_srcs.size() > 2) {
-      int nconst = 0;
-      for (auto& s : m_srcs) {
-         if (s->as_uniform() && !s->equal_to(*old_src))
-            ++nconst;
+   if (new_src->as_uniform()) {
+      if (m_srcs.size() > 2) {
+         int nconst = 0;
+         for (auto& s : m_srcs) {
+            if (s->as_uniform() && !s->equal_to(*old_src))
+               ++nconst;
+         }
+         /* Conservative check: with two kcache values can always live,
+          * tree might be a problem, don't care for now, just reject
+          */
+         if (nconst > 2)
+            return false;
       }
-      /* Conservative check: with two kcache values can always live,
-       * tree might be a problem, don't care for now, just reject
-       */
-      if (nconst > 2)
+
+      /* indirect constant buffer access means new CF, and this is something
+       * we can't do in the middle of an LDS read group */
+      auto u = new_src->as_uniform();
+      if (u->buf_addr())
          return false;
    }
 
-   /* If the old source is an array element, we assume that there
+   /* If the source is an array element, we assume that there
     * might have been an (untracked) indirect access, so don't replace
     * this source */
-   if (old_src->pin() == pin_array)
+   if (old_src->pin() == pin_array || new_src->pin() == pin_array)
       return false;
-
-   if (new_src->get_addr()) {
-      for (auto& s : m_srcs) {
-         auto addr = s->get_addr();
-         /* can't have two differen't indirect addresses in the same instr */
-         if (addr && !addr->equal_to(*new_src->get_addr()))
-            return false;
-      }
-   }
 
    for (unsigned i = 0; i < m_srcs.size(); ++i) {
       if (old_src->equal_to(*m_srcs[i])) {
@@ -403,7 +383,7 @@ LDSAtomicInstr::replace_source(PRegister old_src, PVirtualValue new_src)
 bool
 LDSAtomicInstr::do_ready() const
 {
-   unreachable("This instruction is not handled by the schduler");
+   UNREACHABLE("This instruction is not handled by the scheduler");
    return false;
 }
 
@@ -467,7 +447,7 @@ LDSAtomicInstr::from_string(istream& is, ValueFactory& value_factory) -> Pointer
 
    PRegister dest = nullptr;
    if (temp_str[0] != '_')
-      dest = value_factory.dest_from_string(temp_str);
+      dest = value_factory.dest_from_string(temp_str, nullptr);
 
    is >> temp_str;
    assert(temp_str == "[");

@@ -9,6 +9,11 @@ of a new kernel during development), and our workloads can easily
 take down boards when mistakes are made (kernel oopses, OOMs that
 take out critical system services).
 
+Available LAVA labs
+-------------------
+- Collabora `[dashboard] <https://lava.collabora.dev/scheduler/device_types>`__ (without authentication only health check jobs are displayed)
+- Lima [dashboard not available]
+
 Mesa-LAVA software architecture
 -------------------------------
 
@@ -61,16 +66,16 @@ the web interface, and create an API token.  Copy that into a
 
 .. code-block:: yaml
 
-  default:
-    token: <token contents>
-    uri: <URL to the instance>
-    username: gitlab-runner
+   default:
+      token: <token contents>
+      uri: <URL to the instance>
+      username: gitlab-runner
 
 Add a volume mount of that ``lavacli.yaml`` to
 ``/etc/gitlab-runner/config.toml`` so that the Docker container can
 access it.  You probably have a ``volumes = ["/cache"]`` already, so now it would be::
 
-    volumes = ["/home/anholt/lava-config/lavacli.yaml:/root/.config/lavacli.yaml", "/cache"]
+   volumes = ["/home/anholt/lava-config/lavacli.yaml:/root/.config/lavacli.yaml", "/cache"]
 
 Note that this token is visible to anybody that can submit MRs to
 Mesa!  It is not an actual secret.  We could just bake it into the
@@ -80,3 +85,45 @@ relevant as we have many stable branches all using CI).
 
 Now it's time to define your test jobs in the driver-specific
 gitlab-ci.yml file, using the device-specific tags.
+
+Caching downloads
+-----------------
+
+To improve the runtime for downloading traces during traces job runs, you will
+want a pass-through HTTP cache.  On your runner box, install nginx:
+
+.. code-block:: sh
+
+   sudo apt install nginx libnginx-mod-http-lua
+
+Add the server setup files:
+
+.. literalinclude:: fdo-cache
+   :name: /etc/nginx/sites-available/fdo-cache
+   :caption: /etc/nginx/sites-available/fdo-cache
+
+.. literalinclude:: uri-caching.conf
+   :name: /etc/nginx/snippets/uri-caching.conf
+   :caption: /etc/nginx/snippets/uri-caching.conf
+
+Edit the listener addresses in fdo-cache to suit the ethernet interface that
+your devices are on.
+
+Enable the site and restart nginx:
+
+.. code-block:: sh
+
+   sudo rm /etc/nginx/sites-enabled/default
+   sudo ln -s /etc/nginx/sites-available/fdo-cache /etc/nginx/sites-enabled/fdo-cache
+   sudo systemctl restart nginx
+
+   # First download will hit the internet
+   wget http://localhost/cache/?uri=https://s3.freedesktop.org/mesa-tracie-public/itoral-gl-terrain-demo/demo-v2.trace
+   # Second download should be cached.
+   wget http://localhost/cache/?uri=https://s3.freedesktop.org/mesa-tracie-public/itoral-gl-terrain-demo/demo-v2.trace
+
+The trace runner script automatically sets the caching proxy, so there's no
+need to modify anything in the Mesa CI YAML files.
+Add ``LAVA_HTTP_CACHE_URI=http://localhost/cache/?uri=`` to your ``config.toml``
+runner environment lines and you can use it for cached artifact downloads
+instead of going all the way to freedesktop.org on each job.

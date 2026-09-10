@@ -25,7 +25,9 @@
 #include "pipe/p_defines.h"
 #include "util/u_memory.h"
 #include "util/format/u_format.h"
+#include "util/perf/cpu_trace.h"
 #include "util/u_inlines.h"
+#include "util/u_resource.h"
 #include "util/u_surface.h"
 #include "util/u_transfer_helper.h"
 #include "util/u_upload_mgr.h"
@@ -36,7 +38,8 @@
 #include "v3d_screen.h"
 #include "v3d_context.h"
 #include "v3d_resource.h"
-#include "broadcom/cle/v3d_packet_v33_pack.h"
+/* The packets used here the same across V3D versions. */
+#include "broadcom/cle/v3d_packet_v42_pack.h"
 
 static void
 v3d_debug_resource_layout(struct v3d_resource *rsc, const char *caller)
@@ -47,13 +50,12 @@ v3d_debug_resource_layout(struct v3d_resource *rsc, const char *caller)
         struct pipe_resource *prsc = &rsc->base;
 
         if (prsc->target == PIPE_BUFFER) {
-                fprintf(stderr,
-                        "rsc %s %p (format %s), %dx%d buffer @0x%08x-0x%08x\n",
-                        caller, rsc,
-                        util_format_short_name(prsc->format),
-                        prsc->width0, prsc->height0,
-                        rsc->bo->offset,
-                        rsc->bo->offset + rsc->bo->size - 1);
+                mesa_logd("rsc %s %p (format %s), %dx%d buffer @0x%08x-0x%08x",
+                          caller, rsc,
+                          util_format_short_name(prsc->format),
+                          prsc->width0, prsc->height0,
+                          rsc->bo->offset,
+                          rsc->bo->offset + rsc->bo->size - 1);
                 return;
         }
 
@@ -74,21 +76,20 @@ v3d_debug_resource_layout(struct v3d_resource *rsc, const char *caller)
                 int level_depth =
                         u_minify(util_next_power_of_two(prsc->depth0), i);
 
-                fprintf(stderr,
-                        "rsc %s %p (format %s), %dx%d: "
-                        "level %d (%s) %dx%dx%d -> %dx%dx%d, stride %d@0x%08x\n",
-                        caller, rsc,
-                        util_format_short_name(prsc->format),
-                        prsc->width0, prsc->height0,
-                        i, tiling_descriptions[slice->tiling],
-                        u_minify(prsc->width0, i),
-                        u_minify(prsc->height0, i),
-                        u_minify(prsc->depth0, i),
-                        level_width,
-                        level_height,
-                        level_depth,
-                        slice->stride,
-                        rsc->bo->offset + slice->offset);
+                mesa_logd("rsc %s %p (format %s), %dx%d: "
+                          "level %d (%s) %dx%dx%d -> %dx%dx%d, stride %d@0x%08x",
+                          caller, rsc,
+                          util_format_short_name(prsc->format),
+                          prsc->width0, prsc->height0,
+                          i, tiling_descriptions[slice->tiling],
+                          u_minify(prsc->width0, i),
+                          u_minify(prsc->height0, i),
+                          u_minify(prsc->depth0, i),
+                          level_width,
+                          level_height,
+                          level_depth,
+                          slice->stride,
+                          rsc->bo->offset + slice->offset);
         }
 }
 
@@ -99,7 +100,22 @@ v3d_resource_bo_alloc(struct v3d_resource *rsc)
         struct pipe_screen *pscreen = prsc->screen;
         struct v3d_bo *bo;
 
-        bo = v3d_bo_alloc(v3d_screen(pscreen), rsc->size, "resource");
+        /* UBO and SSBO may be read using ldunifa, which prefetches the next 4
+         * bytes after a read. If the buffer's size is exactly a multiple of a
+         * page size and the shader reads the last 4 bytes with ldunifa the
+         * prefetching would read out of bounds and cause an MMU error, so we
+         * need to allocate extra space to avoid kernel error spamming.
+         *
+         * On the other side, the TFU unit has also a 64-bytes readahead so we
+         * need to add a V3D_TFU_READAHEAD padding to avoid invalid reads done
+         * by the TFU after the end of the last allocated memory page.
+         *
+         * As the buffers can be exported and be used in a different way than
+         * created, the most conservative approach is to always add the
+         * V3D_TFU_READAHEAD padding.
+         */
+        bo = v3d_bo_alloc(v3d_screen(pscreen), rsc->size + V3D_TFU_READAHEAD_SIZE,
+                          "resource");
         if (bo) {
                 v3d_bo_unreference(&rsc->bo);
                 rsc->bo = bo;
@@ -150,7 +166,7 @@ static void
 rebind_sampler_views(struct v3d_context *v3d,
                      struct v3d_resource *rsc)
 {
-        for (int st = 0; st < PIPE_SHADER_TYPES; st++) {
+        for (int st = 0; st < MESA_SHADER_STAGES; st++) {
                 struct v3d_texture_stateobj *tex = v3d->tex + st;
 
                 for (unsigned i = 0; i < tex->num_textures; i++) {
@@ -162,7 +178,13 @@ rebind_sampler_views(struct v3d_context *v3d,
                         struct v3d_sampler_view *sview =
                                 v3d_sampler_view(psview);
 
-                        v3d_create_texture_shader_state_bo(v3d, sview);
+                        if (sview->serial_id == rsc->serial_id)
+                                continue;
+
+                        struct v3d_device_info *devinfo =
+                                &v3d->screen->devinfo;
+
+                        v3d_X(devinfo, create_texture_shader_state_bo)(v3d, sview);
 
                         v3d_flag_dirty_sampler_state(v3d, st);
                 }
@@ -177,7 +199,18 @@ v3d_map_usage_prep(struct pipe_context *pctx,
         struct v3d_context *v3d = v3d_context(pctx);
         struct v3d_resource *rsc = v3d_resource(prsc);
 
+        MESA_TRACE_FUNC();
+
         if (usage & PIPE_MAP_DISCARD_WHOLE_RESOURCE) {
+                /* Flush any pending write jobs before replacing the BO.
+                 * The RCL reads rsc->bo at job submit time, so if we
+                 * replace the BO first, a later flush of the pending
+                 * job would resolve the new BO instead of the old one,
+                 * corrupting the new data with a stale store.
+                 */
+                v3d_flush_jobs_writing_resource(v3d, prsc,
+                                                V3D_FLUSH_ALWAYS,
+                                                false);
                 if (v3d_resource_bo_alloc(rsc)) {
                         /* If it might be bound as one of our vertex buffers
                          * or UBOs, make sure we re-emit vertex buffer state
@@ -222,6 +255,7 @@ v3d_map_usage_prep(struct pipe_context *pctx,
 
         if (usage & PIPE_MAP_WRITE) {
                 rsc->writes++;
+                rsc->graphics_written = true;
                 rsc->initialized_buffers = ~0;
         }
 }
@@ -282,7 +316,7 @@ v3d_resource_transfer_map(struct pipe_context *pctx,
         else
                 buf = v3d_bo_map(rsc->bo);
         if (!buf) {
-                fprintf(stderr, "Failed to map bo\n");
+                mesa_loge("Failed to map bo");
                 goto fail;
         }
 
@@ -346,7 +380,7 @@ v3d_texture_subdata(struct pipe_context *pctx,
                     const struct pipe_box *box,
                     const void *data,
                     unsigned stride,
-                    unsigned layer_stride)
+                    uintptr_t layer_stride)
 {
         struct v3d_resource *rsc = v3d_resource(prsc);
         struct v3d_resource_slice *slice = &rsc->slices[level];
@@ -461,17 +495,21 @@ v3d_resource_get_param(struct pipe_screen *pscreen,
                        enum pipe_resource_param param,
                        unsigned usage, uint64_t *value)
 {
-        struct v3d_resource *rsc = v3d_resource(prsc);
+        struct v3d_resource *rsc =
+                (struct v3d_resource *)util_resource_at_index(prsc, plane);
 
         switch (param) {
         case PIPE_RESOURCE_PARAM_STRIDE:
                 *value = rsc->slices[level].stride;
                 return true;
         case PIPE_RESOURCE_PARAM_OFFSET:
-                *value = 0;
+                *value = rsc->slices[level].offset;
                 return true;
         case PIPE_RESOURCE_PARAM_MODIFIER:
                 *value = v3d_resource_modifier(rsc);
+                return true;
+        case PIPE_RESOURCE_PARAM_NPLANES:
+                *value = util_resource_num(prsc);
                 return true;
         default:
                 return false;
@@ -524,22 +562,35 @@ v3d_get_ub_pad(struct v3d_resource *rsc, uint32_t height)
         return 0;
 }
 
+/**
+ * Computes the dimension with required padding for mip levels.
+ *
+ * This padding is required for width and height dimensions when the mip
+ * level is greater than 1, and for the depth dimension when the mip level
+ * is greater than 0. This function expects to be passed a mip level >= 1.
+ *
+ * Note: Hardware documentation seems to suggest that the third argument
+ * should be the utile dimensions, but through testing it was found that
+ * the block dimension should be used instead.
+ */
+static uint32_t
+v3d_get_dimension_mpad(uint32_t dimension, uint32_t level, uint32_t block_dimension)
+{
+        assert(level >= 1);
+        uint32_t pot_dim = u_minify(dimension, 1);
+        pot_dim = util_next_power_of_two(DIV_ROUND_UP(pot_dim, block_dimension));
+        uint32_t padded_dim = block_dimension * pot_dim;
+        return u_minify(padded_dim, level - 1);
+}
+
 static void
-v3d_setup_slices(struct v3d_resource *rsc, uint32_t winsys_stride,
-                 bool uif_top)
+v3d_setup_slices(struct v3d_screen *screen, struct v3d_resource *rsc,
+                 uint32_t winsys_stride, bool uif_top)
 {
         struct pipe_resource *prsc = &rsc->base;
         uint32_t width = prsc->width0;
         uint32_t height = prsc->height0;
         uint32_t depth = prsc->depth0;
-        /* Note that power-of-two padding is based on level 1.  These are not
-         * equivalent to just util_next_power_of_two(dimension), because at a
-         * level 0 dimension of 9, the level 1 power-of-two padded value is 4,
-         * not 8.
-         */
-        uint32_t pot_width = 2 * util_next_power_of_two(u_minify(width, 1));
-        uint32_t pot_height = 2 * util_next_power_of_two(u_minify(height, 1));
-        uint32_t pot_depth = 2 * util_next_power_of_two(u_minify(depth, 1));
         uint32_t offset = 0;
         uint32_t utile_w = v3d_utile_width(rsc->cpp);
         uint32_t utile_h = v3d_utile_height(rsc->cpp);
@@ -547,6 +598,21 @@ v3d_setup_slices(struct v3d_resource *rsc, uint32_t winsys_stride,
         uint32_t uif_block_h = utile_h * 2;
         uint32_t block_width = util_format_get_blockwidth(prsc->format);
         uint32_t block_height = util_format_get_blockheight(prsc->format);
+
+        /* Note that power-of-two padding is based on level 1.  These are not
+         * equivalent to just util_next_power_of_two(dimension), because at a
+         * level 0 dimension of 9, the level 1 power-of-two padded value is 4,
+         * not 8. Additionally the pot padding is based on the block size.
+         */
+        uint32_t pot_width = 2 * v3d_get_dimension_mpad(width,
+                                                        1,
+                                                        block_width);
+        uint32_t pot_height = 2 * v3d_get_dimension_mpad(height,
+                                                         1,
+                                                         block_height);
+        uint32_t pot_depth = 2 * v3d_get_dimension_mpad(depth,
+                                                        1,
+                                                        1);
         bool msaa = prsc->nr_samples > 1;
 
         /* MSAA textures/renderbuffers are always laid out as single-level
@@ -586,7 +652,8 @@ v3d_setup_slices(struct v3d_resource *rsc, uint32_t winsys_stride,
 
                 if (!rsc->tiled) {
                         slice->tiling = V3D_TILING_RASTER;
-                        if (prsc->target == PIPE_TEXTURE_1D)
+                        if (prsc->target == PIPE_TEXTURE_1D ||
+                            prsc->target == PIPE_TEXTURE_1D_ARRAY)
                                 level_width = align(level_width, 64 / rsc->cpp);
                 } else {
                         if ((i != 0 || !uif_top) &&
@@ -639,6 +706,20 @@ v3d_setup_slices(struct v3d_resource *rsc, uint32_t winsys_stride,
                         slice->stride = winsys_stride;
                 else
                         slice->stride = level_width * rsc->cpp;
+
+#if USE_V3D_SIMULATOR
+                /* Ensure stride alignment matches the one required by the GPU
+                 * that drives the display.
+                 */
+                if (slice->tiling == V3D_TILING_RASTER &&
+                    prsc->target == PIPE_TEXTURE_2D &&
+                    uif_top && !msaa) {
+                       slice->stride =
+                               align(slice->stride,
+                                     v3d_simulator_get_raster_stride_align(screen->fd));
+                }
+#endif
+
                 slice->padded_height = level_height;
                 slice->size = level_height * slice->stride;
 
@@ -706,8 +787,8 @@ static struct v3d_resource *
 v3d_resource_setup(struct pipe_screen *pscreen,
                    const struct pipe_resource *tmpl)
 {
-        struct v3d_screen *screen = v3d_screen(pscreen);
         struct v3d_resource *rsc = CALLOC_STRUCT(v3d_resource);
+
         if (!rsc)
                 return NULL;
         struct pipe_resource *prsc = &rsc->base;
@@ -717,35 +798,7 @@ v3d_resource_setup(struct pipe_screen *pscreen,
         pipe_reference_init(&prsc->reference, 1);
         prsc->screen = pscreen;
 
-        if (prsc->nr_samples <= 1 ||
-            screen->devinfo.ver >= 40 ||
-            util_format_is_depth_or_stencil(prsc->format)) {
-                rsc->cpp = util_format_get_blocksize(prsc->format);
-                if (screen->devinfo.ver < 40 && prsc->nr_samples > 1)
-                        rsc->cpp *= prsc->nr_samples;
-        } else {
-                assert(v3d_rt_format_supported(&screen->devinfo, prsc->format));
-                uint32_t output_image_format =
-                        v3d_get_rt_format(&screen->devinfo, prsc->format);
-                uint32_t internal_type;
-                uint32_t internal_bpp;
-                v3d_get_internal_type_bpp_for_output_format(&screen->devinfo,
-                                                            output_image_format,
-                                                            &internal_type,
-                                                            &internal_bpp);
-                switch (internal_bpp) {
-                case V3D_INTERNAL_BPP_32:
-                        rsc->cpp = 4;
-                        break;
-                case V3D_INTERNAL_BPP_64:
-                        rsc->cpp = 8;
-                        break;
-                case V3D_INTERNAL_BPP_128:
-                        rsc->cpp = 16;
-                        break;
-                }
-        }
-
+        rsc->cpp = util_format_get_blocksize(prsc->format);
         rsc->serial_id++;
 
         assert(rsc->cpp);
@@ -761,7 +814,6 @@ v3d_resource_create_with_modifiers(struct pipe_screen *pscreen,
 {
         struct v3d_screen *screen = v3d_screen(pscreen);
 
-        bool linear_ok = drm_find_modifier(DRM_FORMAT_MOD_LINEAR, modifiers, count);
         struct v3d_resource *rsc = v3d_resource_setup(pscreen, tmpl);
         struct pipe_resource *prsc = &rsc->base;
         /* Use a tiled layout if we can, for better 3D performance. */
@@ -788,9 +840,10 @@ v3d_resource_create_with_modifiers(struct pipe_screen *pscreen,
         /* Scanout BOs for simulator need to be linear for interaction with
          * i965.
          */
-        if (using_v3d_simulator &&
-            tmpl->bind & (PIPE_BIND_SHARED | PIPE_BIND_SCANOUT))
+#if USE_V3D_SIMULATOR
+        if (tmpl->bind & PIPE_BIND_SHARED)
                 should_tile = false;
+#endif
 
         /* If using the old-school SCANOUT flag, we don't know what the screen
          * might support other than linear. Just force linear.
@@ -800,30 +853,32 @@ v3d_resource_create_with_modifiers(struct pipe_screen *pscreen,
 
         /* No user-specified modifier; determine our own. */
         if (count == 1 && modifiers[0] == DRM_FORMAT_MOD_INVALID) {
-                linear_ok = true;
                 rsc->tiled = should_tile;
         } else if (should_tile &&
                    drm_find_modifier(DRM_FORMAT_MOD_BROADCOM_UIF,
                                  modifiers, count)) {
                 rsc->tiled = true;
-        } else if (linear_ok) {
+        } else if (drm_find_modifier(DRM_FORMAT_MOD_LINEAR, modifiers, count)) {
                 rsc->tiled = false;
         } else {
-                fprintf(stderr, "Unsupported modifier requested\n");
+                mesa_loge("Unsupported modifier requested");
                 goto fail;
         }
 
         rsc->internal_format = prsc->format;
 
-        v3d_setup_slices(rsc, 0, tmpl->bind & PIPE_BIND_SHARED);
+        v3d_setup_slices(screen, rsc, 0, tmpl->bind & PIPE_BIND_SHARED);
 
         if (screen->ro && (tmpl->bind & PIPE_BIND_SCANOUT)) {
+                assert(!rsc->tiled);
                 struct winsys_handle handle;
+                uint32_t scanout_height =
+                        align(rsc->size + V3D_TFU_READAHEAD_SIZE, 4096) / 4096;
                 struct pipe_resource scanout_tmpl = {
                         .target = prsc->target,
                         .format = PIPE_FORMAT_RGBA8888_UNORM,
                         .width0 = 1024, /* one page */
-                        .height0 = align(rsc->size, 4096) / 4096,
+                        .height0 = scanout_height,
                         .depth0 = 1,
                         .array_size = 1,
                 };
@@ -834,7 +889,7 @@ v3d_resource_create_with_modifiers(struct pipe_screen *pscreen,
                                                         &handle);
 
                 if (!rsc->scanout) {
-                        fprintf(stderr, "Failed to create scanout resource\n");
+                        mesa_loge("Failed to create scanout resource");
                         goto fail;
                 }
                 assert(handle.type == WINSYS_HANDLE_TYPE_FD);
@@ -888,7 +943,11 @@ v3d_resource_from_handle(struct pipe_screen *pscreen,
                 rsc->tiled = true;
                 break;
         case DRM_FORMAT_MOD_INVALID:
-                rsc->tiled = screen->ro == NULL;
+                rsc->tiled = false;
+                break;
+        case DRM_FORMAT_MOD_BROADCOM_SAND128:
+                rsc->tiled = false;
+                rsc->sand_col128_stride = whandle->stride;
                 break;
         default:
                 switch(fourcc_mod_broadcom_mod(whandle->modifier)) {
@@ -898,9 +957,8 @@ v3d_resource_from_handle(struct pipe_screen *pscreen,
                                 fourcc_mod_broadcom_param(whandle->modifier);
                         break;
                 default:
-                        fprintf(stderr,
-                                "Attempt to import unsupported modifier 0x%llx\n",
-                                (long long)whandle->modifier);
+                        mesa_loge("Attempt to import unsupported modifier 0x%llx",
+                                  (long long)whandle->modifier);
                         goto fail;
                 }
         }
@@ -913,9 +971,8 @@ v3d_resource_from_handle(struct pipe_screen *pscreen,
                 rsc->bo = v3d_bo_open_dmabuf(screen, whandle->handle);
                 break;
         default:
-                fprintf(stderr,
-                        "Attempt to import unsupported handle type %d\n",
-                        whandle->type);
+                mesa_loge("Attempt to import unsupported handle type %d",
+                          whandle->type);
                 goto fail;
         }
 
@@ -924,25 +981,24 @@ v3d_resource_from_handle(struct pipe_screen *pscreen,
 
         rsc->internal_format = prsc->format;
 
-        v3d_setup_slices(rsc, whandle->stride, true);
+        v3d_setup_slices(screen, rsc, whandle->stride, true);
         v3d_debug_resource_layout(rsc, "import");
 
         if (whandle->offset != 0) {
                 if (rsc->tiled) {
-                        fprintf(stderr,
-                                "Attempt to import unsupported winsys offset %u\n",
-                                whandle->offset);
+                        mesa_loge("Attempt to import unsupported winsys offset %u",
+                                  whandle->offset);
                         goto fail;
                 }
                 rsc->slices[0].offset += whandle->offset;
 
                 if (rsc->slices[0].offset + rsc->slices[0].size >
                     rsc->bo->size) {
-                        fprintf(stderr, "Attempt to import "
-                                "with overflowing offset (%d + %d > %d)\n",
-                                whandle->offset,
-                                rsc->slices[0].size,
-                                rsc->bo->size);
+                        mesa_loge("Attempt to import with overflowing offset "
+                                  "(%d + %d > %d)",
+                                  whandle->offset,
+                                  rsc->slices[0].size,
+                                  rsc->bo->size);
                          goto fail;
                  }
         }
@@ -962,18 +1018,20 @@ v3d_resource_from_handle(struct pipe_screen *pscreen,
                 static bool warned = false;
                 if (!warned) {
                         warned = true;
-                        fprintf(stderr,
-                                "Attempting to import %dx%d %s with "
-                                "unsupported stride %d instead of %d\n",
-                                prsc->width0, prsc->height0,
-                                util_format_short_name(prsc->format),
-                                whandle->stride,
-                                slice->stride);
+                        mesa_loge("Attempting to import %dx%d %s with "
+                                  "unsupported stride %d instead of %d",
+                                  prsc->width0, prsc->height0,
+                                  util_format_short_name(prsc->format),
+                                  whandle->stride,
+                                  slice->stride);
                 }
                 goto fail;
         } else if (!rsc->tiled) {
                 slice->stride = whandle->stride;
         }
+
+        /* Prevent implicit clearing of the imported buffer contents. */
+        rsc->writes = 1;
 
         return prsc;
 
@@ -1038,101 +1096,61 @@ v3d_update_shadow_texture(struct pipe_context *pctx,
         shadow->writes = orig->writes;
 }
 
-static struct pipe_surface *
-v3d_create_surface(struct pipe_context *pctx,
-                   struct pipe_resource *ptex,
-                   const struct pipe_surface *surf_tmpl)
-{
-        struct v3d_context *v3d = v3d_context(pctx);
-        struct v3d_screen *screen = v3d->screen;
-        struct v3d_surface *surface = CALLOC_STRUCT(v3d_surface);
-        struct v3d_resource *rsc = v3d_resource(ptex);
-
-        if (!surface)
-                return NULL;
-
-        struct pipe_surface *psurf = &surface->base;
-        unsigned level = surf_tmpl->u.tex.level;
-        struct v3d_resource_slice *slice = &rsc->slices[level];
-
-        pipe_reference_init(&psurf->reference, 1);
-        pipe_resource_reference(&psurf->texture, ptex);
-
-        psurf->context = pctx;
-        psurf->format = surf_tmpl->format;
-        psurf->width = u_minify(ptex->width0, level);
-        psurf->height = u_minify(ptex->height0, level);
-        psurf->u.tex.level = level;
-        psurf->u.tex.first_layer = surf_tmpl->u.tex.first_layer;
-        psurf->u.tex.last_layer = surf_tmpl->u.tex.last_layer;
-
-        surface->offset = v3d_layer_offset(ptex, level,
-                                           psurf->u.tex.first_layer);
-        surface->tiling = slice->tiling;
-
-        surface->format = v3d_get_rt_format(&screen->devinfo, psurf->format);
-
-        const struct util_format_description *desc =
-                util_format_description(psurf->format);
-
-        surface->swap_rb = (desc->swizzle[0] == PIPE_SWIZZLE_Z &&
-                            psurf->format != PIPE_FORMAT_B5G6R5_UNORM);
-
-        if (util_format_is_depth_or_stencil(psurf->format)) {
-                switch (psurf->format) {
-                case PIPE_FORMAT_Z16_UNORM:
-                        surface->internal_type = V3D_INTERNAL_TYPE_DEPTH_16;
-                        break;
-                case PIPE_FORMAT_Z32_FLOAT:
-                case PIPE_FORMAT_Z32_FLOAT_S8X24_UINT:
-                        surface->internal_type = V3D_INTERNAL_TYPE_DEPTH_32F;
-                        break;
-                default:
-                        surface->internal_type = V3D_INTERNAL_TYPE_DEPTH_24;
-                }
-        } else {
-                uint32_t bpp, type;
-                v3d_get_internal_type_bpp_for_output_format(&screen->devinfo,
-                                                            surface->format,
-                                                            &type, &bpp);
-                surface->internal_type = type;
-                surface->internal_bpp = bpp;
-        }
-
-        if (surface->tiling == V3D_TILING_UIF_NO_XOR ||
-            surface->tiling == V3D_TILING_UIF_XOR) {
-                surface->padded_height_of_output_image_in_uif_blocks =
-                        (slice->padded_height /
-                         (2 * v3d_utile_height(rsc->cpp)));
-        }
-
-        if (rsc->separate_stencil) {
-                surface->separate_stencil =
-                        v3d_create_surface(pctx, &rsc->separate_stencil->base,
-                                           surf_tmpl);
-        }
-
-        return &surface->base;
-}
-
 static void
-v3d_surface_destroy(struct pipe_context *pctx, struct pipe_surface *psurf)
-{
-        struct v3d_surface *surf = v3d_surface(psurf);
-
-        if (surf->separate_stencil)
-                pipe_surface_reference(&surf->separate_stencil, NULL);
-
-        pipe_resource_reference(&psurf->texture, NULL);
-        FREE(psurf);
-}
-
-static void
-v3d_flush_resource(struct pipe_context *pctx, struct pipe_resource *resource)
+v3d_flush_resource(struct pipe_context *pctx, struct pipe_resource *prsc)
 {
         /* All calls to flush_resource are followed by a flush of the context,
-         * so there's nothing to do.
+         * so there's nothing to do. Still, if the resource is going to be
+         * shared and it is tiled, only UIF format is valid, so we need to
+         * convert it.
          */
+        struct v3d_resource *rsc = v3d_resource(prsc);
+        if (rsc->tiled &&
+            rsc->slices[0].tiling != V3D_TILING_UIF_XOR &&
+            rsc->slices[0].tiling != V3D_TILING_UIF_NO_XOR) {
+                /* Shared resources must be not mipmapped */
+                assert(prsc->last_level == 0);
+                /* Shared resources must not be multisampled */
+                assert(prsc->nr_samples <= 1);
+
+                struct pipe_resource ptmpl = *prsc;
+                ptmpl.bind |= PIPE_BIND_SHARED;
+                struct v3d_resource *new_rsc =
+                        v3d_resource(pctx->screen->resource_create(pctx->screen, &ptmpl));
+                assert(new_rsc);
+
+                struct pipe_blit_info blit = { 0 };
+                u_box_3d(0, 0, 0,
+                         prsc->width0, prsc->height0, prsc->depth0,
+                         &blit.dst.box);
+                blit.src.box = blit.dst.box;
+                blit.dst.resource = &new_rsc->base;
+                blit.dst.format = new_rsc->base.format;
+                blit.dst.level = 0;
+                blit.src.resource = prsc;
+                blit.src.format = prsc->format;
+                blit.src.level = 0 ;
+                blit.mask = util_format_get_mask(blit.src.format);
+                blit.filter = PIPE_TEX_FILTER_NEAREST;
+
+                v3d_blit(pctx, &blit);
+
+                rsc->base.bind = new_rsc->base.bind;
+                /* Swap the BOs */
+                struct v3d_bo *old_bo = rsc->bo;
+                rsc->bo = new_rsc->bo;
+                rsc->serial_id++;
+                new_rsc->bo = old_bo;
+
+                /* Copy the affected fields */
+                rsc->slices[0] = new_rsc->slices[0];
+                rsc->cube_map_stride = new_rsc->cube_map_stride;
+                rsc->sand_col128_stride = new_rsc->sand_col128_stride;
+                rsc->size = new_rsc->size;
+                rsc->tiled = new_rsc->tiled;
+
+                pipe_resource_reference((struct pipe_resource **)&new_rsc, NULL);
+        }
 }
 
 static enum pipe_format
@@ -1153,7 +1171,7 @@ v3d_resource_get_stencil(struct pipe_resource *prsc)
 {
         struct v3d_resource *rsc = v3d_resource(prsc);
 
-        return &rsc->separate_stencil->base;
+        return rsc->separate_stencil ? &rsc->separate_stencil->base : NULL;
 }
 
 static const struct u_transfer_vtbl transfer_vtbl = {
@@ -1192,8 +1210,6 @@ v3d_resource_context_init(struct pipe_context *pctx)
         pctx->texture_unmap = u_transfer_helper_transfer_unmap;
         pctx->buffer_subdata = u_default_buffer_subdata;
         pctx->texture_subdata = v3d_texture_subdata;
-        pctx->create_surface = v3d_create_surface;
-        pctx->surface_destroy = v3d_surface_destroy;
         pctx->resource_copy_region = util_resource_copy_region;
         pctx->blit = v3d_blit;
         pctx->generate_mipmap = v3d_generate_mipmap;

@@ -5,25 +5,7 @@
  * Copyright (C) 2018 Alyssa Rosenzweig
  * Copyright (C) 2019 Collabora, Ltd.
  * Copyright (C) 2012 Rob Clark <robclark@freedesktop.org>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include "pan_fence.h"
@@ -42,7 +24,7 @@ panfrost_fence_reference(struct pipe_screen *pscreen,
    struct pipe_fence_handle *old = *ptr;
 
    if (pipe_reference(&old->reference, &fence->reference)) {
-      drmSyncobjDestroy(dev->fd, old->syncobj);
+      drmSyncobjDestroy(panfrost_device_fd(dev), old->syncobj);
       free(old);
    }
 
@@ -63,8 +45,8 @@ panfrost_fence_finish(struct pipe_screen *pscreen, struct pipe_context *ctx,
    if (abs_timeout == OS_TIMEOUT_INFINITE)
       abs_timeout = INT64_MAX;
 
-   ret = drmSyncobjWait(dev->fd, &fence->syncobj, 1, abs_timeout,
-                        DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL, NULL);
+   ret = drmSyncobjWait(panfrost_device_fd(dev), &fence->syncobj, 1,
+                        abs_timeout, DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL, NULL);
 
    fence->signaled = (ret >= 0);
    return fence->signaled;
@@ -76,7 +58,7 @@ panfrost_fence_get_fd(struct pipe_screen *screen, struct pipe_fence_handle *f)
    struct panfrost_device *dev = pan_device(screen);
    int fd = -1;
 
-   drmSyncobjExportSyncFile(dev->fd, f->syncobj, &fd);
+   drmSyncobjExportSyncFile(panfrost_device_fd(dev), f->syncobj, &fd);
    return fd;
 }
 
@@ -92,22 +74,22 @@ panfrost_fence_from_fd(struct panfrost_context *ctx, int fd,
       return NULL;
 
    if (type == PIPE_FD_TYPE_NATIVE_SYNC) {
-      ret = drmSyncobjCreate(dev->fd, 0, &f->syncobj);
+      ret = drmSyncobjCreate(panfrost_device_fd(dev), 0, &f->syncobj);
       if (ret) {
-         fprintf(stderr, "create syncobj failed\n");
+         mesa_loge("create syncobj failed\n");
          goto err_free_fence;
       }
 
-      ret = drmSyncobjImportSyncFile(dev->fd, f->syncobj, fd);
+      ret = drmSyncobjImportSyncFile(panfrost_device_fd(dev), f->syncobj, fd);
       if (ret) {
-         fprintf(stderr, "import syncfile failed\n");
+         mesa_loge("import syncfile failed\n");
          goto err_destroy_syncobj;
       }
    } else {
       assert(type == PIPE_FD_TYPE_SYNCOBJ);
-      ret = drmSyncobjFDToHandle(dev->fd, fd, &f->syncobj);
+      ret = drmSyncobjFDToHandle(panfrost_device_fd(dev), fd, &f->syncobj);
       if (ret) {
-         fprintf(stderr, "import syncobj FD failed\n");
+         mesa_loge("import syncobj FD failed\n");
          goto err_free_fence;
       }
    }
@@ -117,7 +99,7 @@ panfrost_fence_from_fd(struct panfrost_context *ctx, int fd,
    return f;
 
 err_destroy_syncobj:
-   drmSyncobjDestroy(dev->fd, f->syncobj);
+   drmSyncobjDestroy(panfrost_device_fd(dev), f->syncobj);
 err_free_fence:
    free(f);
    return NULL;
@@ -134,9 +116,9 @@ panfrost_fence_create(struct panfrost_context *ctx)
     * (HandleToFD/FDToHandle just gives you another syncobj ID for the
     * same syncobj).
     */
-   ret = drmSyncobjExportSyncFile(dev->fd, ctx->syncobj, &fd);
+   ret = drmSyncobjExportSyncFile(panfrost_device_fd(dev), ctx->syncobj, &fd);
    if (ret || fd == -1) {
-      fprintf(stderr, "export failed\n");
+      mesa_loge("export failed\n");
       return NULL;
    }
 

@@ -53,9 +53,6 @@ template = """\
  * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
- *
- * Authors:
- *    Jason Ekstrand (jason@jlekstrand.net)
  */
 
 #include <math.h>
@@ -63,12 +60,18 @@ template = """\
 #include "util/half_float.h"
 #include "util/double.h"
 #include "util/softfloat.h"
+#include "util/bfloat.h"
+#include "util/float8.h"
 #include "util/bigmath.h"
 #include "util/format/format_utils.h"
+#include "util/format_r11g11b10f.h"
+#include "util/u_math.h"
+#include "util/u_overflow.h"
 #include "nir_constant_expressions.h"
+#include "nir.h"
 
 /**
- * \brief Checks if the provided value is a denorm and flushes it to zero.
+ * Checks if the provided value is a denorm and flushes it to zero.
  */
 static void
 constant_denorm_flush_to_zero(nir_const_value *value, unsigned bit_size)
@@ -86,6 +89,45 @@ constant_denorm_flush_to_zero(nir_const_value *value, unsigned bit_size)
         if (0 == (value->u16 & 0x7c00))
             value->u16 &= 0x8000;
     }
+}
+
+static double
+get_float_source(nir_const_value value, unsigned execution_mode, unsigned bit_size)
+{
+    if (nir_is_denorm_flush_to_zero(execution_mode, bit_size))
+        constant_denorm_flush_to_zero(&value, bit_size);
+
+    return nir_const_value_as_float(value, bit_size);
+}
+
+/**
+ * Properly rounds and handles denorms for intermediate results. Useful for
+ * fused opcodes that want to behave exactly like the unfused variants, e.g.
+ * fmad.
+ */
+static double
+handle_intermediate_float_result(double value, unsigned execution_mode, unsigned bit_size)
+{
+    nir_const_value const_val;
+    switch(bit_size) {
+    case 64:
+        const_val.f64 = value;
+        break;
+    case 32:
+        const_val.f32 = value;
+        break;
+    case 16:
+        if (nir_is_rounding_mode_rtz(execution_mode, 16)) {
+            const_val.u16 = _mesa_float_to_float16_rtz(value);
+        } else {
+            const_val.u16 = _mesa_float_to_float16_rtne(value);
+        }
+        break;
+    default:
+        UNREACHABLE("Unsupported bit_size. Should be 64, 32, or 16");
+    }
+
+    return get_float_source(const_val, execution_mode, bit_size);
 }
 
 /**
@@ -252,23 +294,131 @@ pack_half_1x16(float x)
 }
 
 /**
- * Evaluate one component of unpackHalf2x16.
+ * Evaluate one component of packHalf2x16, RTZ mode.
  */
-static float
-unpack_half_1x16_flush_to_zero(uint16_t u)
+static uint16_t
+pack_half_1x16_rtz(float x)
 {
-   if (0 == (u & 0x7c00))
-      u &= 0x8000;
-   return _mesa_half_to_float(u);
+   return _mesa_float_to_float16_rtz(x);
 }
 
 /**
  * Evaluate one component of unpackHalf2x16.
  */
 static float
-unpack_half_1x16(uint16_t u)
+unpack_half_1x16(uint16_t u, bool ftz)
 {
+   if (0 == (u & 0x7c00) && ftz)
+      u &= 0x8000;
    return _mesa_half_to_float(u);
+}
+
+/* Broadcom v3d specific instructions */
+/**
+ * Packs 2 2x16 floating split into a r11g11b10f:
+ *
+ * dst[10:0]  = float16_to_float11 (src0[15:0])
+ * dst[21:11] = float16_to_float11 (src0[31:16])
+ * dst[31:22] = float16_to_float10 (src1[15:0])
+ */
+static uint32_t pack_32_to_r11g11b10_v3d(const uint32_t src0,
+                                         const uint32_t src1)
+{
+   float rgb[3] = {
+      unpack_half_1x16((src0 & 0xffff), false),
+      unpack_half_1x16((src0 >> 16), false),
+      unpack_half_1x16((src1 & 0xffff), false),
+   };
+
+   return float3_to_r11g11b10f(rgb);
+}
+
+/**
+  * The three methods below are basically wrappers over pack_s/unorm_1x8/1x16,
+  * as they receives a uint16_t val instead of a float
+  */
+static inline uint8_t _mesa_half_to_snorm8(uint16_t val)
+{
+   return pack_snorm_1x8(_mesa_half_to_float(val));
+}
+
+static uint16_t _mesa_float_to_snorm16(uint32_t val)
+{
+   union fi aux;
+   aux.ui = val;
+   return pack_snorm_1x16(aux.f);
+}
+
+static uint16_t _mesa_float_to_unorm16(uint32_t val)
+{
+   union fi aux;
+   aux.ui = val;
+   return pack_unorm_1x16(aux.f);
+}
+
+static inline uint32_t float_pack16_v3d(uint32_t f32)
+{
+   return _mesa_float_to_half(uif(f32));
+}
+
+static inline uint32_t float_unpack16_v3d(uint32_t f16)
+{
+   return fui(_mesa_half_to_float(f16));
+}
+
+static inline uint32_t vfpack_v3d(uint32_t a, uint32_t b)
+{
+   return float_pack16_v3d(b) << 16 | float_pack16_v3d(a);
+}
+
+static inline uint32_t vfsat_v3d(uint32_t a)
+{
+   const uint32_t low = fui(SATURATE(_mesa_half_to_float(a & 0xffff)));
+   const uint32_t high = fui(SATURATE(_mesa_half_to_float(a >> 16)));
+
+   return vfpack_v3d(low, high);
+}
+
+static inline uint32_t fmul_v3d(uint32_t a, uint32_t b)
+{
+   return fui(uif(a) * uif(b));
+}
+
+static uint32_t vfmul_v3d(uint32_t a, uint32_t b)
+{
+   const uint32_t low = fmul_v3d(float_unpack16_v3d(a & 0xffff),
+                                 float_unpack16_v3d(b & 0xffff));
+   const uint32_t high = fmul_v3d(float_unpack16_v3d(a >> 16),
+                                  float_unpack16_v3d(b >> 16));
+
+   return vfpack_v3d(low, high);
+}
+
+/* Convert 2x16-bit floating point to 2x10-bit unorm */
+static uint32_t pack_2x16_to_unorm_2x10(uint32_t src0)
+{
+   return vfmul_v3d(vfsat_v3d(src0), 0x03ff03ff);
+}
+
+/*
+ * Convert 2x16-bit floating point to one 2-bit and one
+ * 10-bit unorm
+ */
+static uint32_t pack_2x16_to_unorm_10_2(uint32_t src0)
+{
+   return vfmul_v3d(vfsat_v3d(src0), 0x000303ff);
+}
+
+static uint32_t
+msad(uint32_t src0, uint32_t src1, uint32_t src2) {
+   uint32_t res = src2;
+   for (unsigned i = 0; i < 4; i++) {
+      const uint8_t ref = src0 >> (i * 8);
+      const uint8_t src = src1 >> (i * 8);
+      if (ref != 0)
+         res += MAX2(ref, src) - MIN2(ref, src);
+   }
+   return res;
 }
 
 /* Some typed vector structures to make things like src0.y work */
@@ -278,10 +428,27 @@ typedef float float16_t;
 typedef float float32_t;
 typedef double float64_t;
 typedef bool bool1_t;
-typedef bool bool8_t;
-typedef bool bool16_t;
 typedef bool bool32_t;
-typedef bool bool64_t;
+
+static inline bool
+util_add_check_overflow_int1_t(int1_t a, int1_t b)
+{
+   return (a & 1 && b & 1);
+}
+static inline bool
+util_add_check_overflow_uint1_t(uint1_t a, int1_t b)
+{
+   return (a & 1 && b & 1);
+}
+static inline bool
+util_sub_check_overflow_int1_t(int1_t a, int1_t b)
+{
+   /* int1_t uses 0/-1 convention, so the only
+    * overflow case is "0 - (-1)".
+    */
+   return a == 0 && b != 0;
+}
+
 % for type in ["float", "int", "uint", "bool"]:
 % for width in type_sizes(type):
 struct ${type}${width}_vec {
@@ -317,18 +484,15 @@ struct ${type}${width}_vec {
    % for j in range(op.num_inputs):
       % if op.input_sizes[j] == 0:
          <% continue %>
-      % elif "src" + str(j) not in op.const_expr:
-         ## Avoid unused variable warnings
-         <% continue %>
-      %endif
+      % endif
 
       const struct ${input_types[j]}_vec src${j} = {
       % for k in range(op.input_sizes[j]):
          % if input_types[j] == "int1":
              /* 1-bit integers use a 0/-1 convention */
              -(int1_t)_src[${j}][${k}].b,
-         % elif input_types[j] == "float16":
-            _mesa_half_to_float(_src[${j}][${k}].u16),
+         % elif type_base_type(input_types[j]) == "float":
+            get_float_source(_src[${j}][${k}], execution_mode, ${type_size(input_types[j])}),
          % else:
             _src[${j}][${k}].${get_const_field(input_types[j])},
          % endif
@@ -344,20 +508,18 @@ struct ${type}${width}_vec {
       ## components and apply the constant expression one component
       ## at a time.
       for (unsigned _i = 0; _i < num_components; _i++) {
+         bool poison = false;
          ## For each per-component input, create a variable srcN that
          ## contains the value of the current (_i'th) component.
          % for j in range(op.num_inputs):
             % if op.input_sizes[j] != 0:
                <% continue %>
-            % elif "src" + str(j) not in op.const_expr:
-               ## Avoid unused variable warnings
-               <% continue %>
             % elif input_types[j] == "int1":
                /* 1-bit integers use a 0/-1 convention */
                const int1_t src${j} = -(int1_t)_src[${j}][_i].b;
-            % elif input_types[j] == "float16":
-               const float src${j} =
-                  _mesa_half_to_float(_src[${j}][_i].u16);
+            % elif type_base_type(input_types[j]) == "float":
+               const ${input_types[j]}_t src${j} =
+                  get_float_source(_src[${j}][_i], execution_mode, ${type_size(input_types[j])});
             % else:
                const ${input_types[j]}_t src${j} =
                   _src[${j}][_i].${get_const_field(input_types[j])};
@@ -367,12 +529,15 @@ struct ${type}${width}_vec {
          ## Create an appropriately-typed variable dst and assign the
          ## result of the const_expr to it.  If const_expr already contains
          ## writes to dst, just include const_expr directly.
+         <%
+         expr = op.render(output_type + '_t')
+         %>
          % if "dst" in op.const_expr:
             ${output_type}_t dst;
 
-            ${op.const_expr}
+            ${expr}
          % else:
-            ${output_type}_t dst = ${op.const_expr};
+            ${output_type}_t dst = ${expr};
          % endif
 
          ## Store the current component of the actual destination to the
@@ -393,7 +558,7 @@ struct ${type}${width}_vec {
             _dst_val[_i].${get_const_field(output_type)} = dst;
          % endif
 
-         % if op.name != "fquantize2f16" and type_base_type(output_type) == "float":
+         % if type_base_type(output_type) == "float":
             % if type_has_size(output_type):
                if (nir_is_denorm_flush_to_zero(execution_mode, ${type_size(output_type)})) {
                   constant_denorm_flush_to_zero(&_dst_val[_i], ${type_size(output_type)});
@@ -404,6 +569,9 @@ struct ${type}${width}_vec {
                }
             %endif
          % endif
+
+         if (poison)
+            poison_mask |= (1 << _i);
       }
    % else:
       ## In the non-per-component case, create a struct dst with
@@ -440,7 +608,7 @@ struct ${type}${width}_vec {
             _dst_val[${k}].${get_const_field(output_type)} = dst.${"xyzwefghijklmnop"[k]};
          % endif
 
-         % if op.name != "fquantize2f16" and type_base_type(output_type) == "float":
+         % if type_base_type(output_type) == "float":
             % if type_has_size(output_type):
                if (nir_is_denorm_flush_to_zero(execution_mode, ${type_size(output_type)})) {
                   constant_denorm_flush_to_zero(&_dst_val[${k}], ${type_size(output_type)});
@@ -456,18 +624,15 @@ struct ${type}${width}_vec {
 </%def>
 
 % for name, op in sorted(opcodes.items()):
-% if op.name == "fsat":
-#if defined(_MSC_VER) && (defined(_M_ARM64) || defined(_M_ARM64EC))
-#pragma optimize("", off) /* Temporary work-around for MSVC compiler bug, present in VS2019 16.9.2 */
-#endif
-% endif
-static void
+static nir_component_mask_t
 evaluate_${name}(nir_const_value *_dst_val,
                  UNUSED unsigned num_components,
                  ${"UNUSED" if op_bit_sizes(op) is None else ""} unsigned bit_size,
                  UNUSED nir_const_value **_src,
                  UNUSED unsigned execution_mode)
 {
+   nir_component_mask_t poison_mask = 0;
+
    % if op_bit_sizes(op) is not None:
       switch (bit_size) {
       % for bit_size in op_bit_sizes(op):
@@ -478,34 +643,36 @@ evaluate_${name}(nir_const_value *_dst_val,
       % endfor
 
       default:
-         unreachable("unknown bit width");
+         UNREACHABLE("unknown bit width");
       }
    % else:
       ${evaluate_op(op, 0, execution_mode)}
    % endif
+
+   return poison_mask;
 }
-% if op.name == "fsat":
-#if defined(_MSC_VER) && (defined(_M_ARM64) || defined(_M_ARM64EC))
-#pragma optimize("", on) /* Temporary work-around for MSVC compiler bug, present in VS2019 16.9.2 */
-#endif
-% endif
 % endfor
 
 void
-nir_eval_const_opcode(nir_op op, nir_const_value *dest,
+nir_eval_const_opcode(nir_op op, nir_const_value *dest, nir_component_mask_t *out_poison,
                       unsigned num_components, unsigned bit_width,
                       nir_const_value **src,
                       unsigned float_controls_execution_mode)
 {
+   nir_component_mask_t poison;
+
    switch (op) {
 % for name in sorted(opcodes.keys()):
    case nir_op_${name}:
-      evaluate_${name}(dest, num_components, bit_width, src, float_controls_execution_mode);
-      return;
+      poison = evaluate_${name}(dest, num_components, bit_width, src, float_controls_execution_mode);
+      break;
 % endfor
    default:
-      unreachable("shouldn't get here");
+      UNREACHABLE("shouldn't get here");
    }
+
+   if (out_poison)
+      *out_poison = poison;
 }"""
 
 from mako.template import Template

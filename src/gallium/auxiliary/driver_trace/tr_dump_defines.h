@@ -28,7 +28,7 @@
 #ifndef TR_DUMP_DEFINES_H_
 #define TR_DUMP_DEFINES_H_
 
-#include "pipe/p_compiler.h"
+#include "util/compiler.h"
 #include "util/format/u_format.h"
 #include "util/u_dump.h"
 #include "tr_dump.h"
@@ -42,7 +42,6 @@ trace_dump_format(enum pipe_format format)
 
    trace_dump_enum(util_format_name(format));
 }
-
 
 static inline void
 trace_dump_query_type(unsigned value)

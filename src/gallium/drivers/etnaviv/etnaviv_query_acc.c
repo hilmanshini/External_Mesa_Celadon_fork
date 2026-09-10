@@ -38,11 +38,13 @@
 
 extern const struct etna_acc_sample_provider occlusion_provider;
 extern const struct etna_acc_sample_provider perfmon_provider;
+extern const struct etna_acc_sample_provider xfb_provider;
 
 static const struct etna_acc_sample_provider *acc_sample_provider[] =
 {
    &occlusion_provider,
    &perfmon_provider,
+   &xfb_provider,
 };
 
 static void
@@ -59,17 +61,16 @@ etna_acc_destroy_query(struct etna_context *ctx, struct etna_query *q)
 static void
 realloc_query_bo(struct etna_context *ctx, struct etna_acc_query *aq)
 {
-   struct etna_resource *rsc;
+   struct etna_buffer_resource *rsc;
    void *map;
 
    pipe_resource_reference(&aq->prsc, NULL);
 
-   /* allocate resource with space for 64 * 64bit values */
    aq->prsc = pipe_buffer_create(&ctx->screen->base, PIPE_BIND_QUERY_BUFFER,
                                  0, 0x1000);
 
    /* don't assume the buffer is zero-initialized */
-   rsc = etna_resource(aq->prsc);
+   rsc = etna_buffer_resource(aq->prsc);
 
    etna_bo_cpu_prep(rsc->bo, DRM_ETNA_PREP_WRITE);
 
@@ -86,9 +87,9 @@ etna_acc_begin_query(struct etna_context *ctx, struct etna_query *q)
 
    /* ->begin_query() discards previous results, so realloc bo */
    realloc_query_bo(ctx, aq);
+   aq->samples = 0;
 
    p->resume(aq, ctx);
-   aq->samples++;
 
    /* add to active list */
    assert(list_is_empty(&aq->node));
@@ -102,7 +103,6 @@ etna_acc_end_query(struct etna_context *ctx, struct etna_query *q)
    const struct etna_acc_sample_provider *p = aq->provider;
 
    p->suspend(aq, ctx);
-   aq->samples++;
 
    /* remove from active list */
    list_delinit(&aq->node);
@@ -113,41 +113,32 @@ etna_acc_get_query_result(struct etna_context *ctx, struct etna_query *q,
                           bool wait, union pipe_query_result *result)
 {
    struct etna_acc_query *aq = etna_acc_query(q);
-   struct etna_resource *rsc = etna_resource(aq->prsc);
+   struct etna_buffer_resource *rsc = etna_buffer_resource(aq->prsc);
    const struct etna_acc_sample_provider *p = aq->provider;
+   uint32_t prep_op = DRM_ETNA_PREP_READ;
 
    assert(list_is_empty(&aq->node));
 
-   if (etna_resource_status(ctx, rsc) & ETNA_PENDING_WRITE) {
-      if (!wait) {
-         /* piglit spec@arb_occlusion_query@occlusion_query_conform
-          * test, and silly apps perhaps, get stuck in a loop trying
-          * to get query result forever with wait==false..  we don't
-          * wait to flush unnecessarily but we also don't want to
-          * spin forever.
-          */
-         if (aq->no_wait_cnt++ > 5) {
-            ctx->base.flush(&ctx->base, NULL, 0);
-            aq->no_wait_cnt = 0;
-         }
+   /* ARB_occlusion_query says:
+    *     "Querying the state for a given occlusion query forces that
+    *      occlusion query to complete within a finite amount of time."
+    *
+    * So, regardless of whether we are supposed to wait or not, we do need to
+    * flush now.
+    */
+   if (etna_resource_status(ctx, &rsc->base) & ETNA_PENDING_WRITE)
+      etna_flush(&ctx->base, NULL, 0, true);
 
-         return false;
-      } else {
-         /* flush that GPU executes all query related actions */
-         ctx->base.flush(&ctx->base, NULL, 0);
-      }
-   }
+   if (!wait)
+      prep_op |= DRM_ETNA_PREP_NOSYNC;
 
    /* get the result */
-   int ret = etna_bo_cpu_prep(rsc->bo, DRM_ETNA_PREP_READ);
+   int ret = etna_bo_cpu_prep(rsc->bo, prep_op);
    if (ret)
       return false;
 
    void *ptr = etna_bo_map(rsc->bo);
    bool success = p->result(aq, ptr, result);
-
-   if (success)
-      aq->samples = 0;
 
    etna_bo_cpu_fini(rsc->bo);
 
@@ -172,7 +163,7 @@ etna_acc_create_query(struct etna_context *ctx, unsigned query_type)
    for (unsigned i = 0; i < ARRAY_SIZE(acc_sample_provider); i++) {
       p = acc_sample_provider[i];
 
-      if (p->supports(query_type))
+      if (p->supports(ctx, query_type))
          break;
       else
          p = NULL;

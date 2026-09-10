@@ -24,6 +24,7 @@
 /* A collection of unit tests for u_process.c */
 
 #include "util/detect_os.h"
+#include "util/os_misc.h"
 #include "util/u_process.h"
 #include <stdio.h>
 #include <stdbool.h>
@@ -36,7 +37,7 @@
 #define PATH_MAX MAX_PATH
 #endif
 
-bool error = false;
+static bool error = false;
 
 static void
 expect_equal_str(const char *expected, const char *actual, const char *test)
@@ -58,19 +59,12 @@ test_util_get_process_name (void)
    const char *expected = "process_test";
 #endif
 
+   const char *name_override = os_get_option("MESA_PROCESS_NAME");
+   if (name_override)
+      expected = name_override;
+
    const char *name = util_get_process_name();
    expect_equal_str(expected, name, "util_get_process_name");
-
-   /* Test util_get_process_name_may_override */
-   char name_buf[PATH_MAX] = { 0 };
-   util_get_process_name_may_override("TEST_MESA_OVERRIDE_PROCESS_NAME", name_buf, sizeof(name_buf));
-   expect_equal_str(expected, name_buf, "util_get_process_name_may_override");
-   putenv("TEST_MESA_OVERRIDE_PROCESS_NAME=hello");
-   util_get_process_name_may_override("TEST_MESA_OVERRIDE_PROCESS_NAME", name_buf, sizeof(name_buf));
-   expect_equal_str("hello", name_buf, "util_get_process_name_may_override");
-   putenv("TEST_MESA_OVERRIDE_PROCESS_NAME=hello2");
-   util_get_process_name_may_override("TEST_MESA_OVERRIDE_PROCESS_NAME", name_buf, sizeof(name_buf));
-   expect_equal_str("hello2", name_buf, "util_get_process_name_may_override");
 }
 
 static void posixify_path(char *path) {
@@ -95,13 +89,12 @@ test_util_get_process_exec_path (void)
       return;
    }
    posixify_path(path);
-   char* build_path = getenv("BUILD_FULL_PATH");
+   char* build_path = os_get_option_dup("BUILD_FULL_PATH");
    if (!build_path) {
       fprintf(stderr, "BUILD_FULL_PATH environment variable should be set\n");
       error = true;
       return;
    }
-   build_path = strdup(build_path);
    posixify_path(build_path);
 #ifdef __CYGWIN__
    int i = strlen(build_path) - 4;

@@ -1,129 +1,156 @@
-.intel-common-test:
-  extends:
-    - .lava-test:amd64
-  variables:
-    DTB: ""
-    BOOT_METHOD: depthcharge
-    KERNEL_IMAGE_TYPE: ""
-    FLAKES_CHANNEL: "#intel-ci"
-    HWCI_FREQ_MAX: "true"
+include:
+  - local: 'src/intel/ci/gitlab-ci-inc.yml'
 
-.anv-test:
+anv-jsl-vk:
   extends:
-    - .intel-common-test
-    - .anv-rules
-  variables:
-    DRIVER_NAME: anv
-
-.iris-test:
-  extends:
-    - .intel-common-test
-    - .iris-rules
-  variables:
-    DRIVER_NAME: iris
-
-.intel-test:
-  extends:
-    - .intel-common-test
-    - .intel-rules
-
-## ANV only
-# 13 boards
-.anv-tgl-test:
-  extends:
+    - .lava-x86_64-test-vk
     - .anv-test
+    - .lava-acer-cb317-1h-c3z6-dedede:x86_64
   variables:
-    DEVICE_TYPE: asus-cx9400-volteer
-    GPU_VERSION: anv-tgl
-    FDO_CI_CONCURRENT: 9
-    RUNNER_TAG: mesa-ci-x86-64-lava-asus-cx9400-volteer
+    DEQP_SUITE: anv-jsl
+  parallel: 5
+
+anv-jsl-vk-full:
+  extends:
+    - anv-jsl-vk
+    - .anv-manual-rules
+  variables:
+    DEQP_SUITE: anv-jsl-full
+    FDO_CI_CONCURRENT: 2
+  parallel: 4
+  timeout: 2h 30m
+
+anv-rpl-vk:
+  extends:
+    - .lava-x86_64-test-vk
+    - .anv-test
+    - .lava-asus-CX3402CVA-brya:x86_64
+  variables:
+    DEQP_SUITE: anv-rpl
+    FDO_CI_CONCURRENT: 6  # We get OOMkills if we go too wide since VKCTS 1.4.4.0, persisting in 1.4.5.3.
+    # Xe regression in 6.19
+    # https://gitlab.freedesktop.org/drm/xe/kernel/-/issues/7584
+    KERNEL_TAG: "v6.17-mesa-ddf6"
+  parallel: 10
 
 anv-tgl-vk:
   extends:
-    - .anv-tgl-test
+    - .lava-x86_64-test-vk
+    - .anv-test
+    - .lava-acer-cp514-2h-1160g7-volteer:x86_64
   variables:
-    DEQP_SUITE: anv-tgl-vk
-    DEQP_VER: vk
-    VK_DRIVER: intel
-  parallel: 10
+    DEQP_SUITE: anv-tgl
+  parallel: 5
 
-## Iris only
-# 5 boards
-.iris-apl-test:
+anv-tgl-vk-full:
   extends:
-    - .iris-test
+    - anv-tgl-vk
+    - .anv-manual-rules
   variables:
-    DEVICE_TYPE: asus-C523NA-A20057-coral
-    GPU_VERSION: iris-apl
-    RUNNER_TAG: mesa-ci-x86-64-lava-asus-C523NA-A20057-coral
-    FDO_CI_CONCURRENT: 5
+    DEQP_SUITE: anv-tgl-full
+  timeout: 100m
+  parallel: 4
 
-# 4 boards
-.iris-glk-test:
+anv-adl-fluster:
   extends:
-    - .iris-test
+    - .lava-x86_64-test-video
+    - .anv-test
+    - .lava-acer-chromebox-cxi5-brask:x86_64
+    - .test-fluster
   variables:
-    DEVICE_TYPE: hp-x360-12b-ca0010nr-n4020-octopus
-    GPU_VERSION: iris-glk
-    RUNNER_TAG: mesa-ci-x86-64-lava-hp-x360-12b-ca0010nr-n4020-octopus
-    FDO_CI_CONCURRENT: 3
+    DEQP_SUITE: anv-fluster
 
-# 5 boards, manual for now due to the GPU being occasionally stuck
-.iris-amly-test:
+# Takes too long since the 1.3.7.0 CTS uprev.
+.hasvk-hsw-full:
   extends:
-    - .iris-test
-    - .test-manual-mr
+    - .anholt-hsw-test
+    - .test-vk
+    - .deqp-test
+    - .hasvk-manual-rules
   variables:
-    DEVICE_TYPE: asus-C433TA-AJ0005-rammus
-    GPU_VERSION: iris-amly
-    RUNNER_TAG: mesa-ci-x86-64-lava-asus-C433TA-AJ0005-rammus
-    FDO_CI_CONCURRENT: 5
+    GPU_VERSION: hasvk-hsw
+    DEQP_SUITE: hasvk-hsw
+    VK_DRIVER: intel_hasvk
+    MESA_VK_IGNORE_CONFORMANCE_WARNING: 1
+  timeout: 2h
 
-# 7 boards
-.iris-kbl-test:
+.hasvk-hsw:
   extends:
-    - .iris-test
+    - .hasvk-hsw-full
   variables:
-    DEVICE_TYPE: hp-x360-14-G1-sona
-    GPU_VERSION: iris-kbl
-    RUNNER_TAG: mesa-ci-x86-64-lava-hp-x360-14-G1-sona
-    FDO_CI_CONCURRENT: 9
+    DEQP_FRACTION: 10
 
-# 5 boards
-.iris-whl-test:
+anv-jsl-angle:
   extends:
-    - .iris-test
+    - .anv-angle-test
+    - .lava-acer-cb317-1h-c3z6-dedede:x86_64
   variables:
-    DEVICE_TYPE: dell-latitude-5400-8665U-sarien
-    GPU_VERSION: iris-whl
-    RUNNER_TAG: mesa-ci-x86-64-lava-dell-latitude-5400-8665U-sarien
-    FDO_CI_CONCURRENT: 9
+    DEQP_SUITE: anv-jsl-angle
+    GPU_VERSION: angle-anv-jsl
 
-# 5 boards
-.iris-cml-test:
+anv-jsl-angle-full:
   extends:
-    - .iris-test
-    - .test-manual-mr    # Devices have too often network problems and fail to boot.
+    - anv-jsl-angle
+    - .anv-manual-rules
   variables:
-    DEVICE_TYPE: asus-C436FA-Flip-hatch
-    GPU_VERSION: iris-cml
-    RUNNER_TAG: mesa-ci-x86-64-lava-asus-C436FA-flip-hatch
-    FDO_CI_CONCURRENT: 9
+    DEQP_SUITE: anv-jsl-angle-full
+  parallel: 2
 
-# 8 boards
-.iris-jsl-test:
+anv-adl-angle:
   extends:
-    - .iris-test
+    - .anv-angle-test
+    - .lava-acer-chromebox-cxi5-brask:x86_64
   variables:
-    DEVICE_TYPE: acer-cb317-1h-c3z6-dedede
-    GPU_VERSION: iris-jsl
-    RUNNER_TAG: mesa-ci-x86-64-lava-acer-cb317-1h-c3z6-dedede
-    FDO_CI_CONCURRENT: 3
+    DEQP_SUITE: anv-adl-angle
+    GPU_VERSION: angle-anv-adl
+  parallel: 5
+
+anv-adl-traces-restricted:
+  extends:
+    - .lava-x86_64-test-vk
+    - .traces-test
+    - .test-wine
+    - .anv-test
+    - .lava-acer-chromebox-cxi5-brask:x86_64
+    - .anv-restricted-rules
+  variables:
+    HWCI_START_WESTON: 1
+    ANGLE_TRACE_FILES_TAG: "2025-03-28"
+    REPLAY_CONFIG: traces-intel-restricted.toml
+    FDO_CI_CONCURRENT: 5  # Run the 10 traces in 2 sets of 5 to avoid OOMs
+  allow_failure: true
+
+anv-tgl-angle:
+  extends:
+    - .anv-angle-test
+    - .lava-acer-cp514-2h-1130g7-volteer:x86_64
+  variables:
+    DEQP_SUITE: anv-tgl-angle
+    GPU_VERSION: angle-anv-tgl
+  parallel: 2
+
+anv-adl-vkd3d:
+  extends:
+    - .lava-x86_64-test-vk
+    - .anv-test
+    - .test-vkd3d-proton
+    - .lava-acer-n20q11-r856ltn-p1s2-nissa:x86_64
+  variables:
+    # Random tests fail/crash when trying to run them in parallel
+    FDO_CI_CONCURRENT: 1
+
+anv-tgl-angle-full:
+  extends:
+    - anv-tgl-angle
+    - .anv-manual-rules
+  variables:
+    DEQP_SUITE: anv-tgl-angle-full
+  parallel: null
 
 iris-apl-deqp:
   extends:
     - .iris-apl-test
-    - .test-manual-mr
+    - .iris-manual-rules
   variables:
     DEQP_SUITE: iris-apl
   parallel: 3
@@ -133,23 +160,21 @@ iris-apl-egl:
     - .iris-apl-test
   variables:
     PIGLIT_NO_WINDOW: 0
-    HWCI_START_XORG: 1
     HWCI_START_WESTON: 1
     DEQP_SUITE: iris-apl-egl
+  parallel: 2
 
 iris-glk-deqp:
   extends:
     - .iris-glk-test
   variables:
     DEQP_SUITE: iris-glk
-  parallel: 2
 
 iris-glk-egl:
   extends:
     - .iris-glk-test
   variables:
     PIGLIT_NO_WINDOW: 0
-    HWCI_START_XORG: 1
     HWCI_START_WESTON: 1
     DEQP_SUITE: iris-glk-egl
 
@@ -167,56 +192,41 @@ iris-kbl-deqp:
     DEQP_SUITE: iris-kbl
   parallel: 3
 
-iris-whl-deqp:
-  extends:
-    - .iris-whl-test
-  variables:
-    DEQP_SUITE: iris-whl
-  parallel: 4
-
-iris-cml-deqp:
-  extends:
-    - .iris-cml-test
-  variables:
-    DEQP_SUITE: iris-cml
-  parallel: 4
-
 iris-jsl-deqp:
   extends:
-    - .iris-jsl-test
+    - .iris-test
+    - .lava-acer-cb317-1h-c3z6-dedede:x86_64
   variables:
     DEQP_SUITE: iris-jsl
-  parallel: 8
+    GPU_VERSION: iris-jsl
+    DEQP_FRACTION: 8
+  parallel: 2
+
+iris-adl-deqp:
+  extends:
+    - .iris-adl-test
+  variables:
+    DEQP_SUITE: iris-adl
+    GPU_VERSION: iris-adl
+  parallel: 5
 
 iris-amly-egl:
   extends:
     - .iris-amly-test
   variables:
     PIGLIT_NO_WINDOW: 0
-    HWCI_START_XORG: 1
     HWCI_START_WESTON: 1
     DEQP_SUITE: iris-amly-egl
 
 iris-kbl-piglit:
   extends:
     - .iris-kbl-test
-    - .lava-piglit
-  parallel: 3
+    - .test-piglit
+  parallel: 2
   variables:
     HWCI_START_XORG: 1
     PIGLIT_NO_WINDOW: 0
-    PIGLIT_PLATFORM: mixed_glx_egl
-    PIGLIT_PROFILES: gpu
-
-.iris-traces:
-  extends:
-    - .lava-traces-base
-  variables:
-    EGL_PLATFORM: surfaceless
-    PIGLIT_REPLAY_DEVICE_NAME: "gl-${GPU_VERSION}"
-    PIGLIT_RESULTS: "${GPU_VERSION}-${PIGLIT_PROFILES}"
-    PIGLIT_REPLAY_DESCRIPTION_FILE: "/install/traces-iris.yml"
-    PIGLIT_REPLAY_EXTRA_ARGS: --keep-image
+    DEQP_SUITE: iris-kbl-piglit
 
 iris-apl-traces:
   variables:
@@ -246,40 +256,6 @@ iris-kbl-traces:
     - .iris-kbl-test
     - .iris-traces
 
-iris-whl-traces:
-  variables:
-    GPU_VERSION: intel-whl
-  extends:
-    - .iris-whl-test
-    - .iris-traces
-
-iris-cml-traces:
-  variables:
-    GPU_VERSION: intel-cml
-  extends:
-    - .iris-cml-test
-    - .iris-traces
-
-.profile-traces:
-  extends:
-    - .iris-traces
-    - .iris-rules-performance
-  variables:
-    PIGLIT_REPLAY_SUBCOMMAND: "profile"
-    PIGLIT_REPLAY_EXTRA_ARGS: "--db-path ${CI_PROJECT_DIR}/replayer-db/"
-    # More than this can hit OOM due to BOs leaked during the replay of the last frame
-    PIGLIT_REPLAY_LOOP_TIMES: 150
-    # We don't want for more than one workload to be submitted to the GPU at a time
-    FDO_CI_CONCURRENT: 1
-    # Piglit is very sparse in its status output and downloads of big traces can take a while
-    LAVA_DEVICE_HANGING_TIMEOUT_SEC: 600
-    # So we aren't capped by VSync by the X server
-    EGL_PLATFORM: surfaceless
-    GIT_STRATEGY: none
-    HWCI_FREQ_MAX: "true"
-    LAVA_TAGS: "cbg-0"
-  allow_failure: true
-
 iris-apl-traces-performance:
   extends:
     - .iris-apl-test
@@ -308,47 +284,43 @@ iris-kbl-traces-performance:
   variables:
     GPU_VERSION: intel-kbl
 
-iris-whl-traces-performance:
+iris-adl-traces-performance:
   extends:
-    - .iris-whl-test
+    - .iris-adl-test
     - .profile-traces
   variables:
-    GPU_VERSION: intel-whl
+    GPU_VERSION: intel-adl
 
-.iris-cml-traces-performance:
+intel-adl-cl:
   extends:
-    - .iris-cml-test
-    - .profile-traces
+    - .intel-adl-test
+    - .lava-acer-n20q11-r856ltn-p1s2-nissa:x86_64
+    - .intel-rules
+    - .test-piglit
+  rules:
+    - !reference [.intel-adl-test, rules]
+    - !reference [.intel-rules, rules]
+    - !reference [.rusticl-rules, rules]
   variables:
-    GPU_VERSION: intel-cml
+    DEQP_SUITE: intel-adl-cl
+    GPU_VERSION: intel-adl
+    VK_DRIVER: intel
+    HWCI_START_WESTON: 1
 
-## Intel (anv + iris)
-.intel-tgl-test:
+intel-adl-skqp:
   extends:
-    - .anv-tgl-test
-    - .intel-test
+    - .intel-adl-test
+    - .lava-acer-n20q11-r856ltn-p1s2-nissa:x86_64
   variables:
-    GPU_VERSION: intel-tgl
-
-.intel-whl-test:
-  extends:
-    - .iris-whl-test
-    - .intel-test
-  variables:
-    GPU_VERSION: intel-whl
+    DEQP_SUITE: intel-adl-skqp
+    VK_DRIVER: intel
+    HWCI_START_XORG: 1
 
 intel-tgl-skqp:
   extends:
     - .intel-tgl-test
+    - .lava-acer-cp514-2h-1130g7-volteer:x86_64
   variables:
     DEQP_SUITE: intel-tgl-skqp
-    VK_DRIVER: intel
-    HWCI_START_XORG: 1
-
-intel-whl-skqp:
-  extends:
-    - .intel-whl-test
-  variables:
-    DEQP_SUITE: intel-whl-skqp
     VK_DRIVER: intel
     HWCI_START_XORG: 1

@@ -23,6 +23,9 @@
  *
  * Authors:
  *    Chia-I Wu <olv@lunarg.com>
+ *
+ * Modifications Copyright (C) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
+ *
  */
 
 #include "main/mtypes.h"
@@ -62,6 +65,7 @@
 #include "util/u_surface.h"
 #include "util/list.h"
 #include "util/u_memory.h"
+#include "util/perf/cpu_trace.h"
 
 struct hash_table;
 
@@ -169,7 +173,7 @@ st_context_validate(struct st_context *st,
                     struct gl_framebuffer *stread)
 {
     if (stdraw && stdraw->stamp != st->draw_stamp) {
-       st->ctx->NewDriverState |= ST_NEW_FRAMEBUFFER;
+       ST_SET_FRAMEBUFFER_STATES(st->ctx->NewDriverState);
        _mesa_resize_framebuffer(st->ctx, stdraw,
                                 stdraw->Width,
                                 stdraw->Height);
@@ -178,7 +182,7 @@ st_context_validate(struct st_context *st,
 
     if (stread && stread->stamp != st->read_stamp) {
        if (stread != stdraw) {
-          st->ctx->NewDriverState |= ST_NEW_FRAMEBUFFER;
+          ST_SET_FRAMEBUFFER_STATES(st->ctx->NewDriverState);
           _mesa_resize_framebuffer(st->ctx, stread,
                                    stread->Width,
                                    stread->Height);
@@ -192,19 +196,16 @@ void
 st_set_ws_renderbuffer_surface(struct gl_renderbuffer *rb,
                                struct pipe_surface *surf)
 {
-   pipe_surface_reference(&rb->surface_srgb, NULL);
-   pipe_surface_reference(&rb->surface_linear, NULL);
+   rb->surface = *surf;
 
    if (util_format_is_srgb(surf->format))
-      pipe_surface_reference(&rb->surface_srgb, surf);
+      rb->format_srgb = surf->format;
    else
-      pipe_surface_reference(&rb->surface_linear, surf);
+      rb->format_linear = surf->format;
 
-   rb->surface = surf; /* just assign, don't ref */
    pipe_resource_reference(&rb->texture, surf->texture);
-
-   rb->Width = surf->width;
-   rb->Height = surf->height;
+   rb->Width = pipe_surface_width(surf);
+   rb->Height = pipe_surface_height(surf);
 }
 
 
@@ -221,6 +222,7 @@ st_framebuffer_validate(struct gl_framebuffer *stfb,
                         struct st_context *st)
 {
    struct pipe_resource *textures[ST_ATTACHMENT_COUNT];
+   struct pipe_resource *resolve = NULL;
    uint width, height;
    unsigned i;
    bool changed = false;
@@ -235,7 +237,7 @@ st_framebuffer_validate(struct gl_framebuffer *stfb,
    /* validate the fb */
    do {
       if (!stfb->drawable->validate(st, stfb->drawable, stfb->statts,
-                                 stfb->num_statts, textures))
+                                 stfb->num_statts, textures, &resolve))
          return;
 
       stfb->drawable_stamp = new_stamp;
@@ -247,7 +249,7 @@ st_framebuffer_validate(struct gl_framebuffer *stfb,
 
    for (i = 0; i < stfb->num_statts; i++) {
       struct gl_renderbuffer *rb;
-      struct pipe_surface *ps, surf_tmpl;
+      struct pipe_surface surf_tmpl;
       gl_buffer_index idx;
 
       if (!textures[i])
@@ -269,19 +271,21 @@ st_framebuffer_validate(struct gl_framebuffer *stfb,
       }
 
       u_surface_default_template(&surf_tmpl, textures[i]);
-      ps = st->pipe->create_surface(st->pipe, textures[i], &surf_tmpl);
-      if (ps) {
-         st_set_ws_renderbuffer_surface(rb, ps);
-         pipe_surface_reference(&ps, NULL);
+      st_set_ws_renderbuffer_surface(rb, &surf_tmpl);
 
-         changed = true;
+      changed = true;
 
-         width = rb->Width;
-         height = rb->Height;
-      }
+      width = rb->Width;
+      height = rb->Height;
 
       pipe_resource_reference(&textures[i], NULL);
    }
+
+   changed |= resolve != stfb->resolve;
+   /* ref is removed here */
+   pipe_resource_reference(&stfb->resolve, NULL);
+   /* ref is taken here */
+   stfb->resolve = resolve;
 
    if (changed) {
       ++stfb->stamp;
@@ -332,7 +336,7 @@ st_framebuffer_update_attachments(struct gl_framebuffer *stfb)
  * renderbuffer).  The window system code determines the format.
  */
 static struct gl_renderbuffer *
-st_new_renderbuffer_fb(enum pipe_format format, unsigned samples, boolean sw)
+st_new_renderbuffer_fb(enum pipe_format format, unsigned samples, bool sw)
 {
    struct gl_renderbuffer *rb;
 
@@ -343,7 +347,6 @@ st_new_renderbuffer_fb(enum pipe_format format, unsigned samples, boolean sw)
    }
 
    _mesa_init_renderbuffer(rb, 0);
-   rb->ClassID = 0x4242; /* just a unique value */
    rb->NumSamples = samples;
    rb->NumStorageSamples = samples;
    rb->Format = st_pipe_format_to_mesa_format(format);
@@ -368,6 +371,7 @@ st_new_renderbuffer_fb(enum pipe_format format, unsigned samples, boolean sw)
    case PIPE_FORMAT_B8G8R8X8_UNORM:
    case PIPE_FORMAT_X8R8G8B8_UNORM:
    case PIPE_FORMAT_R8G8B8_UNORM:
+   case PIPE_FORMAT_B8G8R8_UNORM:
       rb->InternalFormat = GL_RGB8;
       break;
    case PIPE_FORMAT_R8G8B8A8_SRGB:
@@ -378,6 +382,8 @@ st_new_renderbuffer_fb(enum pipe_format format, unsigned samples, boolean sw)
    case PIPE_FORMAT_R8G8B8X8_SRGB:
    case PIPE_FORMAT_B8G8R8X8_SRGB:
    case PIPE_FORMAT_X8R8G8B8_SRGB:
+   case PIPE_FORMAT_R8G8B8_SRGB:
+   case PIPE_FORMAT_B8G8R8_SRGB:
       rb->InternalFormat = GL_SRGB8;
       break;
    case PIPE_FORMAT_B5G5R5A1_UNORM:
@@ -394,6 +400,9 @@ st_new_renderbuffer_fb(enum pipe_format format, unsigned samples, boolean sw)
       break;
    case PIPE_FORMAT_Z32_UNORM:
       rb->InternalFormat = GL_DEPTH_COMPONENT32;
+      break;
+   case PIPE_FORMAT_Z32_FLOAT:
+      rb->InternalFormat = GL_DEPTH_COMPONENT32F;
       break;
    case PIPE_FORMAT_Z24_UNORM_S8_UINT:
    case PIPE_FORMAT_S8_UINT_Z24_UNORM:
@@ -413,6 +422,7 @@ st_new_renderbuffer_fb(enum pipe_format format, unsigned samples, boolean sw)
    case PIPE_FORMAT_R16G16B16A16_UNORM:
       rb->InternalFormat = GL_RGBA16;
       break;
+   case PIPE_FORMAT_R16G16B16X16_UNORM:
    case PIPE_FORMAT_R16G16B16_UNORM:
       rb->InternalFormat = GL_RGB16;
       break;
@@ -448,8 +458,6 @@ st_new_renderbuffer_fb(enum pipe_format format, unsigned samples, boolean sw)
       FREE(rb);
       return NULL;
    }
-
-   rb->surface = NULL;
 
    return rb;
 }
@@ -551,6 +559,7 @@ st_visual_to_context_mode(const struct st_visual *visual,
       mode->rgbBits = mode->redBits +
          mode->greenBits + mode->blueBits + mode->alphaBits;
       mode->sRGBCapable = util_format_is_srgb(visual->color_format);
+      mode->floatMode = util_format_is_float(visual->color_format);
    }
 
    if (visual->depth_stencil_format != PIPE_FORMAT_NONE) {
@@ -667,23 +676,10 @@ st_framebuffer_create(struct st_context *st,
 }
 
 
-static uint32_t
-drawable_hash(const void *key)
-{
-   return (uintptr_t)key;
-}
-
-
-static bool
-drawable_equal(const void *a, const void *b)
-{
-   return (struct pipe_frontend_drawable *)a == (struct pipe_frontend_drawable *)b;
-}
-
-
 static bool
 drawable_lookup(struct pipe_frontend_screen *fscreen,
-                const struct pipe_frontend_drawable *drawable)
+                const struct pipe_frontend_drawable *drawable,
+                uint32_t drawable_ID)
 {
    struct st_screen *screen =
       (struct st_screen *)fscreen->st_screen;
@@ -693,7 +689,7 @@ drawable_lookup(struct pipe_frontend_screen *fscreen,
    assert(screen->drawable_ht);
 
    simple_mtx_lock(&screen->st_mutex);
-   entry = _mesa_hash_table_search(screen->drawable_ht, drawable);
+   entry = _mesa_hash_table_search_pre_hashed(screen->drawable_ht, drawable_ID, drawable);
    simple_mtx_unlock(&screen->st_mutex);
 
    return entry != NULL;
@@ -712,7 +708,7 @@ drawable_insert(struct pipe_frontend_screen *fscreen,
    assert(screen->drawable_ht);
 
    simple_mtx_lock(&screen->st_mutex);
-   entry = _mesa_hash_table_insert(screen->drawable_ht, drawable, drawable);
+   entry = _mesa_hash_table_insert_pre_hashed(screen->drawable_ht, drawable->ID, drawable, drawable);
    simple_mtx_unlock(&screen->st_mutex);
 
    return entry != NULL;
@@ -731,7 +727,7 @@ drawable_remove(struct pipe_frontend_screen *fscreen,
       return;
 
    simple_mtx_lock(&screen->st_mutex);
-   entry = _mesa_hash_table_search(screen->drawable_ht, drawable);
+   entry = _mesa_hash_table_search_pre_hashed(screen->drawable_ht, drawable->ID, drawable);
    if (!entry)
       goto unlock;
 
@@ -779,7 +775,7 @@ st_framebuffers_purge(struct st_context *st)
        * and unreference the framebuffer object, so its resources can be
        * deleted.
        */
-      if (!drawable_lookup(fscreen, drawable)) {
+      if (!drawable_lookup(fscreen, drawable, stfb->drawable_ID)) {
          list_del(&stfb->head);
          _mesa_reference_framebuffer(&stfb, NULL);
       }
@@ -793,6 +789,8 @@ st_context_flush(struct st_context *st, unsigned flags,
                  void (*before_flush_cb) (void*), void* args)
 {
    unsigned pipe_flags = 0;
+
+   MESA_TRACE_FUNC();
 
    if (flags & ST_FLUSH_END_OF_FRAME)
       pipe_flags |= PIPE_FLUSH_END_OF_FRAME;
@@ -811,8 +809,8 @@ st_context_flush(struct st_context *st, unsigned flags,
    st_flush(st, fence, pipe_flags);
 
    if ((flags & ST_FLUSH_WAIT) && fence && *fence) {
-      st->screen->fence_finish(st->screen, NULL, *fence,
-                                     PIPE_TIMEOUT_INFINITE);
+      st->screen->fence_finish(st->screen, st->pipe, *fence,
+                                     OS_TIMEOUT_INFINITE);
       st->screen->fence_reference(st->screen, fence, NULL);
    }
 
@@ -906,17 +904,45 @@ st_context_invalidate_state(struct st_context *st, unsigned flags)
    struct gl_context *ctx = st->ctx;
 
    if (flags & ST_INVALIDATE_FS_SAMPLER_VIEWS)
-      ctx->NewDriverState |= ST_NEW_FS_SAMPLER_VIEWS;
+      ST_SET_STATE(ctx->NewDriverState, ST_NEW_FS_SAMPLER_VIEWS);
    if (flags & ST_INVALIDATE_FS_CONSTBUF0)
-      ctx->NewDriverState |= ST_NEW_FS_CONSTANTS;
+      ST_SET_STATE(ctx->NewDriverState, ST_NEW_FS_CONSTANTS);
    if (flags & ST_INVALIDATE_VS_CONSTBUF0)
-      ctx->NewDriverState |= ST_NEW_VS_CONSTANTS;
+      ST_SET_STATE(ctx->NewDriverState, ST_NEW_VS_CONSTANTS);
    if (flags & ST_INVALIDATE_VERTEX_BUFFERS) {
       ctx->Array.NewVertexElements = true;
-      ctx->NewDriverState |= ST_NEW_VERTEX_ARRAYS;
+      ST_SET_STATE(ctx->NewDriverState, ST_NEW_VERTEX_ARRAYS);
    }
    if (flags & ST_INVALIDATE_FB_STATE)
-      ctx->NewDriverState |= ST_NEW_FB_STATE;
+      ST_SET_STATE(ctx->NewDriverState, ST_NEW_FB_STATE);
+   if (flags & ST_INVALIDATE_VIEWPORT)
+      ST_SET_STATE(ctx->NewDriverState, ST_NEW_VIEWPORT);
+   if (flags & ST_INVALIDATE_VS_STATE)
+      ST_SET_STATE(ctx->NewDriverState, ST_NEW_VS_STATE);
+   if (flags & ST_INVALIDATE_GS_STATE)
+      ST_SET_STATE(ctx->NewDriverState, ST_NEW_GS_STATE);
+   if (flags & ST_INVALIDATE_TCS_STATE)
+      ST_SET_STATE(ctx->NewDriverState, ST_NEW_TCS_STATE);
+   if (flags & ST_INVALIDATE_TES_STATE)
+      ST_SET_STATE(ctx->NewDriverState, ST_NEW_TES_STATE);
+   if (flags & ST_INVALIDATE_MESH_STATE)
+      ST_SET_STATE(ctx->NewDriverState, ST_NEW_MS_STATE);
+   if (flags & ST_INVALIDATE_RASTERIZER)
+      ST_SET_STATE(ctx->NewDriverState, ST_NEW_RASTERIZER);
+   if (flags & ST_INVALIDATE_FS_SAMPLERS)
+      ST_SET_STATE2(ctx->NewDriverState, ST_NEW_FS_SAMPLERS, ST_NEW_FS_SAMPLER_VIEWS);
+   if (flags & ST_INVALIDATE_FS_STATE)
+      ST_SET_STATE(ctx->NewDriverState, ST_NEW_FS_STATE);
+   if (flags & ST_INVALIDATE_BLEND)
+      ST_SET_STATE(ctx->NewDriverState, ST_NEW_BLEND);
+   if (flags & ST_INVALIDATE_DSA)
+      ST_SET_STATE(ctx->NewDriverState, ST_NEW_DSA);
+   if (flags & ST_INVALIDATE_SAMPLE_MASK)
+      ST_SET_STATE(ctx->NewDriverState, ST_NEW_SAMPLE_STATE);
+   if (flags & ST_INVALIDATE_SAMPLE_SHADING)
+      ST_SET_STATE(ctx->NewDriverState, ST_NEW_SAMPLE_SHADING);
+   if (flags & ST_INVALIDATE_FS_IMAGES)
+      ST_SET_STATE(ctx->NewDriverState, ST_NEW_FS_IMAGES);
 }
 
 
@@ -958,17 +984,30 @@ st_api_create_context(struct pipe_frontend_screen *fscreen,
 
       screen = CALLOC_STRUCT(st_screen);
       simple_mtx_init(&screen->st_mutex, mtx_plain);
+
+      /* We'll use drawable->ID as prehashed value to prevent the hash function
+       * to get an existing drawable with a deleted drawable hash value when
+       * doing lookups from st_framebuffers_purge and not dereference framebuffer
+       * in time.
+       */
       screen->drawable_ht = _mesa_hash_table_create(NULL,
-                                                 drawable_hash,
-                                                 drawable_equal);
+                                                    NULL,
+                                                    _mesa_key_pointer_equal);
       fscreen->st_screen = screen;
    }
 
    if (attribs->flags & ST_CONTEXT_FLAG_NO_ERROR)
       no_error = true;
 
+   /* OpenGL ES 2.0+ does not support sampler state LOD bias. If we are creating
+    * a GLES context, communicate that to the the driver to allow optimization.
+    */
+   bool is_gles = attribs->profile == API_OPENGLES2;
+   unsigned lod_bias_flag = is_gles ? PIPE_CONTEXT_NO_LOD_BIAS : 0;
+
    pipe = fscreen->screen->context_create(fscreen->screen, NULL,
                                           PIPE_CONTEXT_PREFER_THREADED |
+                                          lod_bias_flag |
                                           attribs->context_flags);
    if (!pipe) {
       *error = ST_CONTEXT_ERROR_NO_MEMORY;
@@ -986,6 +1025,9 @@ st_api_create_context(struct pipe_frontend_screen *fscreen,
       pipe->destroy(pipe);
       return NULL;
    }
+
+   if (attribs->context_flags & PIPE_CONTEXT_PROTECTED)
+      st->ctx->Const.ContextFlags |= GL_CONTEXT_FLAG_PROTECTED_CONTENT_BIT_EXT;
 
    if (attribs->flags & ST_CONTEXT_FLAG_DEBUG) {
       if (!_mesa_set_debug_state_int(st->ctx, GL_DEBUG_OUTPUT, GL_TRUE)) {
@@ -1027,7 +1069,7 @@ st_api_create_context(struct pipe_frontend_screen *fscreen,
       }
    }
 
-   st->can_scissor_clear = !!st->screen->get_param(st->screen, PIPE_CAP_CLEAR_SCISSORED);
+   st->can_scissor_clear = !!st->screen->caps.clear_scissored;
 
    st->ctx->invalidate_on_gl_viewport =
       fscreen->get_param(fscreen, ST_MANAGER_BROKEN_INVALIDATE);
@@ -1035,7 +1077,7 @@ st_api_create_context(struct pipe_frontend_screen *fscreen,
    st->frontend_screen = fscreen;
 
    if (st->ctx->IntelBlackholeRender &&
-       st->screen->get_param(st->screen, PIPE_CAP_FRONTEND_NOOP))
+       st->screen->caps.frontend_noop)
       st->pipe->set_frontend_noop(st->pipe, st->ctx->IntelBlackholeRender);
 
    *error = ST_CONTEXT_SUCCESS;
@@ -1057,7 +1099,6 @@ st_api_get_current(void)
 
 static struct gl_framebuffer *
 st_framebuffer_reuse_or_create(struct st_context *st,
-                               struct gl_framebuffer *fb,
                                struct pipe_frontend_drawable *drawable)
 {
    struct gl_framebuffer *cur = NULL, *stfb = NULL;
@@ -1114,12 +1155,10 @@ st_api_make_current(struct st_context *st,
 
    if (st) {
       /* reuse or create the draw fb */
-      stdraw = st_framebuffer_reuse_or_create(st,
-            st->ctx->WinSysDrawBuffer, stdrawi);
+      stdraw = st_framebuffer_reuse_or_create(st, stdrawi);
       if (streadi != stdrawi) {
          /* do the same for the read fb */
-         stread = st_framebuffer_reuse_or_create(st,
-               st->ctx->WinSysReadBuffer, streadi);
+         stread = st_framebuffer_reuse_or_create(st, streadi);
       }
       else {
          stread = NULL;
@@ -1133,11 +1172,9 @@ st_api_make_current(struct st_context *st,
          return false;
 
       if (stdraw && stread) {
-         if (st->ctx->FirstTimeCurrent || !stread->_ColorReadBuffer || !stdraw->_ColorReadBuffer) {
-            st_framebuffer_validate(stdraw, st);
-            if (stread != stdraw)
-               st_framebuffer_validate(stread, st);
-         }
+         st_framebuffer_validate(stdraw, st);
+         if (stread != stdraw)
+            st_framebuffer_validate(stread, st);
 
          ret = _mesa_make_current(st->ctx, stdraw, stread);
 
@@ -1215,7 +1252,7 @@ st_manager_flush_frontbuffer(struct st_context *st)
       rb->defined = GL_FALSE;
 
       /* Trigger an update of rb->defined on next draw */
-      st->ctx->NewDriverState |= ST_NEW_FB_STATE;
+      ST_SET_STATE(st->ctx->NewDriverState, ST_NEW_FB_STATE);
    }
 }
 
@@ -1324,7 +1361,7 @@ get_version(struct pipe_screen *screen,
    _mesa_init_constants(&consts, api);
    _mesa_init_extensions(&extensions);
 
-   st_init_limits(screen, &consts, &extensions);
+   st_init_limits(screen, &consts, &extensions, api);
    st_init_extensions(screen, &consts, &extensions, options, api);
    version = _mesa_get_version(&extensions, &consts, api);
    free(consts.SpirVExtensions);

@@ -29,12 +29,13 @@
 #define STW_DEVICE_H_
 
 
-#include "pipe/p_compiler.h"
+#include "util/compiler.h"
 #include "frontend/api.h"
 #include "util/u_handle_table.h"
 #include "util/u_dynarray.h"
 #include "util/xmlconfig.h"
 #include <GL/gl.h>
+#include "stw_gdishim.h"
 #include "gldrv.h"
 #include "stw_pixelformat.h"
 
@@ -54,7 +55,7 @@ struct stw_device
    bool screen_initialized;
    struct pipe_screen *screen;
 
-   /* Cache some PIPE_CAP_* */
+   /* Cache some pipe_caps.* */
    unsigned max_2d_length;
 
    struct pipe_frontend_screen *fscreen;
@@ -76,7 +77,7 @@ struct stw_device
    CRITICAL_SECTION fb_mutex;
    struct stw_framebuffer *fb_head;
    
-#ifdef DEBUG
+#if MESA_DEBUG
    unsigned long memdbg_no;
 #endif
 
@@ -95,7 +96,7 @@ struct stw_device
 
 extern struct stw_device *stw_dev;
 
-boolean
+bool
 stw_init_screen(HDC hdc);
 
 struct stw_device *

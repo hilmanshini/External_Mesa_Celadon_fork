@@ -26,7 +26,6 @@
 #include "nir_control_flow.h"
 #include "nir_loop_analyze.h"
 
-
 /* This limit is chosen fairly arbitrarily.  GLSL IR max iteration is 32
  * instructions. (Multiply counting nodes and magic number 5.)  But there is
  * no 1:1 mapping between GLSL IR and NIR so 25 was picked because it seemed
@@ -57,7 +56,7 @@ loop_prepare_for_unroll(nir_loop *loop)
    /* Lower phis at the top level of the loop body */
    foreach_list_typed_safe(nir_cf_node, node, node, &loop->body) {
       if (nir_cf_node_block == node->type) {
-         nir_lower_phis_to_regs_block(nir_cf_node_as_block(node));
+         nir_lower_phis_to_regs_block(nir_cf_node_as_block(node), false);
       }
    }
 
@@ -65,7 +64,7 @@ loop_prepare_for_unroll(nir_loop *loop)
    nir_block *block_after_loop =
       nir_cf_node_as_block(nir_cf_node_next(&loop->cf_node));
 
-   nir_lower_phis_to_regs_block(block_after_loop);
+   nir_lower_phis_to_regs_block(block_after_loop, false);
 
    /* Remove jump if it's the last instruction in the loop */
    nir_instr *last_instr = nir_block_last_instr(nir_loop_last_block(loop));
@@ -466,7 +465,7 @@ complex_unroll(nir_loop *loop, nir_loop_terminator *unlimit_term,
 static void
 complex_unroll_single_terminator(nir_loop *loop)
 {
-   assert(list_length(&loop->info->loop_terminator_list) == 1);
+   assert(list_is_singular(&loop->info->loop_terminator_list));
    assert(loop->info->limiting_terminator);
    assert(nir_is_trivial_loop_if(loop->info->limiting_terminator->nif,
                                  loop->info->limiting_terminator->break_block));
@@ -523,9 +522,7 @@ complex_unroll_single_terminator(nir_loop *loop)
    nir_cf_list_clone_and_reinsert(&lcssa_list, loop->cf_node.parent,
                                   cursor, remap_table);
 
-   start_cursor = terminator->continue_from_then ?
-      nir_before_block(nir_if_first_else_block(if_stmt)) :
-      nir_before_block(nir_if_first_then_block(if_stmt));
+   start_cursor = terminator->continue_from_then ? nir_before_block(nir_if_first_else_block(if_stmt)) : nir_before_block(nir_if_first_then_block(if_stmt));
 
    /* Reinsert the cloned vars back where they came from */
    nir_cf_reinsert(&lcssa_list, start_cursor);
@@ -560,9 +557,9 @@ wrapper_unroll(nir_loop *loop)
        * statements that are converted to a loop to take advantage of
        * exiting jump instruction handling. In this case we could make
        * use of a binary seach pattern like we do in
-       * nir_lower_indirect_derefs(), this should allow us to unroll the
-       * loops in an optimal way and should also avoid some of the
-       * register pressure that comes from simply nesting the
+       * nir_lower_indirect_derefs_to_if_else_trees(), this should allow us
+       * to unroll the loops in an optimal way and should also avoid some of
+       * the register pressure that comes from simply nesting the
        * terminators one after the other.
        */
       if (list_length(&loop->info->loop_terminator_list) > 3)
@@ -590,9 +587,7 @@ wrapper_unroll(nir_loop *loop)
          nir_cf_reinsert(&loop_body,
                          nir_after_block(terminator->continue_from_block));
 
-         loop_end = terminator->continue_from_then ?
-           nir_after_block(nir_if_last_then_block(terminator->nif)) :
-           nir_after_block(nir_if_last_else_block(terminator->nif));
+         loop_end = terminator->continue_from_then ? nir_after_block(nir_if_last_then_block(terminator->nif)) : nir_after_block(nir_if_last_else_block(terminator->nif));
       }
    } else {
       loop_prepare_for_unroll(loop);
@@ -632,13 +627,26 @@ is_access_out_of_bounds(nir_loop_terminator *term, nir_deref_instr *deref,
 
       /* We have already unrolled the loop and the new one will be imbedded in
        * the innermost continue branch. So unless the array is greater than
-       * the trip count any iteration over the loop will be an out of bounds
-       * access of the array.
+       * the initial value plus the trip count any iteration over the loop
+       * will be an out of bounds access of the array.
        */
-      unsigned length = glsl_type_is_vector(parent->type) ?
-                        glsl_get_vector_elements(parent->type) :
-                        glsl_get_length(parent->type);
-      return length <= trip_count;
+      unsigned length = glsl_type_is_vector(parent->type) ? glsl_get_vector_elements(parent->type) : glsl_get_length(parent->type);
+      unsigned init_value = nir_src_is_const(*term->init_src) ?
+                            nir_src_as_uint(*term->init_src) : 0;
+      return length <= init_value + trip_count;
+   }
+
+   return false;
+}
+
+static bool
+comparison_contains_instr(nir_scalar cond_scalar, nir_instr *instr)
+{
+   if (nir_is_terminator_condition_with_two_inputs(cond_scalar)) {
+      nir_alu_instr *comparison =
+         nir_def_as_alu(cond_scalar.def);
+      return nir_def_instr(comparison->src[0].src.ssa) == instr ||
+             nir_def_instr(comparison->src[1].src.ssa) == instr;
    }
 
    return false;
@@ -662,8 +670,7 @@ remove_out_of_bounds_induction_use(nir_shader *shader, nir_loop *loop,
    nir_cf_reinsert(lp_header, nir_after_block(nir_loop_last_block(loop)));
    nir_cf_reinsert(lp_body, nir_after_block(nir_loop_last_block(loop)));
 
-   nir_builder b;
-   nir_builder_init(&b, nir_cf_node_get_function(&loop->cf_node));
+   nir_builder b = nir_builder_create(nir_cf_node_get_function(&loop->cf_node));
 
    nir_foreach_block_in_cf_node(block, &loop->cf_node) {
       nir_foreach_instr_safe(instr, block) {
@@ -685,11 +692,41 @@ remove_out_of_bounds_induction_use(nir_shader *shader, nir_loop *loop,
             if (is_access_out_of_bounds(term, nir_src_as_deref(intrin->src[0]),
                                         trip_count)) {
                if (intrin->intrinsic == nir_intrinsic_load_deref) {
-                  nir_ssa_def *undef =
-                     nir_ssa_undef(&b, intrin->dest.ssa.num_components,
-                                   intrin->dest.ssa.bit_size);
-                  nir_ssa_def_rewrite_uses(&intrin->dest.ssa,
-                                           undef);
+                  nir_alu_instr *term_alu =
+                     nir_def_as_alu(term->nif->condition.ssa);
+                  b.cursor = nir_before_def(term->nif->condition.ssa);
+
+                  /* If the out of bounds load is used in the comparison of the
+                   * loop terminator replace the condition with true so that the
+                   * loop can be removed.
+                   */
+                  bool exit_on_true = !term->continue_from_then;
+                  if (term_alu->op == nir_op_ior && exit_on_true) {
+                     nir_scalar src0_cond_scalar = { term_alu->src[0].src.ssa, 0 };
+                     nir_scalar src1_cond_scalar = { term_alu->src[1].src.ssa, 0 };
+
+                     bool replaced_comparison = false;
+                     if (comparison_contains_instr(src0_cond_scalar, instr)) {
+                        nir_def *t = nir_imm_true(&b);
+                        nir_def_rewrite_uses(term_alu->src[0].src.ssa, t);
+                        replaced_comparison = true;
+                     }
+
+                     if (comparison_contains_instr(src1_cond_scalar, instr)) {
+                        nir_def *t = nir_imm_true(&b);
+                        nir_def_rewrite_uses(term_alu->src[1].src.ssa, t);
+                        replaced_comparison = true;
+                     }
+
+                     if (replaced_comparison)
+                        continue;
+                  }
+
+                  nir_def *undef =
+                     nir_undef(&b, intrin->def.num_components,
+                               intrin->def.bit_size);
+                  nir_def_rewrite_uses(&intrin->def,
+                                       undef);
                } else {
                   nir_instr_remove(instr);
                   continue;
@@ -715,13 +752,13 @@ remove_out_of_bounds_induction_use(nir_shader *shader, nir_loop *loop,
 /* Partially unrolls loops that don't have a known trip count.
  */
 static void
-partial_unroll(nir_shader *shader, nir_loop *loop, unsigned trip_count)
+partial_unroll(nir_function_impl *impl, nir_loop *loop, unsigned trip_count)
 {
-   assert(list_length(&loop->info->loop_terminator_list) == 1);
+   assert(list_is_singular(&loop->info->loop_terminator_list));
 
    nir_loop_terminator *terminator =
       list_first_entry(&loop->info->loop_terminator_list,
-                        nir_loop_terminator, loop_terminator_link);
+                       nir_loop_terminator, loop_terminator_link);
 
    assert(nir_is_trivial_loop_if(terminator->nif, terminator->break_block));
 
@@ -742,7 +779,7 @@ partial_unroll(nir_shader *shader, nir_loop *loop, unsigned trip_count)
                                remap_table, trip_count);
 
    /* Attempt to remove out of bounds array access */
-   remove_out_of_bounds_induction_use(shader, loop, terminator, &lp_header,
+   remove_out_of_bounds_induction_use(impl->function->shader, loop, terminator, &lp_header,
                                       &lp_body, trip_count);
 
    nir_cursor cursor =
@@ -752,7 +789,7 @@ partial_unroll(nir_shader *shader, nir_loop *loop, unsigned trip_count)
    /* Reinsert the loop in the innermost nested continue branch of the unrolled
     * loop.
     */
-   nir_loop *new_loop = nir_loop_create(shader);
+   nir_loop *new_loop = nir_loop_create(impl);
    nir_cf_node_insert(cursor, &new_loop->cf_node);
    new_loop->partially_unrolled = true;
 
@@ -767,13 +804,9 @@ partial_unroll(nir_shader *shader, nir_loop *loop, unsigned trip_count)
                                   remap_table);
 
    /* Insert break back into terminator */
-   nir_jump_instr *brk = nir_jump_instr_create(shader, nir_jump_break);
-   nir_if *nif = nir_block_get_following_if(nir_loop_first_block(new_loop));
-   if (terminator->continue_from_then) {
-      nir_instr_insert_after_block(nir_if_last_else_block(nif), &brk->instr);
-   } else {
-      nir_instr_insert_after_block(nir_if_last_then_block(nif), &brk->instr);
-   }
+   nir_jump_instr *brk = nir_jump_instr_create(impl->function->shader, nir_jump_break);
+   nir_block *break_block = _mesa_hash_table_search(remap_table, terminator->break_block)->data;
+   nir_instr_insert_after_block(break_block, &brk->instr);
 
    /* Delete the original loop header and body */
    nir_cf_delete(&lp_header);
@@ -797,7 +830,9 @@ is_indirect_load(nir_instr *instr)
          return true;
       }
 
-      if (intrin->intrinsic == nir_intrinsic_load_global)
+      if (intrin->intrinsic == nir_intrinsic_load_global ||
+          intrin->intrinsic == nir_intrinsic_load_global_transpose_amd ||
+          intrin->intrinsic == nir_intrinsic_load_deref_transpose_amd)
          return true;
 
       if (intrin->intrinsic == nir_intrinsic_load_deref ||
@@ -807,8 +842,7 @@ is_indirect_load(nir_instr *instr)
          if (!nir_deref_mode_may_be(deref, mem_modes))
             return false;
          while (deref) {
-            if ((deref->deref_type == nir_deref_type_array ||
-                 deref->deref_type == nir_deref_type_ptr_as_array) &&
+            if (nir_deref_instr_is_arr(deref) &&
                 !nir_src_is_const(deref->arr.index)) {
                return true;
             }
@@ -875,6 +909,9 @@ check_unrolling_restrictions(nir_shader *shader, nir_loop *loop)
    /* Unroll much more aggressively if it can hide load latency. */
    if (shader->options->max_unroll_iterations_aggressive && can_pipeline_loads(loop))
       max_iter = shader->options->max_unroll_iterations_aggressive;
+   /* Unroll much more aggressively if all control flow gets eliminated. */
+   if (shader->options->max_unroll_iterations_aggressive && li->flattens_all_control_flow)
+      max_iter = shader->options->max_unroll_iterations_aggressive;
    /* Tune differently if the loop has double ops and soft fp64 is in use */
    else if (shader->options->max_unroll_iterations_fp64 && loop->info->has_soft_fp64)
       max_iter = shader->options->max_unroll_iterations_fp64;
@@ -894,11 +931,12 @@ check_unrolling_restrictions(nir_shader *shader, nir_loop *loop)
 }
 
 static bool
-process_loops(nir_shader *sh, nir_cf_node *cf_node, bool *has_nested_loop_out,
+process_loops(nir_function_impl *impl, nir_cf_node *cf_node, bool *has_nested_loop_out,
               bool *unrolled_this_block);
 
 static bool
-process_loops_in_block(nir_shader *sh, struct exec_list *block,
+process_loops_in_block(nir_function_impl *impl,
+                       struct exec_list *block,
                        bool *has_nested_loop_out)
 {
    /* We try to unroll as many loops in one pass as possible.
@@ -930,7 +968,7 @@ process_loops_in_block(nir_shader *sh, struct exec_list *block,
    bool unrolled_this_block = false;
 
    foreach_list_typed(nir_cf_node, nested_node, node, block) {
-      if (process_loops(sh, nested_node,
+      if (process_loops(impl, nested_node,
                         has_nested_loop_out, &unrolled_this_block)) {
          progress = true;
 
@@ -949,7 +987,7 @@ process_loops_in_block(nir_shader *sh, struct exec_list *block,
 }
 
 static bool
-process_loops(nir_shader *sh, nir_cf_node *cf_node, bool *has_nested_loop_out,
+process_loops(nir_function_impl *impl, nir_cf_node *cf_node, bool *has_nested_loop_out,
               bool *unrolled_this_block)
 {
    bool progress = false;
@@ -961,20 +999,21 @@ process_loops(nir_shader *sh, nir_cf_node *cf_node, bool *has_nested_loop_out,
       return progress;
    case nir_cf_node_if: {
       nir_if *if_stmt = nir_cf_node_as_if(cf_node);
-      progress |= process_loops_in_block(sh, &if_stmt->then_list,
+      progress |= process_loops_in_block(impl, &if_stmt->then_list,
                                          has_nested_loop_out);
-      progress |= process_loops_in_block(sh, &if_stmt->else_list,
+      progress |= process_loops_in_block(impl, &if_stmt->else_list,
                                          has_nested_loop_out);
       return progress;
    }
    case nir_cf_node_loop: {
       loop = nir_cf_node_as_loop(cf_node);
-      progress |= process_loops_in_block(sh, &loop->body, &has_nested_loop);
+      assert(!nir_loop_has_continue_construct(loop));
+      progress |= process_loops_in_block(impl, &loop->body, &has_nested_loop);
 
       break;
    }
    default:
-      unreachable("unknown cf node type");
+      UNREACHABLE("unknown cf node type");
    }
 
    const bool unrolled_child_block = progress;
@@ -1002,9 +1041,7 @@ process_loops(nir_shader *sh, nir_cf_node *cf_node, bool *has_nested_loop_out,
                 * We trust that nir_opt_if() does its job well enough to
                 * remove all instructions from the continue block when possible.
                 */
-               nir_block *first_continue_from_blk = t->continue_from_then ?
-                  nir_if_first_then_block(t->nif) :
-                  nir_if_first_else_block(t->nif);
+               nir_block *first_continue_from_blk = t->continue_from_then ? nir_if_first_then_block(t->nif) : nir_if_first_else_block(t->nif);
 
                if (!(nir_cf_node_is_last(&first_continue_from_blk->cf_node) &&
                      exec_list_is_empty(&first_continue_from_blk->instr_list)))
@@ -1042,19 +1079,21 @@ process_loops(nir_shader *sh, nir_cf_node *cf_node, bool *has_nested_loop_out,
          /* If we were able to guess the loop iteration based on array access
           * then do a partial unroll.
           */
-         unsigned num_lt = list_length(&loop->info->loop_terminator_list);
-         if (!has_nested_loop && num_lt == 1 && !loop->partially_unrolled &&
+         bool one_lt = list_is_singular(&loop->info->loop_terminator_list);
+         if (!has_nested_loop && one_lt && !loop->partially_unrolled &&
              loop->info->guessed_trip_count &&
-             check_unrolling_restrictions(sh, loop)) {
-            partial_unroll(sh, loop, loop->info->guessed_trip_count);
+             check_unrolling_restrictions(impl->function->shader, loop)) {
+            partial_unroll(impl, loop, loop->info->guessed_trip_count);
             progress = true;
          }
       }
 
-      /* Intentionally don't consider exact_trip_count_known here.  When
-       * max_trip_count is non-zero, it is the upper bound on the number of
-       * times the loop will iterate, but the loop may iterate less.  For
-       * example, the following loop will iterate 0 or 1 time:
+      /* Check whether the loop breaks after the first iteration.
+       * If exact_trip_count_known, this is the case if max_trip_count is
+       * either 1 or 0 (after loop peeling), respectively.  Otherwise, if
+       * max_trip_count is non-zero, it is the upper bound on the number
+       * of times the loop will iterate, but the loop may iterate less.
+       * For example, the following loop will iterate 0 or 1 time:
        *
        *    for (i = 0; i < min(x, 1); i++) { ... }
        *
@@ -1065,16 +1104,16 @@ process_loops(nir_shader *sh, nir_cf_node *cf_node, bool *has_nested_loop_out,
        * If the loop is known to execute at most once and meets the other
        * unrolling criteria, unroll it even if it has nested loops.
        *
-       * It is unlikely that such loops exist in real shaders. GraphicsFuzz is
-       * known to generate spurious loops that iterate exactly once.  It is
-       * plausible that it could eventually start generating loops like the
-       * example above, so it seems logical to defend against it now.
        */
+      bool breaks_after_first_iteration =
+         loop->info->max_trip_count == 1 ||
+         (loop->info->exact_trip_count_known && loop->info->max_trip_count <= 1);
+
       if (!loop->info->limiting_terminator ||
-          (loop->info->max_trip_count != 1 && has_nested_loop))
+          (!breaks_after_first_iteration && has_nested_loop))
          goto exit;
 
-      if (!check_unrolling_restrictions(sh, loop))
+      if (!check_unrolling_restrictions(impl->function->shader, loop))
          goto exit;
 
       if (loop->info->exact_trip_count_known) {
@@ -1089,7 +1128,6 @@ process_loops(nir_shader *sh, nir_cf_node *cf_node, bool *has_nested_loop_out,
             nir_loop_terminator *terminator =
                list_first_entry(&loop->info->loop_terminator_list,
                                 nir_loop_terminator, loop_terminator_link);
-
 
             if (terminator->nif == loop->info->limiting_terminator->nif) {
                limiting_term_second = false;
@@ -1133,18 +1171,18 @@ nir_opt_loop_unroll_impl(nir_function_impl *impl,
 {
    bool progress = false;
    nir_metadata_require(impl, nir_metadata_loop_analysis, indirect_mask,
-                        (int) force_unroll_sampler_indirect);
+                        (int)force_unroll_sampler_indirect);
    nir_metadata_require(impl, nir_metadata_block_index);
 
    bool has_nested_loop = false;
-   progress |= process_loops_in_block(impl->function->shader, &impl->body,
+   progress |= process_loops_in_block(impl, &impl->body,
                                       &has_nested_loop);
 
    if (progress) {
-      nir_metadata_preserve(impl, nir_metadata_none);
-      nir_lower_regs_to_ssa_impl(impl);
+      nir_progress(true, impl, nir_metadata_none);
+      nir_lower_reg_intrinsics_to_ssa_impl(impl);
    } else {
-      nir_metadata_preserve(impl, nir_metadata_all);
+      nir_no_progress(impl);
    }
 
    return progress;
@@ -1161,11 +1199,9 @@ nir_opt_loop_unroll(nir_shader *shader)
 
    bool force_unroll_sampler_indirect = shader->options->force_indirect_unrolling_sampler;
    nir_variable_mode indirect_mask = shader->options->force_indirect_unrolling;
-   nir_foreach_function(function, shader) {
-      if (function->impl) {
-         progress |= nir_opt_loop_unroll_impl(function->impl, indirect_mask,
-                                              force_unroll_sampler_indirect);
-      }
+   nir_foreach_function_impl(impl, shader) {
+      progress |= nir_opt_loop_unroll_impl(impl, indirect_mask,
+                                           force_unroll_sampler_indirect);
    }
    return progress;
 }

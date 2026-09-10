@@ -24,11 +24,7 @@
 
 #include "util/u_math.h"
 
-#include "adreno_common.xml.h"
-#include "adreno_pm4.xml.h"
-#include "freedreno_pm4.h"
-
-#include "a6xx.xml.h"
+#include "fd6_hw.h"
 #include "common/freedreno_dev_info.h"
 
 #include "util/hash_table.h"
@@ -82,19 +78,27 @@ print_usage(const char *name)
 {
    /* clang-format off */
    fprintf(stderr, "Usage:\n\n"
-           "\t%s [OPTSIONS]... FILE...\n\n"
+           "\t%s [OPTIONS]... FILE...\n\n"
            "Options:\n"
            "\t-s, --submit=№   - № of the submit to decompile\n"
+           "\t--no-reg-bunch   - Use pkt4 for each reg in CP_CONTEXT_REG_BUNCH\n"
            "\t-h, --help       - show this message\n"
            , name);
    /* clang-format on */
    exit(2);
 }
 
+struct decompiler_options {
+   int no_reg_bunch;
+};
+
+static struct decompiler_options options = {};
+
 /* clang-format off */
 static const struct option opts[] = {
-      { "submit",    required_argument, 0, 's' },
-      { "help",      no_argument,       0, 'h' },
+      { "submit",       required_argument,   0, 's' },
+      { "no-reg-bunch", no_argument,         &options.no_reg_bunch, 1 },
+      { "help",         no_argument,         0, 'h' },
 };
 /* clang-format on */
 
@@ -159,14 +163,22 @@ pktname(unsigned opc)
 }
 
 static uint32_t
-decompile_shader(const char *name, uint32_t regbase, uint32_t *dwords, int level)
+decompile_shader(const char *name, uint32_t regbase, const uint32_t *dwords,
+                 int level, bool in_reg_bunch)
 {
    uint64_t gpuaddr = ((uint64_t)dwords[1] << 32) | dwords[0];
    gpuaddr &= 0xfffffffffffffff0;
 
    /* Shader's iova is referenced in two places, so we have to remember it. */
    if (_mesa_set_search(&decompiled_shaders, &gpuaddr)) {
-      printlvl(level, "emit_shader_iova(&ctx, cs, 0x%" PRIx64 ");\n", gpuaddr);
+      if (in_reg_bunch) {
+         printlvl(level,
+                  "emit_shader_iova_reg_bunch(&ctx, cs, 0x%04x, 0x%" PRIx64 ");\n",
+                  regbase, gpuaddr);
+      } else {
+         printlvl(level, "emit_shader_iova(&ctx, cs, 0x%" PRIx64 ");\n",
+                  gpuaddr);
+      }
    } else {
       uint64_t *key = ralloc(mem_ctx, uint64_t);
       *key = gpuaddr;
@@ -181,7 +193,7 @@ decompile_shader(const char *name, uint32_t regbase, uint32_t *dwords, int level
       size_t stream_size = 0;
       FILE *stream = open_memstream(&stream_data, &stream_size);
 
-      try_disasm_a3xx(buf, sizedwords, 0, stream, dev_id.gpu_id);
+      try_disasm_a3xx(buf, sizedwords, 0, stream, fd_dev_gen(&dev_id) * 100);
       fclose(stream);
 
       printlvl(level, "{\n");
@@ -189,7 +201,14 @@ decompile_shader(const char *name, uint32_t regbase, uint32_t *dwords, int level
       printf("%s", stream_data);
       printlvl(level + 1, ")\";\n");
       printlvl(level + 1, "upload_shader(&ctx, 0x%" PRIx64 ", source);\n", gpuaddr);
-      printlvl(level + 1, "emit_shader_iova(&ctx, cs, 0x%" PRIx64 ");\n", gpuaddr);
+      if (in_reg_bunch) {
+         printlvl(level + 1,
+                  "emit_shader_iova_reg_bunch(&ctx, cs, 0x%04x, 0x%" PRIx64 ");\n",
+                  regbase, gpuaddr);
+      } else {
+         printlvl(level + 1, "emit_shader_iova(&ctx, cs, 0x%" PRIx64 ");\n",
+                  gpuaddr);
+      }
       printlvl(level, "}\n");
       free(stream_data);
    }
@@ -199,26 +218,28 @@ decompile_shader(const char *name, uint32_t regbase, uint32_t *dwords, int level
 
 static struct {
    uint32_t regbase;
-   uint32_t (*fxn)(const char *name, uint32_t regbase, uint32_t *dwords, int level);
+   uint32_t (*fxn)(const char *name, uint32_t regbase, const uint32_t *dwords,
+                   int level, bool in_reg_bunch);
 } reg_a6xx[] = {
-   {REG_A6XX_SP_VS_OBJ_START, decompile_shader},
-   {REG_A6XX_SP_HS_OBJ_START, decompile_shader},
-   {REG_A6XX_SP_DS_OBJ_START, decompile_shader},
-   {REG_A6XX_SP_GS_OBJ_START, decompile_shader},
-   {REG_A6XX_SP_FS_OBJ_START, decompile_shader},
-   {REG_A6XX_SP_CS_OBJ_START, decompile_shader},
+   {REG_A6XX_SP_VS_BASE, decompile_shader},
+   {REG_A6XX_SP_HS_BASE, decompile_shader},
+   {REG_A6XX_SP_DS_BASE, decompile_shader},
+   {REG_A6XX_SP_GS_BASE, decompile_shader},
+   {REG_A6XX_SP_PS_BASE, decompile_shader},
+   {REG_A6XX_SP_CS_BASE, decompile_shader},
 
    {0, NULL},
 }, *type0_reg;
 
 static uint32_t
-decompile_register(uint32_t regbase, uint32_t *dwords, uint16_t cnt, int level)
+decompile_register(uint32_t regbase, const uint32_t *dwords, uint16_t cnt,
+                   int level)
 {
    struct rnndecaddrinfo *info = rnn_reginfo(rnn, regbase);
 
    for (unsigned idx = 0; type0_reg[idx].regbase; idx++) {
       if (type0_reg[idx].regbase == regbase) {
-         return type0_reg[idx].fxn(info->name, regbase, dwords, level);
+         return type0_reg[idx].fxn(info->name, regbase, dwords, level, false);
       }
    }
 
@@ -229,11 +250,12 @@ decompile_register(uint32_t regbase, uint32_t *dwords, uint16_t cnt, int level)
       printlvl(level, "/* pkt4: %s = %s */\n", info->name, decoded);
 
       if (cnt == 0) {
-         printlvl(level, "pkt(cs, %u);\n", dword);
+         printlvl(level, "pkt(cs, 0x%x);\n", dword);
       } else {
-         char reg_name[32];
-         char field_name[32];
-         char reg_idx[32];
+#if 0
+         char reg_name[33];
+         char field_name[33];
+         char reg_idx[33];
 
          /* reginfo doesn't return reg name in a compilable format, for now just
           * parse it into a compilable reg name.
@@ -247,10 +269,16 @@ decompile_register(uint32_t regbase, uint32_t *dwords, uint16_t cnt, int level)
             printlvl(level, "pkt4(cs, REG_%s_%s_%s(%s), (%u), %u);\n",
                      rnn->variant, reg_name, field_name, reg_idx, cnt, dword);
          }
+#else
+         /* TODO: We don't have easy way to get chip generation prefix,
+          * so just emit raw packet offset as a workaround.
+          */
+         printlvl(level, "pkt4(cs, 0x%04x, (%u), 0x%x);\n", regbase, cnt, dword);
+#endif
       }
    } else {
       printlvl(level, "/* unknown pkt4 */\n");
-      printlvl(level, "pkt4(cs, %u, (%u), %u);\n", regbase, cnt, dword);
+      printlvl(level, "pkt4(cs, 0x%04x, (%u), 0x%x);\n", regbase, 1, dword);
    }
 
    rnn_reginfo_free(info);
@@ -258,9 +286,86 @@ decompile_register(uint32_t regbase, uint32_t *dwords, uint16_t cnt, int level)
    return 1;
 }
 
+static uint32_t
+decompile_register_reg_bunch(uint32_t regbase, const uint32_t *dwords,
+                             uint16_t cnt, bool as_reg_bunch, int level)
+{
+   struct rnndecaddrinfo *info = rnn_reginfo(rnn, regbase);
+   uint64_t value = dwords[0];
+   if (cnt > 1)
+      value |= (uint64_t)dwords[1] << 32;
+
+   for (unsigned idx = 0; type0_reg[idx].regbase; idx++) {
+      if (type0_reg[idx].regbase == regbase) {
+         if (!as_reg_bunch) {
+            printlvl(level, "pkt(cs, pm4_pkt4_hdr(0x%04x, %u));\n", regbase,
+                     cnt);
+         }
+         type0_reg[idx].fxn(info ? info->name : NULL, regbase, dwords, level,
+                            as_reg_bunch);
+         rnn_reginfo_free(info);
+         return cnt;
+      }
+   }
+
+   if (info && info->typeinfo) {
+      char *decoded = rnndec_decodeval(rnn->vc, info->typeinfo, value);
+      printlvl(level, "/* reg: %s = %s */\n", info->name, decoded);
+   } else {
+      printlvl(level, "/* unknown pkt4 */\n");
+   }
+
+   if (as_reg_bunch) {
+      for (uint32_t i = 0; i < cnt; i++) {
+         printlvl(level, "pkt(cs, 0x%04x);\n", regbase + i);
+         printlvl(level, "pkt(cs, 0x%x);\n", dwords[i]);
+      }
+   } else {
+      printlvl(level, "pkt4(cs, 0x%04x, (%u), 0x%x);\n", regbase, cnt,
+               dwords[0]);
+      if (cnt == 2) {
+         printlvl(level, "pkt(cs, 0x%x);\n", dwords[1]);
+      }
+   }
+
+   rnn_reginfo_free(info);
+
+   return cnt;
+}
+
+static bool
+reg_is_64b(uint32_t regbase)
+{
+   struct rnndecaddrinfo *info = rnn_reginfo(rnn, regbase);
+   bool reg64 = info && info->width == 64;
+   rnn_reginfo_free(info);
+   return reg64;
+}
+
+static uint32_t
+decompile_bunch_register(const uint32_t *dw, uint32_t dwords_left,
+                         bool no_reg_bunch, int level)
+{
+   if (dwords_left < 2)
+      return dwords_left;
+
+   const uint32_t regbase = dw[0];
+   uint16_t reg_cnt = 1;
+   uint32_t values[2] = {dw[1], 0};
+
+   if (dwords_left >= 4 && reg_is_64b(regbase)) {
+      reg_cnt = 2;
+      values[1] = dw[3];
+   }
+
+   decompile_register_reg_bunch(regbase, values, reg_cnt, !no_reg_bunch, level);
+
+   return reg_cnt * 2;
+}
+
 static void
-decompile_registers(uint32_t regbase, uint32_t *dwords, uint32_t sizedwords,
-                    int level)
+decompile_registers(uint32_t regbase, const uint32_t *dwords,
+                    uint32_t sizedwords, int level)
 {
    if (!sizedwords)
       return;
@@ -275,7 +380,7 @@ decompile_registers(uint32_t regbase, uint32_t *dwords, uint32_t sizedwords,
 }
 
 static void
-decompile_domain(uint32_t pkt, uint32_t *dwords, uint32_t sizedwords,
+decompile_domain(uint32_t pkt, const uint32_t *dwords, uint32_t sizedwords,
                  const char *dom_name, const char *packet_name, int level)
 {
    struct rnndomain *dom;
@@ -287,16 +392,14 @@ decompile_domain(uint32_t pkt, uint32_t *dwords, uint32_t sizedwords,
 
    if (pkt == CP_LOAD_STATE6_FRAG || pkt == CP_LOAD_STATE6_GEOM) {
       enum a6xx_state_type state_type =
-         (dwords[0] & CP_LOAD_STATE6_0_STATE_TYPE__MASK) >>
-         CP_LOAD_STATE6_0_STATE_TYPE__SHIFT;
+         pkt_field_get(CP_LOAD_STATE6_0_STATE_TYPE, dwords[0]);
       enum a6xx_state_src state_src =
-         (dwords[0] & CP_LOAD_STATE6_0_STATE_SRC__MASK) >>
-         CP_LOAD_STATE6_0_STATE_SRC__SHIFT;
+         pkt_field_get(CP_LOAD_STATE6_0_STATE_SRC, dwords[0]);
 
       /* TODO: decompile all other state */
       if (state_type == ST6_SHADER && state_src == SS6_INDIRECT) {
-         printlvl(level, "pkt(cs, %u);\n", dwords[0]);
-         decompile_shader(NULL, 0, dwords + 1, level);
+         printlvl(level, "pkt(cs, 0x%x);\n", dwords[0]);
+         decompile_shader(NULL, 0, dwords + 1, level, false);
          return;
       }
    }
@@ -309,18 +412,22 @@ decompile_domain(uint32_t pkt, uint32_t *dwords, uint32_t sizedwords,
 
       char *decoded;
       if (!(info && info->typeinfo)) {
-         printlvl(level, "pkt(cs, %u);\n", dwords[i]);
+         printlvl(level, "pkt(cs, 0x%x);\n", dwords[i]);
          continue;
       }
       uint64_t value = dwords[i];
-      if (info->typeinfo->high >= 32 && i < sizedwords - 1) {
+      bool reg64 = info->typeinfo->high >= 32 && i < sizedwords - 1;
+      if (reg64) {
          value |= (uint64_t)dwords[i + 1] << 32;
-         i++; /* skip the next dword since we're printing it now */
       }
       decoded = rnndec_decodeval(rnn->vc, info->typeinfo, value);
 
       printlvl(level, "/* %s */\n", decoded);
-      printlvl(level, "pkt(cs, %u);\n", dwords[i]);
+      printlvl(level, "pkt(cs, 0x%x);\n", dwords[i]);
+      if (reg64) {
+         printlvl(level, "pkt(cs, 0x%x);\n", dwords[i + 1]);
+         i++;
+      }
 
       free(decoded);
       free(info->name);
@@ -329,7 +436,8 @@ decompile_domain(uint32_t pkt, uint32_t *dwords, uint32_t sizedwords,
 }
 
 static void
-decompile_commands(uint32_t *dwords, uint32_t sizedwords, int level)
+decompile_commands(const uint32_t *dwords, uint32_t sizedwords, int level,
+                   uint32_t *cond_count)
 {
    int dwords_left = sizedwords;
    uint32_t count = 0; /* dword count including packet header */
@@ -355,10 +463,8 @@ decompile_commands(uint32_t *dwords, uint32_t sizedwords, int level)
             printlvl(level, "{\n");
             printlvl(level + 1, "begin_ib();\n");
 
-            if (!has_dumped(ibaddr, 0x7)) {
-               uint32_t *ptr = hostptr(ibaddr);
-               decompile_commands(ptr, ibsize, level + 1);
-            }
+            uint32_t *ptr = hostptr(ibaddr);
+            decompile_commands(ptr, ibsize, level + 1, NULL);
 
             printlvl(level + 1, "end_ib();\n");
             printlvl(level, "}\n");
@@ -374,7 +480,7 @@ decompile_commands(uint32_t *dwords, uint32_t sizedwords, int level)
                   printlvl(level + 1, "begin_draw_state();\n");
 
                   uint32_t *ptr = hostptr(ibaddr);
-                  decompile_commands(ptr, state_count, level + 1);
+                  decompile_commands(ptr, state_count, level + 1, NULL);
 
                   printlvl(level + 1, "end_draw_state(%u);\n", unchanged);
                   printlvl(level, "}\n");
@@ -382,6 +488,84 @@ decompile_commands(uint32_t *dwords, uint32_t sizedwords, int level)
                   decompile_domain(val, dwords + i, 3, "CP_SET_DRAW_STATE",
                                    "CP_SET_DRAW_STATE", level);
                }
+            }
+         } else if (val == CP_CONTEXT_REG_BUNCH || val == CP_NON_CONTEXT_REG_BUNCH) {
+            const uint32_t *dw = dwords + 1;
+            uint32_t cnt = count - 1;
+
+            if (val == CP_NON_CONTEXT_REG_BUNCH) {
+               if (options.no_reg_bunch) {
+                  printlvl(level, "// CP_NON_CONTEXT_REG_BUNCH\n");
+                  printlvl(level, "{\n");
+               } else {
+                  printlvl(level, "pkt7(cs, %s, %u);\n", "CP_NON_CONTEXT_REG_BUNCH", cnt);
+                  printlvl(level, "{\n");
+                  printlvl(level + 1, "pkt(cs, 0x%x);\n", dw[0]);
+                  printlvl(level + 1, "pkt(cs, 0x%x);\n", dw[1]);
+               }
+
+               dw += 2;
+               cnt -= 2;
+            } else {
+               if (options.no_reg_bunch) {
+                  printlvl(level, "// CP_CONTEXT_REG_BUNCH\n");
+                  printlvl(level, "{\n");
+               } else {
+                  printlvl(level, "pkt7(cs, %s, %u);\n", "CP_CONTEXT_REG_BUNCH", cnt);
+                  printlvl(level, "{\n");
+               }
+            }
+
+            for (uint32_t i = 0; i < cnt;) {
+               uint32_t consumed = decompile_bunch_register(
+                  &dw[i], cnt - i, options.no_reg_bunch, level + 1);
+               i += consumed;
+            }
+            printlvl(level, "}\n");
+         } else if (val == CP_COND_REG_EXEC) {
+            const char *packet_name = pktname(val);
+            const char *dom_name = packet_name;
+            uint32_t cond_count = dwords[count - 1];
+
+            decompile_domain(val, dwords + 1, count - 1, dom_name, packet_name, level);
+
+            printlvl(level, "{\n");
+            printlvl(level + 1, "/* BEGIN COND (%d DWORDS) */\n", cond_count);
+
+            decompile_commands(dwords + count, cond_count, level + 1, &cond_count);
+            count += cond_count;
+
+            printlvl(level + 1, "/* END COND */\n");
+            printlvl(level, "}\n");
+         } else if (val == CP_NOP) {
+            /* Prop will often use NOP past the end of cond execs
+             * which basically create an else path for the cond exec
+             */
+            const char *packet_name = pktname(val);
+            const char *dom_name = packet_name;
+
+            if (count > dwords_left) {
+               int else_cond_count = count - dwords_left;
+
+               assert(cond_count);
+               *cond_count += else_cond_count;
+
+               printlvl(level, "pkt7(cs, %s, %u);\n", packet_name, count - 1);
+               for (int i = 1; i < dwords_left; i++) {
+                  printlvl(level, "pkt(cs, 0x%x);\n", dwords[i]);
+               }
+
+               printlvl(level, "/* TO ELSE COND */\n");
+               printlvl(level - 1, "}\n");
+
+               printlvl(level - 1, "{\n");
+               printlvl(level, "/* ELSE COND (%d DWORDS) */\n", else_cond_count);
+               decompile_commands(dwords + dwords_left, else_cond_count, level, NULL);
+
+               return;
+            } else {
+               decompile_domain(val, dwords + 1, count - 1, dom_name, packet_name,
+                                level);
             }
          } else {
             const char *packet_name = pktname(val);
@@ -414,7 +598,7 @@ decompile_commands(uint32_t *dwords, uint32_t sizedwords, int level)
 static void
 emit_header()
 {
-   if (!dev_id.gpu_id || !dev_id.chip_id)
+   if (!dev_id.gpu_id && !dev_id.chip_id)
       return;
 
    static bool emitted = false;
@@ -422,26 +606,28 @@ emit_header()
       return;
    emitted = true;
 
+   switch (fd_dev_gen(&dev_id)) {
+   case 6:
+      init_rnn("a6xx");
+      break;
+   case 7:
+      init_rnn("a7xx");
+      break;
+   case 8:
+      init_rnn("a8xx");
+      break;
+   default:
+      errx(-1, "unsupported gpu: %u", dev_id.gpu_id);
+   }
+
    printf("#include \"decode/rdcompiler-utils.h\"\n"
           "int main(int argc, char **argv)\n"
           "{\n"
           "\tstruct replay_context ctx;\n"
-          "\tstruct fd_dev_id dev_id = {%u, %" PRIu64 "};\n"
+          "\tstruct fd_dev_id dev_id = {%u, 0x%" PRIx64 "};\n"
           "\treplay_context_init(&ctx, &dev_id, argc, argv);\n"
           "\tstruct cmdstream *cs = ctx.submit_cs;\n\n",
           dev_id.gpu_id, dev_id.chip_id);
-}
-
-static inline uint32_t
-u64_hash(const void *key)
-{
-   return _mesa_hash_data(key, sizeof(uint64_t));
-}
-
-static inline bool
-u64_compare(const void *key1, const void *key2)
-{
-   return memcmp(key1, key2, sizeof(uint64_t)) == 0;
 }
 
 static int
@@ -462,10 +648,9 @@ handle_file(const char *filename, uint32_t submit_to_decompile)
       return -1;
    }
 
-   init_rnn("a6xx");
    type0_reg = reg_a6xx;
    mem_ctx = ralloc_context(NULL);
-   _mesa_set_init(&decompiled_shaders, mem_ctx, u64_hash, u64_compare);
+   _mesa_set_init(&decompiled_shaders, mem_ctx, _mesa_hash_u64, _mesa_key_u64_equal);
 
    struct {
       unsigned int len;
@@ -498,20 +683,23 @@ handle_file(const char *filename, uint32_t submit_to_decompile)
          parse_addr(ps.buf, ps.sz, &sizedwords, &gpuaddr);
 
          if (submit == submit_to_decompile) {
-            decompile_commands(hostptr(gpuaddr), sizedwords, 0);
+            decompile_commands(hostptr(gpuaddr), sizedwords, 0, NULL);
          }
 
+         needs_reset = true;
          submit++;
          break;
       }
       case RD_GPU_ID: {
          dev_id.gpu_id = parse_gpu_id(ps.buf);
-         emit_header();
+         if (fd_dev_info_raw(&dev_id))
+            emit_header();
          break;
       }
       case RD_CHIP_ID: {
-         dev_id.chip_id = *(uint64_t *)ps.buf;
-         emit_header();
+         dev_id.chip_id = parse_chip_id(ps.buf);
+         if (fd_dev_info_raw(&dev_id))
+            emit_header();
          break;
       }
       default:

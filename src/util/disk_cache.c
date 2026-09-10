@@ -42,10 +42,11 @@
 #include "util/u_debug.h"
 #include "util/rand_xor.h"
 #include "util/u_atomic.h"
-#include "util/mesa-sha1.h"
+#include "util/mesa-blake3.h"
 #include "util/perf/cpu_trace.h"
 #include "util/ralloc.h"
 #include "util/compiler.h"
+#include "util/log.h"
 
 #include "disk_cache.h"
 #include "disk_cache_os.h"
@@ -70,22 +71,41 @@ do {                                       \
    _dst += _src_size;                      \
 } while (0);
 
+static bool
+disk_cache_init_queue(struct disk_cache *cache)
+{
+   if (util_queue_is_initialized(&cache->cache_queue))
+      return true;
+
+   /* 4 threads were chosen below because just about all modern CPUs currently
+    * available that run Mesa have *at least* 4 cores. For these CPUs allowing
+    * more threads can result in the queue being processed faster, thus
+    * avoiding excessive memory use due to a backlog of cache entrys building
+    * up in the queue. Since we set the UTIL_QUEUE_INIT_USE_MINIMUM_PRIORITY
+    * flag this should have little negative impact on low core systems.
+    *
+    * The queue will resize automatically when it's full, so adding new jobs
+    * doesn't stall.
+    */
+   return util_queue_init(&cache->cache_queue, "disk$", 32, 4,
+                          UTIL_QUEUE_INIT_RESIZE_IF_FULL |
+                          UTIL_QUEUE_INIT_USE_MINIMUM_PRIORITY |
+                          UTIL_QUEUE_INIT_SET_FULL_THREAD_AFFINITY, NULL);
+}
+
 static struct disk_cache *
 disk_cache_type_create(const char *gpu_name,
                        const char *driver_id,
+                       const char *cache_dir_name,
                        uint64_t driver_flags,
-                       enum disk_cache_type cache_type)
+                       enum disk_cache_type cache_type,
+                       uint64_t max_size)
 {
    void *local;
    struct disk_cache *cache = NULL;
-   char *max_size_str;
-   uint64_t max_size;
 
    uint8_t cache_version = CACHE_VERSION;
    size_t cv_size = sizeof(cache_version);
-
-   if (!disk_cache_enabled())
-      return NULL;
 
    /* A ralloc context for transient data during this invocation. */
    local = ralloc_context(NULL);
@@ -98,17 +118,13 @@ disk_cache_type_create(const char *gpu_name,
 
    /* Assume failure. */
    cache->path_init_failed = true;
+   cache->type = DISK_CACHE_NONE;
 
-#ifdef ANDROID
-   /* Android needs the "disk cache" to be enabled for
-    * EGL_ANDROID_blob_cache's callbacks to be called, but it doesn't actually
-    * want any storing to disk to happen inside of the driver.
-    */
-   goto path_fail;
-#endif
+   if (!disk_cache_enabled())
+      goto path_fail;
 
-   char *path = disk_cache_generate_cache_dir(local, gpu_name, driver_id,
-                                              cache_type);
+   const char *path =
+      disk_cache_generate_cache_dir(local, gpu_name, driver_id, cache_dir_name, cache_type, true);
    if (!path)
       goto path_fail;
 
@@ -131,82 +147,23 @@ disk_cache_type_create(const char *gpu_name,
          goto path_fail;
    }
 
+   if (!os_get_option("MESA_SHADER_CACHE_DIR") && !os_get_option("MESA_GLSL_CACHE_DIR"))
+      disk_cache_touch_cache_user_marker(cache->path);
+
    cache->type = cache_type;
 
    cache->stats.enabled = debug_get_bool_option("MESA_SHADER_CACHE_SHOW_STATS",
                                                 false);
 
-   if (!disk_cache_mmap_cache_index(local, cache, path))
+   if (!disk_cache_mmap_cache_index(local, cache))
       goto path_fail;
-
-   max_size = 0;
-
-   max_size_str = getenv("MESA_SHADER_CACHE_MAX_SIZE");
-
-   if (!max_size_str) {
-      max_size_str = getenv("MESA_GLSL_CACHE_MAX_SIZE");
-      if (max_size_str)
-         fprintf(stderr,
-                 "*** MESA_GLSL_CACHE_MAX_SIZE is deprecated; "
-                 "use MESA_SHADER_CACHE_MAX_SIZE instead ***\n");
-   }
-
-   #ifdef MESA_SHADER_CACHE_MAX_SIZE
-   if( !max_size_str ) {
-      max_size_str = MESA_SHADER_CACHE_MAX_SIZE;
-   }
-   #endif
-
-   if (max_size_str) {
-      char *end;
-      max_size = strtoul(max_size_str, &end, 10);
-      if (end == max_size_str) {
-         max_size = 0;
-      } else {
-         switch (*end) {
-         case 'K':
-         case 'k':
-            max_size *= 1024;
-            break;
-         case 'M':
-         case 'm':
-            max_size *= 1024*1024;
-            break;
-         case '\0':
-         case 'G':
-         case 'g':
-         default:
-            max_size *= 1024*1024*1024;
-            break;
-         }
-      }
-   }
-
-   /* Default to 1GB for maximum cache size. */
-   if (max_size == 0) {
-      max_size = 1024*1024*1024;
-   }
 
    cache->max_size = max_size;
 
    if (cache->type == DISK_CACHE_DATABASE)
-      mesa_cache_db_set_size_limit(&cache->cache_db, cache->max_size);
+      mesa_cache_db_multipart_set_size_limit(&cache->cache_db, cache->max_size);
 
-   /* 4 threads were chosen below because just about all modern CPUs currently
-    * available that run Mesa have *at least* 4 cores. For these CPUs allowing
-    * more threads can result in the queue being processed faster, thus
-    * avoiding excessive memory use due to a backlog of cache entrys building
-    * up in the queue. Since we set the UTIL_QUEUE_INIT_USE_MINIMUM_PRIORITY
-    * flag this should have little negative impact on low core systems.
-    *
-    * The queue will resize automatically when it's full, so adding new jobs
-    * doesn't stall.
-    */
-   if (!util_queue_init(&cache->cache_queue, "disk$", 32, 4,
-                        UTIL_QUEUE_INIT_SCALE_THREADS |
-                        UTIL_QUEUE_INIT_RESIZE_IF_FULL |
-                        UTIL_QUEUE_INIT_USE_MINIMUM_PRIORITY |
-                        UTIL_QUEUE_INIT_SET_FULL_THREAD_AFFINITY, NULL))
+   if (!disk_cache_init_queue(cache))
       goto fail;
 
    cache->path_init_failed = false;
@@ -251,8 +208,7 @@ disk_cache_type_create(const char *gpu_name,
    return cache;
 
  fail:
-   if (cache)
-      ralloc_free(cache);
+   ralloc_free(cache);
    ralloc_free(local);
 
    return NULL;
@@ -264,17 +220,74 @@ disk_cache_create(const char *gpu_name, const char *driver_id,
 {
    enum disk_cache_type cache_type;
    struct disk_cache *cache;
+   uint64_t max_size = 0;
+   const char *max_size_str;
 
-   if (debug_get_bool_option("MESA_DISK_CACHE_SINGLE_FILE", false))
+   if (debug_get_bool_option("MESA_DISK_CACHE_SINGLE_FILE", false)) {
       cache_type = DISK_CACHE_SINGLE_FILE;
-   else if (debug_get_bool_option("MESA_DISK_CACHE_DATABASE", false))
+   } else if (debug_get_bool_option("MESA_DISK_CACHE_DATABASE", false)) {
       cache_type = DISK_CACHE_DATABASE;
-   else
+      /* Since switching the default cache to <mesa_shader_cache_db>, remove the
+       * old cache folder if it hasn't been modified for more than 7 days.
+       */
+      if (!os_get_option("MESA_SHADER_CACHE_DIR") && !os_get_option("MESA_GLSL_CACHE_DIR") &&
+          disk_cache_enabled())
+         disk_cache_delete_old_cache();
+   } else if (debug_get_bool_option("MESA_DISK_CACHE_MULTI_FILE", true)) {
       cache_type = DISK_CACHE_MULTI_FILE;
+   } else {
+      return NULL;
+   }
+
+   max_size_str = os_get_option("MESA_SHADER_CACHE_MAX_SIZE");
+
+   if (!max_size_str) {
+      max_size_str = os_get_option("MESA_GLSL_CACHE_MAX_SIZE");
+      if (max_size_str)
+         fprintf(stderr,
+                 "*** MESA_GLSL_CACHE_MAX_SIZE is deprecated; "
+                 "use MESA_SHADER_CACHE_MAX_SIZE instead ***\n");
+   }
+
+#ifdef MESA_SHADER_CACHE_MAX_SIZE
+   if (!max_size_str) {
+      max_size_str = MESA_SHADER_CACHE_MAX_SIZE;
+   }
+#endif
+
+   if (max_size_str) {
+      char *end;
+      max_size = strtoul(max_size_str, &end, 10);
+      if (end == max_size_str) {
+         max_size = 0;
+      } else {
+         switch (*end) {
+         case 'K':
+         case 'k':
+            max_size *= 1024;
+            break;
+         case 'M':
+         case 'm':
+            max_size *= 1024*1024;
+            break;
+         case '\0':
+         case 'G':
+         case 'g':
+         default:
+            max_size *= 1024*1024*1024;
+            break;
+         }
+      }
+   }
+
+   /* Default to 1GB for maximum cache size. */
+   if (max_size == 0) {
+      max_size = 1024*1024*1024;
+   }
 
    /* Create main writable cache. */
-   cache = disk_cache_type_create(gpu_name, driver_id, driver_flags,
-                                  cache_type);
+   cache = disk_cache_type_create(gpu_name, driver_id, NULL, driver_flags,
+                                  cache_type, max_size);
    if (!cache)
       return NULL;
 
@@ -290,24 +303,34 @@ disk_cache_create(const char *gpu_name, const char *driver_id,
        * If cache entry will be found in this cache, then the main cache
        * will be bypassed.
        */
-      cache->foz_ro_cache = disk_cache_type_create(gpu_name, driver_id,
+      cache->foz_ro_cache = disk_cache_type_create(gpu_name, driver_id, NULL,
                                                    driver_flags,
-                                                   DISK_CACHE_SINGLE_FILE);
+                                                   DISK_CACHE_SINGLE_FILE,
+                                                   max_size);
    }
 
    return cache;
+}
+
+struct disk_cache *
+disk_cache_create_custom(const char *gpu_name, const char *driver_id,
+                         uint64_t driver_flags, const char *cache_dir_name,
+                         uint32_t max_size)
+{
+   return disk_cache_type_create(gpu_name, driver_id, cache_dir_name, 0,
+                                 DISK_CACHE_DATABASE, max_size);
 }
 
 void
 disk_cache_destroy(struct disk_cache *cache)
 {
    if (unlikely(cache && cache->stats.enabled)) {
-      printf("disk shader cache:  hits = %u, misses = %u\n",
-             cache->stats.hits,
-             cache->stats.misses);
+      mesa_logi("disk shader cache:  hits = %u, misses = %u\n",
+                cache->stats.hits,
+                cache->stats.misses);
    }
 
-   if (cache && !cache->path_init_failed) {
+   if (cache && util_queue_is_initialized(&cache->cache_queue)) {
       util_queue_finish(&cache->cache_queue);
       util_queue_destroy(&cache->cache_queue);
 
@@ -318,7 +341,7 @@ disk_cache_destroy(struct disk_cache *cache)
          foz_destroy(&cache->foz_db);
 
       if (cache->type == DISK_CACHE_DATABASE)
-         mesa_cache_db_close(&cache->cache_db);
+         mesa_cache_db_multipart_close(&cache->cache_db);
 
       disk_cache_destroy_mmap(cache);
    }
@@ -335,6 +358,11 @@ disk_cache_wait_for_idle(struct disk_cache *cache)
 void
 disk_cache_remove(struct disk_cache *cache, const cache_key key)
 {
+   if (cache->type == DISK_CACHE_DATABASE) {
+      mesa_cache_db_multipart_entry_remove(&cache->cache_db, key);
+      return;
+   }
+
    char *filename = disk_cache_get_cache_filename(cache, key);
    if (filename == NULL) {
       return;
@@ -412,6 +440,10 @@ destroy_put_job_nocopy(void *job, void *gdata, int thread_index)
 }
 
 static void
+blob_put_compressed(struct disk_cache *cache, const cache_key key,
+         const void *data, size_t size);
+
+static void
 cache_put(void *job, void *gdata, int thread_index)
 {
    assert(job);
@@ -420,17 +452,19 @@ cache_put(void *job, void *gdata, int thread_index)
    char *filename = NULL;
    struct disk_cache_put_job *dc_job = (struct disk_cache_put_job *) job;
 
-   if (dc_job->cache->type == DISK_CACHE_SINGLE_FILE) {
+   if (dc_job->cache->blob_put_cb) {
+      blob_put_compressed(dc_job->cache, dc_job->key, dc_job->data, dc_job->size);
+   } else if (dc_job->cache->type == DISK_CACHE_SINGLE_FILE) {
       disk_cache_write_item_to_disk_foz(dc_job);
    } else if (dc_job->cache->type == DISK_CACHE_DATABASE) {
       disk_cache_db_write_item_to_disk(dc_job);
-   } else {
+   } else if (dc_job->cache->type == DISK_CACHE_MULTI_FILE) {
       filename = disk_cache_get_cache_filename(dc_job->cache, dc_job->key);
       if (filename == NULL)
          goto done;
 
       /* If the cache is too large, evict something else first. */
-      while (*dc_job->cache->size + dc_job->size > dc_job->cache->max_size &&
+      while (p_atomic_read_relaxed(&dc_job->cache->size->value) + dc_job->size > dc_job->cache->max_size &&
              i < 8) {
          disk_cache_evict_lru_item(dc_job->cache);
          i++;
@@ -461,17 +495,17 @@ blob_put_compressed(struct disk_cache *cache, const cache_key key,
 
    entry->uncompressed_size = size;
 
-   MESA_TRACE_BEGIN("deflate");
    size_t compressed_size =
          util_compress_deflate(data, size, entry->compressed_data, max_buf);
-   MESA_TRACE_END();
    if (!compressed_size)
       goto out;
 
    unsigned entry_size = compressed_size + sizeof(*entry);
-   MESA_TRACE_BEGIN("blob_put");
-   cache->blob_put_cb(key, CACHE_KEY_SIZE, entry, entry_size);
-   MESA_TRACE_END();
+   // The curly brackets are here to only trace the blob_put_cb call
+   {
+      MESA_TRACE_SCOPE("blob_put");
+      cache->blob_put_cb(key, CACHE_KEY_SIZE, entry, entry_size);
+   }
 
 out:
    free(entry);
@@ -491,10 +525,12 @@ blob_get_compressed(struct disk_cache *cache, const cache_key key,
    if (!entry)
       return NULL;
 
-   MESA_TRACE_BEGIN("blob_get");
-   signed long entry_size =
-      cache->blob_get_cb(key, CACHE_KEY_SIZE, entry, max_blob_size);
-   MESA_TRACE_END();
+   signed long entry_size;
+   // The curly brackets are here to only trace the blob_get_cb call
+   {
+      MESA_TRACE_SCOPE("blob_get");
+      entry_size = cache->blob_get_cb(key, CACHE_KEY_SIZE, entry, max_blob_size);
+   }
 
    if (!entry_size) {
       free(entry);
@@ -508,10 +544,8 @@ blob_get_compressed(struct disk_cache *cache, const cache_key key,
    }
 
    unsigned compressed_size = entry_size - sizeof(*entry);
-   MESA_TRACE_BEGIN("inflate");
    bool ret = util_compress_inflate(entry->compressed_data, compressed_size,
                                     data, entry->uncompressed_size);
-   MESA_TRACE_END();
    if (!ret) {
       free(data);
       free(entry);
@@ -531,12 +565,7 @@ disk_cache_put(struct disk_cache *cache, const cache_key key,
                const void *data, size_t size,
                struct cache_item_metadata *cache_item_metadata)
 {
-   if (cache->blob_put_cb) {
-      blob_put_compressed(cache, key, data, size);
-      return;
-   }
-
-   if (cache->path_init_failed)
+   if (!util_queue_is_initialized(&cache->cache_queue))
       return;
 
    struct disk_cache_put_job *dc_job =
@@ -554,13 +583,7 @@ disk_cache_put_nocopy(struct disk_cache *cache, const cache_key key,
                       void *data, size_t size,
                       struct cache_item_metadata *cache_item_metadata)
 {
-   if (cache->blob_put_cb) {
-      blob_put_compressed(cache, key, data, size);
-      free(data);
-      return;
-   }
-
-   if (cache->path_init_failed) {
+   if (!util_queue_is_initialized(&cache->cache_queue)) {
       free(data);
       return;
    }
@@ -593,7 +616,7 @@ disk_cache_get(struct disk_cache *cache, const cache_key key, size_t *size)
          buf = disk_cache_load_item_foz(cache, key, size);
       } else if (cache->type == DISK_CACHE_DATABASE) {
          buf = disk_cache_db_load_item(cache, key, size);
-      } else {
+      } else if (cache->type == DISK_CACHE_MULTI_FILE) {
          char *filename = disk_cache_get_cache_filename(cache, key);
          if (filename)
             buf = disk_cache_load_item(cache, filename, size);
@@ -661,13 +684,13 @@ void
 disk_cache_compute_key(struct disk_cache *cache, const void *data, size_t size,
                        cache_key key)
 {
-   struct mesa_sha1 ctx;
+   blake3_hasher ctx;
 
-   _mesa_sha1_init(&ctx);
-   _mesa_sha1_update(&ctx, cache->driver_keys_blob,
+   _mesa_blake3_init(&ctx);
+   _mesa_blake3_update(&ctx, cache->driver_keys_blob,
                      cache->driver_keys_blob_size);
-   _mesa_sha1_update(&ctx, data, size);
-   _mesa_sha1_final(&ctx, key);
+   _mesa_blake3_update(&ctx, data, size);
+   _mesa_blake3_final(&ctx, key);
 }
 
 void
@@ -676,6 +699,7 @@ disk_cache_set_callbacks(struct disk_cache *cache, disk_cache_put_cb put,
 {
    cache->blob_put_cb = put;
    cache->blob_get_cb = get;
+   disk_cache_init_queue(cache);
 }
 
 #endif /* ENABLE_SHADER_CACHE */

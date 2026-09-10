@@ -23,13 +23,6 @@ vn_wsi_init(struct vn_physical_device *physical_dev);
 void
 vn_wsi_fini(struct vn_physical_device *physical_dev);
 
-static inline const struct wsi_image_create_info *
-vn_wsi_find_wsi_image_create_info(const VkImageCreateInfo *create_info)
-{
-   return vk_find_struct_const(create_info->pNext,
-                               WSI_IMAGE_CREATE_INFO_MESA);
-}
-
 VkResult
 vn_wsi_create_image(struct vn_device *dev,
                     const VkImageCreateInfo *create_info,
@@ -37,13 +30,23 @@ vn_wsi_create_image(struct vn_device *dev,
                     const VkAllocationCallbacks *alloc,
                     struct vn_image **out_img);
 
+void
+vn_wsi_memory_info_init(struct vn_device_memory *mem,
+                        const VkMemoryAllocateInfo *alloc_info);
+
+bool
+vn_wsi_validate_image_format_info(
+   struct vn_physical_device *physical_dev,
+   const VkPhysicalDeviceImageFormatInfo2 *info);
+
 VkResult
-vn_wsi_create_image_from_swapchain(
-   struct vn_device *dev,
-   const VkImageCreateInfo *create_info,
-   const VkImageSwapchainCreateInfoKHR *swapchain_info,
-   const VkAllocationCallbacks *alloc,
-   struct vn_image **out_img);
+vn_wsi_fence_wait(VkQueue queue_handle);
+
+void
+vn_wsi_sync_wait(struct vn_device *dev, int fd);
+
+void
+vn_wsi_flush(VkQueue queue_handle);
 
 #else
 
@@ -58,12 +61,6 @@ vn_wsi_fini(UNUSED struct vn_physical_device *physical_dev)
 {
 }
 
-static inline const struct wsi_image_create_info *
-vn_wsi_find_wsi_image_create_info(const VkImageCreateInfo *create_info)
-{
-   return NULL;
-}
-
 static inline VkResult
 vn_wsi_create_image(struct vn_device *dev,
                     const VkImageCreateInfo *create_info,
@@ -74,15 +71,35 @@ vn_wsi_create_image(struct vn_device *dev,
    return VK_ERROR_OUT_OF_HOST_MEMORY;
 }
 
-static inline VkResult
-vn_wsi_create_image_from_swapchain(
-   struct vn_device *dev,
-   const VkImageCreateInfo *create_info,
-   const VkImageSwapchainCreateInfoKHR *swapchain_info,
-   const VkAllocationCallbacks *alloc,
-   struct vn_image **out_img)
+static inline void
+vn_wsi_memory_info_init(struct vn_device_memory *mem,
+                        const VkMemoryAllocateInfo *alloc_info)
 {
-   return VK_ERROR_OUT_OF_HOST_MEMORY;
+}
+
+static inline bool
+vn_wsi_validate_image_format_info(struct vn_physical_device *physical_dev,
+                                  const VkPhysicalDeviceImageFormatInfo2 *info)
+{
+   return true;
+}
+
+static inline VkResult
+vn_wsi_fence_wait(VkQueue queue_handle)
+{
+   return VK_SUCCESS;
+}
+
+static inline void
+vn_wsi_sync_wait(struct vn_device *dev, int fd)
+{
+   return;
+}
+
+static inline void
+vn_wsi_flush(VkQueue queue_handle)
+{
+   return;
 }
 
 #endif /* VN_USE_WSI_PLATFORM */

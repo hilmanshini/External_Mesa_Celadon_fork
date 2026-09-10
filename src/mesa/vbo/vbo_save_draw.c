@@ -38,6 +38,8 @@
 #include "main/state.h"
 #include "main/varray.h"
 #include "util/bitscan.h"
+#include "state_tracker/st_draw.h"
+#include "pipe/p_context.h"
 
 #include "vbo_private.h"
 
@@ -86,8 +88,12 @@ copy_vao(struct gl_context *ctx, const struct gl_vertex_array_object *vao,
       }
 
       if (type != currval->Format.User.Type ||
-          (size >> dmul_shift) != currval->Format.User.Size)
+          (size >> dmul_shift) != currval->Format.User.Size) {
          vbo_set_vertex_format(&currval->Format, size >> dmul_shift, type);
+         /* The format changed. We need to update gallium vertex elements. */
+         if (state == _NEW_CURRENT_ATTRIB)
+            ctx->NewState |= state;
+      }
 
       *data += size;
    }
@@ -194,7 +200,7 @@ vbo_save_playback_vertex_list_gallium(struct gl_context *ctx,
    /* Don't use this if selection or feedback mode is enabled. st/mesa can't
     * handle it.
     */
-   if (!ctx->Driver.DrawGalliumVertexState || ctx->RenderMode != GL_RENDER)
+   if (!ctx->Const.HasDrawVertexState || ctx->RenderMode != GL_RENDER)
       return USE_SLOW_PATH;
 
    const gl_vertex_processing_mode mode = ctx->VertexProgram._VPMode;
@@ -225,7 +231,7 @@ vbo_save_playback_vertex_list_gallium(struct gl_context *ctx,
     */
    struct gl_program *vp = ctx->VertexProgram._Current;
 
-   if (vp->info.inputs_read & ~enabled || vp->DualSlotInputs)
+   if ((vp->info.inputs_read & ~(uint64_t)enabled) || vp->DualSlotInputs)
       return USE_SLOW_PATH;
 
    struct pipe_vertex_state *state = node->state[mode];
@@ -275,19 +281,45 @@ vbo_save_playback_vertex_list_gallium(struct gl_context *ctx,
    /* Set edge flags. */
    _mesa_update_edgeflag_state_explicit(ctx, enabled & VERT_BIT_EDGEFLAG);
 
+   ST_PIPELINE_RENDER_STATE_MASK_NO_VARRAYS(mask);
+   st_prepare_draw(ctx, mask);
+
+   struct pipe_context *pipe = ctx->pipe;
+   uint32_t velem_mask = ctx->VertexProgram._Current->info.inputs_read;
+
    /* Fast path using a pre-built gallium vertex buffer state. */
    if (node->modes || node->num_draws > 1) {
-      ctx->Driver.DrawGalliumVertexState(ctx, state, info,
-                                         node->start_counts,
-                                         node->modes,
-                                         node->num_draws);
+      const struct pipe_draw_start_count_bias *draws = node->start_counts;
+      const uint8_t *mode = node->modes;
+      unsigned num_draws = node->num_draws;
+
+      if (!mode) {
+         pipe->draw_vertex_state(pipe, state, velem_mask, info, draws, num_draws);
+      } else {
+         /* Find consecutive draws where mode doesn't vary. */
+         for (unsigned i = 0, first = 0; i <= num_draws; i++) {
+            if (i == num_draws || mode[i] != mode[first]) {
+               unsigned current_num_draws = i - first;
+
+               /* Increase refcount to be able to use take_vertex_state_ownership
+                * with all draws.
+                */
+               if (i != num_draws && info.take_vertex_state_ownership)
+                  p_atomic_inc(&state->reference.count);
+
+               info.mode = mode[first];
+               pipe->draw_vertex_state(pipe, state, velem_mask, info, &draws[first],
+                                       current_num_draws);
+               first = i;
+            }
+         }
+      }
    } else if (node->num_draws) {
-      ctx->Driver.DrawGalliumVertexState(ctx, state, info,
-                                         &node->start_count,
-                                         NULL, 1);
+      pipe->draw_vertex_state(pipe, state, velem_mask, info,
+                              &node->start_count, 1);
    }
 
-   /* Restore edge flag state. */
+   /* Restore edge flag state and ctx->VertexProgram._VaryingInputs. */
    _mesa_update_edgeflag_state_vao(ctx);
 
    if (copy_to_current)
@@ -328,6 +360,8 @@ vbo_save_playback_vertex_list(struct gl_context *ctx, void *data, bool copy_to_c
 
    _mesa_save_and_set_draw_vao(ctx, node->cold->VAO[mode], vao_filter,
                                &old_vao, &old_vp_input_filter);
+   _mesa_set_varying_vp_inputs(ctx, vao_filter &
+                               ctx->Array._DrawVAO->_EnabledWithMapMode);
 
    /* Need that at least one time. */
    if (ctx->NewState)
@@ -344,15 +378,18 @@ vbo_save_playback_vertex_list(struct gl_context *ctx, void *data, bool copy_to_c
 
    struct pipe_draw_info *info = (struct pipe_draw_info *) &node->cold->info;
 
+   ST_PIPELINE_RENDER_STATE_MASK(mask);
+   st_prepare_draw(ctx, mask);
+
    if (node->modes) {
       ctx->Driver.DrawGalliumMultiMode(ctx, info,
                                        node->start_counts,
                                        node->modes,
                                        node->num_draws);
    } else if (node->num_draws == 1) {
-      ctx->Driver.DrawGallium(ctx, info, 0, &node->start_count, 1);
+      ctx->Driver.DrawGallium(ctx, info, 0, NULL, &node->start_count, 1);
    } else if (node->num_draws) {
-      ctx->Driver.DrawGallium(ctx, info, 0, node->start_counts,
+      ctx->Driver.DrawGallium(ctx, info, 0, NULL, node->start_counts,
                               node->num_draws);
    }
 

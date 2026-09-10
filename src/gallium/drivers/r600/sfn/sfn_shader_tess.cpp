@@ -1,33 +1,15 @@
 /* -*- mesa-c++  -*-
- *
- * Copyright (c) 2022 Collabora LTD
- *
+ * Copyright 2022 Collabora LTD
  * Author: Gert Wollny <gert.wollny@collabora.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include "sfn_shader_tess.h"
 
 #include "sfn_instr_export.h"
 #include "sfn_shader_vs.h"
+#include "sfn_nir.h"
+#include "nir.h"
 
 #include <sstream>
 
@@ -36,7 +18,7 @@ namespace r600 {
 using std::string;
 
 TCSShader::TCSShader(const r600_shader_key& key):
-    Shader("TCS", key.tcs.first_atomic_counter),
+    Shader("TCS"),
     m_tcs_prim_mode(key.tcs.prim_mode)
 {
 }
@@ -50,7 +32,7 @@ TCSShader::do_scan_instruction(nir_instr *instr)
    nir_intrinsic_instr *ii = nir_instr_as_intrinsic(instr);
 
    switch (ii->intrinsic) {
-   case nir_intrinsic_load_primitive_id:
+   case nir_intrinsic_load_primitive_id_raw_r600:
       m_sv_values.set(es_primitive_id);
       break;
    case nir_intrinsic_load_invocation_id:
@@ -97,13 +79,13 @@ TCSShader::process_stage_intrinsic(nir_intrinsic_instr *instr)
 {
    switch (instr->intrinsic) {
    case nir_intrinsic_load_tcs_rel_patch_id_r600:
-      return emit_simple_mov(instr->dest, 0, m_rel_patch_id);
+      return emit_simple_mov(instr->def, 0, m_rel_patch_id);
    case nir_intrinsic_load_invocation_id:
-      return emit_simple_mov(instr->dest, 0, m_invocation_id);
-   case nir_intrinsic_load_primitive_id:
-      return emit_simple_mov(instr->dest, 0, m_primitive_id);
+      return emit_simple_mov(instr->def, 0, m_invocation_id);
+   case nir_intrinsic_load_primitive_id_raw_r600:
+      return emit_simple_mov(instr->def, 0, m_primitive_id);
    case nir_intrinsic_load_tcs_tess_factor_base_r600:
-      return emit_simple_mov(instr->dest, 0, m_tess_factor_base);
+      return emit_simple_mov(instr->def, 0, m_tess_factor_base);
    case nir_intrinsic_store_tf_r600:
       return store_tess_factor(instr);
    default:
@@ -122,7 +104,7 @@ TCSShader::store_tess_factor(nir_intrinsic_instr *instr)
 void
 TCSShader::do_get_shader_info(r600_shader *sh_info)
 {
-   sh_info->processor_type = PIPE_SHADER_TESS_CTRL;
+   sh_info->processor_type = MESA_SHADER_TESS_CTRL;
    sh_info->tcs_prim_mode = m_tcs_prim_mode;
 }
 
@@ -157,9 +139,8 @@ TCSShader::do_print_properties(std::ostream& os) const
 TESShader::TESShader(const pipe_stream_output_info *so_info,
                      const r600_shader *gs_shader,
                      const r600_shader_key& key):
-    VertexStageShader("TES", key.tes.first_atomic_counter),
-    m_vs_as_gs_a(key.vs.as_gs_a),
-    m_tes_as_es(key.tes.as_es)
+    VertexStageShader("TES"),
+    m_vs_as_gs_a(key.vs.as_gs_a)
 {
    if (key.tes.as_es)
       m_export_processor = new VertexExportForGS(this, gs_shader);
@@ -176,10 +157,10 @@ TESShader::do_scan_instruction(nir_instr *instr)
    auto intr = nir_instr_as_intrinsic(instr);
 
    switch (intr->intrinsic) {
-   case nir_intrinsic_load_tess_coord_r600:
+   case nir_intrinsic_load_tess_coord_xy:
       m_sv_values.set(es_tess_coord);
       break;
-   case nir_intrinsic_load_primitive_id:
+   case nir_intrinsic_load_primitive_id_raw_r600:
       m_sv_values.set(es_primitive_id);
       break;
    case nir_intrinsic_load_tcs_rel_patch_id_r600:
@@ -187,33 +168,14 @@ TESShader::do_scan_instruction(nir_instr *instr)
       break;
    case nir_intrinsic_store_output: {
       int driver_location = nir_intrinsic_base(intr);
-      int location = nir_intrinsic_io_semantics(intr).location;
-      auto semantic = r600_get_varying_semantic(location);
-      tgsi_semantic name = (tgsi_semantic)semantic.first;
-      unsigned sid = semantic.second;
+      auto location = static_cast<gl_varying_slot>(nir_intrinsic_io_semantics(intr).location);
       auto write_mask = nir_intrinsic_write_mask(intr);
 
       if (location == VARYING_SLOT_LAYER)
          write_mask = 4;
 
-      ShaderOutput output(driver_location, name, write_mask);
-      output.set_sid(sid);
+      ShaderOutput output(driver_location, write_mask, location);
 
-      switch (location) {
-      case VARYING_SLOT_PSIZ:
-      case VARYING_SLOT_POS:
-      case VARYING_SLOT_CLIP_VERTEX:
-      case VARYING_SLOT_EDGE: {
-         break;
-      }
-      case VARYING_SLOT_CLIP_DIST0:
-      case VARYING_SLOT_CLIP_DIST1:
-      case VARYING_SLOT_VIEWPORT:
-      case VARYING_SLOT_LAYER:
-      case VARYING_SLOT_VIEW_INDEX:
-      default:
-         output.set_is_param(true);
-      }
       add_output(output);
       break;
    }
@@ -245,13 +207,13 @@ bool
 TESShader::process_stage_intrinsic(nir_intrinsic_instr *intr)
 {
    switch (intr->intrinsic) {
-   case nir_intrinsic_load_tess_coord_r600:
-      return emit_simple_mov(intr->dest, 0, m_tess_coord[0], pin_none) &&
-             emit_simple_mov(intr->dest, 1, m_tess_coord[1], pin_none);
-   case nir_intrinsic_load_primitive_id:
-      return emit_simple_mov(intr->dest, 0, m_primitive_id);
+   case nir_intrinsic_load_tess_coord_xy:
+      return emit_simple_mov(intr->def, 0, m_tess_coord[0], pin_none) &&
+             emit_simple_mov(intr->def, 1, m_tess_coord[1], pin_none);
+   case nir_intrinsic_load_primitive_id_raw_r600:
+      return emit_simple_mov(intr->def, 0, m_primitive_id);
    case nir_intrinsic_load_tcs_rel_patch_id_r600:
-      return emit_simple_mov(intr->dest, 0, m_rel_patch_id);
+      return emit_simple_mov(intr->def, 0, m_rel_patch_id);
    case nir_intrinsic_store_output:
       return m_export_processor->store_output(*intr);
    default:
@@ -262,7 +224,7 @@ TESShader::process_stage_intrinsic(nir_intrinsic_instr *intr)
 void
 TESShader::do_get_shader_info(r600_shader *sh_info)
 {
-   sh_info->processor_type = PIPE_SHADER_TESS_EVAL;
+   sh_info->processor_type = MESA_SHADER_TESS_EVAL;
    m_export_processor->get_shader_info(sh_info);
 }
 
@@ -285,4 +247,41 @@ TESShader::do_print_properties(std::ostream& os) const
    (void)os;
 }
 
+class LowerTessLevelDefault : public NirLowerInstruction {
+   bool filter(const nir_instr *instr) const override
+   {
+      if (instr->type != nir_instr_type_intrinsic)
+         return false;
+
+      auto intr = nir_instr_as_intrinsic(instr);
+      return intr->intrinsic == nir_intrinsic_load_tess_level_inner_default ||
+             intr->intrinsic == nir_intrinsic_load_tess_level_outer_default;
+   }
+
+   nir_def *lower(nir_instr *instr) override
+   {
+      auto intr = nir_instr_as_intrinsic(instr);
+
+      auto info_buffer = nir_imm_int(b, R600_BUFFER_INFO_CONST_BUFFER);
+
+      switch (intr->intrinsic) {
+      case nir_intrinsic_load_tess_level_inner_default:
+         return  nir_load_ubo(b, 2, 32, info_buffer, nir_imm_int(b, 16),
+                               .range_base = 16, .range = 8);
+      case nir_intrinsic_load_tess_level_outer_default:
+         return nir_load_ubo(b, 4, 32, info_buffer, nir_imm_int(b, 0),
+                             .range_base = 0, .range = 16);
+      default:
+         assert(0);
+         return nullptr;
+      }
+   }
+};
+
 } // namespace r600
+
+int r600_lower_tess_level_default_to_ubo(nir_shader *sh)
+{
+   return r600::LowerTessLevelDefault().run(sh);
+}
+

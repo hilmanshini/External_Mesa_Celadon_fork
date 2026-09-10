@@ -315,7 +315,7 @@ lp_depth_type(const struct util_format_description *format_desc,
    z_swizzle = format_desc->swizzle[0];
    if (z_swizzle < 4) {
       if (format_desc->channel[z_swizzle].type == UTIL_FORMAT_TYPE_FLOAT) {
-         type.floating = TRUE;
+         type.floating = true;
          assert(z_swizzle == 0);
          assert(format_desc->channel[z_swizzle].size == 32);
       }
@@ -326,7 +326,7 @@ lp_depth_type(const struct util_format_description *format_desc,
             /* Prefer signed integers when possible, as SSE has less support
              * for unsigned comparison;
              */
-            type.sign = TRUE;
+            type.sign = true;
          }
       }
       else
@@ -347,7 +347,7 @@ lp_depth_type(const struct util_format_description *format_desc,
  * in the Z buffer (typically 0xffffff00 or 0x00ffffff).  That lets us
  * get by with fewer bit twiddling steps.
  */
-static boolean
+static bool
 get_z_shift_and_mask(const struct util_format_description *format_desc,
                      unsigned *shift, unsigned *width, unsigned *mask)
 {
@@ -364,7 +364,7 @@ get_z_shift_and_mask(const struct util_format_description *format_desc,
    z_swizzle = format_desc->swizzle[0];
 
    if (z_swizzle == PIPE_SWIZZLE_NONE)
-      return FALSE;
+      return false;
 
    *width = format_desc->channel[z_swizzle].size;
    /* & 31 is for the same reason as the 32-bit limit above */
@@ -376,7 +376,7 @@ get_z_shift_and_mask(const struct util_format_description *format_desc,
       *mask = ((1 << *width) - 1) << *shift;
    }
 
-   return TRUE;
+   return true;
 }
 
 
@@ -385,14 +385,14 @@ get_z_shift_and_mask(const struct util_format_description *format_desc,
  * to put the stencil bits in the least significant position.
  * (i.e. 0x000000ff)
  */
-static boolean
+static bool
 get_s_shift_and_mask(const struct util_format_description *format_desc,
                      unsigned *shift, unsigned *mask)
 {
    const unsigned s_swizzle = format_desc->swizzle[1];
 
    if (s_swizzle == PIPE_SWIZZLE_NONE)
-      return FALSE;
+      return false;
 
    /* just special case 64bit d/s format */
    if (format_desc->block.bits > 32) {
@@ -400,14 +400,14 @@ get_s_shift_and_mask(const struct util_format_description *format_desc,
       assert(format_desc->format == PIPE_FORMAT_Z32_FLOAT_S8X24_UINT);
       *shift = 0;
       *mask = 0xff;
-      return TRUE;
+      return true;
    }
 
    *shift = format_desc->channel[s_swizzle].shift;
    const unsigned sz = format_desc->channel[s_swizzle].size;
    *mask = (1U << sz) - 1U;
 
-   return TRUE;
+   return true;
 }
 
 
@@ -531,7 +531,7 @@ void
 lp_build_depth_stencil_load_swizzled(struct gallivm_state *gallivm,
                                      struct lp_type z_src_type,
                                      const struct util_format_description *format_desc,
-                                     boolean is_1d,
+                                     bool is_1d,
                                      LLVMValueRef depth_ptr,
                                      LLVMValueRef depth_stride,
                                      LLVMValueRef *z_fb,
@@ -669,7 +669,7 @@ void
 lp_build_depth_stencil_write_swizzled(struct gallivm_state *gallivm,
                                       struct lp_type z_src_type,
                                       const struct util_format_description *format_desc,
-                                      boolean is_1d,
+                                      bool is_1d,
                                       LLVMValueRef mask_value,
                                       LLVMValueRef z_fb,
                                       LLVMValueRef s_fb,
@@ -827,9 +827,11 @@ lp_build_depth_stencil_test(struct gallivm_state *gallivm,
                             LLVMValueRef z_fb,
                             LLVMValueRef s_fb,
                             LLVMValueRef face,
+                            LLVMValueRef min_depth_bounds,
+                            LLVMValueRef max_depth_bounds,
                             LLVMValueRef *z_value,
                             LLVMValueRef *s_value,
-                            boolean do_branch,
+                            bool do_branch,
                             bool restrict_depth)
 {
    LLVMBuilderRef builder = gallivm->builder;
@@ -841,10 +843,10 @@ lp_build_depth_stencil_test(struct gallivm_state *gallivm,
    LLVMValueRef z_dst = NULL;
    LLVMValueRef stencil_vals = NULL;
    LLVMValueRef z_bitmask = NULL, stencil_shift = NULL;
-   LLVMValueRef z_pass = NULL, s_pass_mask = NULL;
+   LLVMValueRef z_pass = NULL, s_pass_mask = NULL, b_pass_mask = NULL;
    LLVMValueRef current_mask = mask ? lp_build_mask_value(mask) : *cov_mask;
    LLVMValueRef front_facing = NULL;
-   boolean have_z, have_s;
+   bool have_z, have_s;
 
    /*
     * Depths are expected to be between 0 and 1, even if they are stored in
@@ -854,8 +856,8 @@ lp_build_depth_stencil_test(struct gallivm_state *gallivm,
     */
    if (z_src_type.floating) {
       if (restrict_depth) {
-         z_src_type.sign = FALSE;
-         z_src_type.norm = TRUE;
+         z_src_type.sign = false;
+         z_src_type.norm = true;
       }
    } else {
       assert(!z_src_type.sign);
@@ -883,7 +885,7 @@ lp_build_depth_stencil_test(struct gallivm_state *gallivm,
       assert(z_swizzle != PIPE_SWIZZLE_NONE ||
              s_swizzle != PIPE_SWIZZLE_NONE);
 
-      assert(depth->enabled || stencil[0].enabled);
+      assert(depth->enabled || depth->depth_bounds_test || stencil[0].enabled);
 
       assert(format_desc->colorspace == UTIL_FORMAT_COLORSPACE_ZS);
       assert(format_desc->block.width == 1);
@@ -1026,6 +1028,40 @@ lp_build_depth_stencil_test(struct gallivm_state *gallivm,
       }
    }
 
+   if (depth->depth_bounds_test) {
+      if (!z_type.floating) {
+         struct lp_type f_type = lp_type_float_vec(32, 32 * z_type.length);
+         struct lp_build_context f_bld;
+
+         lp_build_context_init(&f_bld, gallivm, f_type);
+
+         min_depth_bounds = lp_build_max(&f_bld,
+                                         lp_build_const_vec(gallivm, f_type, 0.0f),
+                                         min_depth_bounds);
+         max_depth_bounds = lp_build_min(&f_bld,
+                                         lp_build_const_vec(gallivm, f_type, 1.0f),
+                                         max_depth_bounds);
+
+         min_depth_bounds =
+            lp_build_clamped_float_to_unsigned_norm(gallivm, f_type, z_width,
+                                                    min_depth_bounds);
+         max_depth_bounds =
+            lp_build_clamped_float_to_unsigned_norm(gallivm, f_type, z_width,
+                                                    max_depth_bounds);
+      }
+
+      LLVMValueRef above_min = lp_build_cmp(&z_bld, PIPE_FUNC_GEQUAL,
+                                            z_dst, min_depth_bounds);
+      LLVMValueRef below_max = lp_build_cmp(&z_bld, PIPE_FUNC_LEQUAL,
+                                            z_dst, max_depth_bounds);
+
+      b_pass_mask =
+         LLVMBuildAnd(builder, above_min, below_max, "");
+
+      /* Mask off any writes that failed the depth bounds test */
+      current_mask = b_pass_mask;
+   }
+
    if (depth->enabled) {
       /*
        * Convert fragment Z to the desired type, aligning the LSB to the right.
@@ -1112,7 +1148,7 @@ lp_build_depth_stencil_test(struct gallivm_state *gallivm,
                                             stencil_refs, stencil_vals,
                                             z_pass_mask, front_facing);
       }
-   } else {
+   } else if (stencil[0].enabled) {
       /* No depth test: apply Z-pass operator to stencil buffer values which
        * passed the stencil test.
        */
@@ -1146,6 +1182,9 @@ lp_build_depth_stencil_test(struct gallivm_state *gallivm,
    }
 
    if (mask) {
+      if (b_pass_mask)
+         lp_build_mask_update(mask, b_pass_mask);
+
       if (s_pass_mask)
          lp_build_mask_update(mask, s_pass_mask);
 
@@ -1153,6 +1192,9 @@ lp_build_depth_stencil_test(struct gallivm_state *gallivm,
          lp_build_mask_update(mask, z_pass);
    } else {
       LLVMValueRef tmp_mask = *cov_mask;
+      if (b_pass_mask)
+         tmp_mask = LLVMBuildAnd(builder, tmp_mask, b_pass_mask, "");
+
       if (s_pass_mask)
          tmp_mask = LLVMBuildAnd(builder, tmp_mask, s_pass_mask, "");
 

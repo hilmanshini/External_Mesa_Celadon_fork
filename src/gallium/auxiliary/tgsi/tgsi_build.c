@@ -119,7 +119,7 @@ tgsi_default_declaration( void )
 
 static struct tgsi_declaration
 tgsi_build_declaration(
-   unsigned file,
+   enum tgsi_file_type file,
    unsigned usage_mask,
    unsigned interpolate,
    unsigned dimension,
@@ -731,7 +731,6 @@ tgsi_default_instruction_texture( void )
 
    instruction_texture.Texture = TGSI_TEXTURE_UNKNOWN;
    instruction_texture.NumOffsets = 0;
-   instruction_texture.ReturnType = TGSI_RETURN_TYPE_UNKNOWN;
    instruction_texture.Padding = 0;
 
    return instruction_texture;
@@ -741,7 +740,6 @@ static struct tgsi_instruction_texture
 tgsi_build_instruction_texture(
    unsigned texture,
    unsigned num_offsets,
-   unsigned return_type,
    struct tgsi_instruction *instruction,
    struct tgsi_header *header )
 {
@@ -749,7 +747,6 @@ tgsi_build_instruction_texture(
 
    instruction_texture.Texture = texture;
    instruction_texture.NumOffsets = num_offsets;
-   instruction_texture.ReturnType = return_type;
    instruction_texture.Padding = 0;
    instruction->Texture = 1;
 
@@ -809,7 +806,9 @@ tgsi_default_texture_offset( void )
 
 static struct tgsi_texture_offset
 tgsi_build_texture_offset(
-   int index, int file, int swizzle_x, int swizzle_y, int swizzle_z,
+   int index,
+   enum tgsi_file_type file,
+   int swizzle_x, int swizzle_y, int swizzle_z,
    struct tgsi_instruction *instruction,
    struct tgsi_header *header )
 {
@@ -848,7 +847,7 @@ tgsi_default_src_register( void )
 
 static struct tgsi_src_register
 tgsi_build_src_register(
-   unsigned file,
+   enum tgsi_file_type file,
    unsigned swizzle_x,
    unsigned swizzle_y,
    unsigned swizzle_z,
@@ -902,7 +901,7 @@ tgsi_default_ind_register( void )
 
 static struct tgsi_ind_register
 tgsi_build_ind_register(
-   unsigned file,
+   enum tgsi_file_type file,
    unsigned swizzle,
    int index,
    unsigned arrayid,
@@ -987,7 +986,7 @@ tgsi_default_dst_register( void )
 
 static struct tgsi_dst_register
 tgsi_build_dst_register(
-   unsigned file,
+   enum tgsi_file_type file,
    unsigned mask,
    unsigned indirect,
    unsigned dimension,
@@ -1099,7 +1098,6 @@ tgsi_build_full_instruction(
       *instruction_texture = tgsi_build_instruction_texture(
          full_inst->Texture.Texture,
          full_inst->Texture.NumOffsets,
-         full_inst->Texture.ReturnType,
          instruction,
          header   );
 
@@ -1390,19 +1388,4 @@ tgsi_build_full_property(
    }
 
    return size;
-}
-
-struct tgsi_full_src_register
-tgsi_full_src_register_from_dst(const struct tgsi_full_dst_register *dst)
-{
-   struct tgsi_full_src_register src;
-   src.Register = tgsi_default_src_register();
-   src.Register.File = dst->Register.File;
-   src.Register.Indirect = dst->Register.Indirect;
-   src.Register.Dimension = dst->Register.Dimension;
-   src.Register.Index = dst->Register.Index;
-   src.Indirect = dst->Indirect;
-   src.Dimension = dst->Dimension;
-   src.DimIndirect = dst->DimIndirect;
-   return src;
 }

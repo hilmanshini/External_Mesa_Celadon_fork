@@ -5,6 +5,7 @@
 #include "pipe/p_state.h"
 
 #define NVC0_CAP_MAX_PROGRAM_TEMPS 128
+struct nir_shader;
 
 
 struct nvc0_transform_feedback_state {
@@ -20,9 +21,10 @@ struct nvc0_transform_feedback_state {
 #define NVC0_MAX_SHADER_HEADER_SIZE TU102_SHADER_HEADER_SIZE
 
 struct nvc0_program {
-   struct pipe_shader_state pipe;
+   struct nir_shader *nir;
+   struct pipe_stream_output_info stream_output;
 
-   ubyte type;
+   uint8_t type;
    bool translated;
    bool need_tls;
    uint8_t num_gprs;
@@ -30,7 +32,6 @@ struct nvc0_program {
    uint32_t *code;
    unsigned code_base;
    unsigned code_size;
-   unsigned parm_size; /* size of non-bindable uniforms (c0[]) */
 
    uint32_t hdr[NVC0_MAX_SHADER_HEADER_SIZE/4];
    uint32_t flags[2];

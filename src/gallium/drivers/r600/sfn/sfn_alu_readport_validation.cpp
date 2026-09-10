@@ -1,27 +1,7 @@
 /* -*- mesa-c++  -*-
- *
- * Copyright (c) 2022 Collabora LTD
- *
+ * Copyright 2022 Collabora LTD
  * Author: Gert Wollny <gert.wollny@collabora.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include "sfn_alu_readport_validation.h"
@@ -33,6 +13,8 @@ namespace r600 {
 class ReserveReadport : public ConstRegisterVisitor {
 public:
    ReserveReadport(AluReadportReservation& reserv);
+
+   using ConstRegisterVisitor::visit;
 
    void visit(const LocalArray& value) override;
    void visit(const LiteralConstant& value) override;
@@ -53,6 +35,7 @@ public:
 class ReserveReadportVec : public ReserveReadport {
 public:
    using ReserveReadport::ReserveReadport;
+   using ReserveReadport::visit;
 
    void visit(const Register& value) override;
    void visit(const LocalArrayValue& value) override;
@@ -69,6 +52,7 @@ public:
 class ReserveReadportTransPass1 : public ReserveReadportTrans {
 public:
    using ReserveReadportTrans::ReserveReadportTrans;
+   using ReserveReadportTrans::visit;
 
    void visit(const Register& value) override;
    void visit(const LocalArrayValue& value) override;
@@ -80,6 +64,7 @@ public:
 class ReserveReadportTransPass2 : public ReserveReadportTrans {
 public:
    using ReserveReadportTrans::ReserveReadportTrans;
+   using ReserveReadportTrans::visit;
 
    void visit(const Register& value) override;
    void visit(const LocalArrayValue& value) override;
@@ -87,7 +72,23 @@ public:
 };
 
 bool
-AluReadportReservation::schedule_vec_src(PVirtualValue src[3],
+AluReadportReservation::update_from_sources(const std::array<PVirtualValue, 3>& src,
+                                            const unsigned int nsrc)
+{
+   AluBankSwizzle bs = alu_vec_012;
+   while (bs != alu_vec_unknown) {
+      AluReadportReservation rpr = *this;
+      if (rpr.schedule_vec_src(src, nsrc, bs) == nsrc) {
+         *this = rpr;
+         return true;
+      }
+      ++bs;
+   }
+   return false;
+}
+
+unsigned
+AluReadportReservation::schedule_vec_src(const std::array<PVirtualValue, 3>& src,
                                          int nsrc,
                                          AluBankSwizzle swz)
 {
@@ -105,9 +106,12 @@ AluReadportReservation::schedule_vec_src(PVirtualValue src[3],
       visitor.cycle = cycle_vec(swz, i);
       visitor.isrc = i;
       src[i]->accept(visitor);
+      if (!visitor.success) {
+         return i;
+      }
    }
 
-   return visitor.success;
+   return nsrc;
 }
 
 bool
@@ -150,6 +154,20 @@ AluReadportReservation::schedule_trans_instruction(const AluInstr& alu,
    return visitor2.success;
 }
 
+void AluReadportReservation::print(std::ostream& os) const
+{
+   os << "AluReadportReservation\n";
+   for (int i = 0; i < max_chan_channels; ++i) {
+      os << "  chan " << i << ":";
+      for (int j = 0; j < max_gpr_readports; ++j) {
+         os << m_hw_gpr[j][i] << " ";
+      }
+      os << "\n";
+   }
+   os << "\n";
+
+}
+
 AluReadportReservation::AluReadportReservation()
 {
    for (int i = 0; i < max_chan_channels; ++i) {
@@ -164,6 +182,13 @@ AluReadportReservation::AluReadportReservation()
 bool
 AluReadportReservation::reserve_gpr(int sel, int chan, int cycle)
 {
+   for (int c = 0; c < 3; ++c) {
+      if (m_hw_gpr[c][chan] == sel) {
+         if (cycle == c)
+            return true;
+      }
+   }
+
    if (m_hw_gpr[cycle][chan] == -1) {
       m_hw_gpr[cycle][chan] = sel;
    } else if (m_hw_gpr[cycle][chan] != sel) {
@@ -219,8 +244,8 @@ AluReadportReservation::cycle_vec(AluBankSwizzle swz, int src)
    static const int mapping[AluBankSwizzle::alu_vec_unknown][max_gpr_readports] = {
       {0, 1, 2},
       {0, 2, 1},
-      {1, 0, 2},
       {1, 2, 0},
+      {1, 0, 2},
       {2, 0, 1},
       {2, 1, 0}
    };
@@ -248,7 +273,7 @@ void
 ReserveReadport::visit(const LocalArray& value)
 {
    (void)value;
-   unreachable("a full array is not available here");
+   UNREACHABLE("a full array is not available here");
 }
 
 void
@@ -272,7 +297,7 @@ ReserveReadportVec::visit(const Register& value)
 void
 ReserveReadportVec::visit(const LocalArrayValue& value)
 {
-   // Set the hightest non-sign bit to indicated that we use the
+   // Set the highest non-sign bit to indicated that we use the
    // AR register
    reserve_gpr(0x4000000 | value.sel(), value.chan());
 }

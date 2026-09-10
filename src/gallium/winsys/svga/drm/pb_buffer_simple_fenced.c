@@ -1,29 +1,9 @@
-/**************************************************************************
- *
- * Copyright 2007-2015 VMware, Inc.
- * All Rights Reserved.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the
- * "Software"), to deal in the Software without restriction, including
- * without limitation the rights to use, copy, modify, merge, publish,
- * distribute, sub license, and/or sell copies of the Software, and to
- * permit persons to whom the Software is furnished to do so, subject to
- * the following conditions:
- *
- * The above copyright notice and this permission notice (including the
- * next paragraph) shall be included in all copies or substantial portions
- * of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT.
- * IN NO EVENT SHALL VMWARE AND/OR ITS SUPPLIERS BE LIABLE FOR
- * ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
- * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
- * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- *
- **************************************************************************/
+/*
+ * Copyright (c) 2007-2024 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc.
+ * and/or its subsidiaries.
+ * SPDX-License-Identifier: MIT
+ */
 
 /**
  * \file
@@ -42,7 +22,7 @@
 #endif
 #include <inttypes.h>
 
-#include "pipe/p_compiler.h"
+#include "util/compiler.h"
 #include "pipe/p_defines.h"
 #include "util/u_debug.h"
 #include "util/u_thread.h"
@@ -151,7 +131,7 @@ static enum pipe_error
 fenced_buffer_create_gpu_storage_locked(struct fenced_manager *fenced_mgr,
                                         struct fenced_buffer *fenced_buf,
                                         const struct pb_desc *desc,
-                                        boolean wait);
+                                        bool wait);
 /**
  * Dump the fenced buffer list.
  *
@@ -160,7 +140,7 @@ fenced_buffer_create_gpu_storage_locked(struct fenced_manager *fenced_mgr,
 static void
 fenced_manager_dump_locked(struct fenced_manager *fenced_mgr)
 {
-#ifdef DEBUG
+#if MESA_DEBUG
    struct pb_fence_ops *ops = fenced_mgr->ops;
    struct list_head *curr, *next;
    struct fenced_buffer *fenced_buf;
@@ -170,13 +150,13 @@ fenced_manager_dump_locked(struct fenced_manager *fenced_mgr)
 
    curr = fenced_mgr->unfenced.next;
    next = curr->next;
-   while(curr != &fenced_mgr->unfenced) {
+   while (curr != &fenced_mgr->unfenced) {
       fenced_buf = list_entry(curr, struct fenced_buffer, head);
       assert(!fenced_buf->fence);
       debug_printf("%10p %"PRIu64" %8u %7s\n",
                    (void *) fenced_buf,
-                   fenced_buf->base.size,
-                   p_atomic_read(&fenced_buf->base.reference.count),
+                   fenced_buf->base.base.size,
+                   p_atomic_read(&fenced_buf->base.base.reference.count),
                    fenced_buf->buffer ? "gpu" : "none");
       curr = next;
       next = curr->next;
@@ -184,15 +164,15 @@ fenced_manager_dump_locked(struct fenced_manager *fenced_mgr)
 
    curr = fenced_mgr->fenced.next;
    next = curr->next;
-   while(curr != &fenced_mgr->fenced) {
+   while (curr != &fenced_mgr->fenced) {
       int signaled;
       fenced_buf = list_entry(curr, struct fenced_buffer, head);
       assert(fenced_buf->buffer);
       signaled = ops->fence_signalled(ops, fenced_buf->fence, 0);
       debug_printf("%10p %"PRIu64" %8u %7s %10p %s\n",
                    (void *) fenced_buf,
-                   fenced_buf->base.size,
-                   p_atomic_read(&fenced_buf->base.reference.count),
+                   fenced_buf->base.base.size,
+                   p_atomic_read(&fenced_buf->base.base.reference.count),
                    "gpu",
                    (void *) fenced_buf->fence,
                    signaled == 0 ? "y" : "n");
@@ -209,7 +189,7 @@ static inline void
 fenced_buffer_destroy_locked(struct fenced_manager *fenced_mgr,
                              struct fenced_buffer *fenced_buf)
 {
-   assert(!pipe_is_referenced(&fenced_buf->base.reference));
+   assert(!pipe_is_referenced(&fenced_buf->base.base.reference));
 
    assert(!fenced_buf->fence);
    assert(fenced_buf->head.prev);
@@ -233,11 +213,11 @@ static inline void
 fenced_buffer_add_locked(struct fenced_manager *fenced_mgr,
                          struct fenced_buffer *fenced_buf)
 {
-   assert(pipe_is_referenced(&fenced_buf->base.reference));
+   assert(pipe_is_referenced(&fenced_buf->base.base.reference));
    assert(fenced_buf->flags & PB_USAGE_GPU_READ_WRITE);
    assert(fenced_buf->fence);
 
-   p_atomic_inc(&fenced_buf->base.reference.count);
+   p_atomic_inc(&fenced_buf->base.base.reference.count);
 
    list_del(&fenced_buf->head);
    assert(fenced_mgr->num_unfenced);
@@ -253,7 +233,7 @@ fenced_buffer_add_locked(struct fenced_manager *fenced_mgr,
  *
  * Returns TRUE if the buffer was detroyed.
  */
-static inline boolean
+static inline bool
 fenced_buffer_remove_locked(struct fenced_manager *fenced_mgr,
                             struct fenced_buffer *fenced_buf)
 {
@@ -275,12 +255,12 @@ fenced_buffer_remove_locked(struct fenced_manager *fenced_mgr,
    list_addtail(&fenced_buf->head, &fenced_mgr->unfenced);
    ++fenced_mgr->num_unfenced;
 
-   if (p_atomic_dec_zero(&fenced_buf->base.reference.count)) {
+   if (p_atomic_dec_zero(&fenced_buf->base.base.reference.count)) {
       fenced_buffer_destroy_locked(fenced_mgr, fenced_buf);
-      return TRUE;
+      return true;
    }
 
-   return FALSE;
+   return false;
 }
 
 
@@ -301,13 +281,13 @@ fenced_buffer_finish_locked(struct fenced_manager *fenced_mgr,
    debug_warning("waiting for GPU");
 #endif
 
-   assert(pipe_is_referenced(&fenced_buf->base.reference));
+   assert(pipe_is_referenced(&fenced_buf->base.base.reference));
    assert(fenced_buf->fence);
 
-   if(fenced_buf->fence) {
+   if (fenced_buf->fence) {
       struct pipe_fence_handle *fence = NULL;
       int finished;
-      boolean proceed;
+      bool proceed;
 
       ops->fence_reference(ops, &fence, fenced_buf->fence);
 
@@ -317,23 +297,23 @@ fenced_buffer_finish_locked(struct fenced_manager *fenced_mgr,
 
       mtx_lock(&fenced_mgr->mutex);
 
-      assert(pipe_is_referenced(&fenced_buf->base.reference));
+      assert(pipe_is_referenced(&fenced_buf->base.base.reference));
 
       /*
        * Only proceed if the fence object didn't change in the meanwhile.
        * Otherwise assume the work has been already carried out by another
        * thread that re-acquired the lock before us.
        */
-      proceed = fence == fenced_buf->fence ? TRUE : FALSE;
+      proceed = fence == fenced_buf->fence ? true : false;
 
       ops->fence_reference(ops, &fence, NULL);
 
-      if(proceed && finished == 0) {
+      if (proceed && finished == 0) {
          /*
           * Remove from the fenced list
           */
 
-         boolean destroyed;
+         bool destroyed;
 
          destroyed = fenced_buffer_remove_locked(fenced_mgr, fenced_buf);
 
@@ -357,22 +337,22 @@ fenced_buffer_finish_locked(struct fenced_manager *fenced_mgr,
  *
  * Returns TRUE if at least one buffer was removed.
  */
-static boolean
+static bool
 fenced_manager_check_signalled_locked(struct fenced_manager *fenced_mgr,
-                                      boolean wait)
+                                      bool wait)
 {
    struct pb_fence_ops *ops = fenced_mgr->ops;
    struct list_head *curr, *next;
    struct fenced_buffer *fenced_buf;
    struct pipe_fence_handle *prev_fence = NULL;
-   boolean ret = FALSE;
+   bool ret = false;
 
    curr = fenced_mgr->fenced.next;
    next = curr->next;
-   while(curr != &fenced_mgr->fenced) {
+   while (curr != &fenced_mgr->fenced) {
       fenced_buf = list_entry(curr, struct fenced_buffer, head);
 
-      if(fenced_buf->fence != prev_fence) {
+      if (fenced_buf->fence != prev_fence) {
          int signaled;
 
          if (wait) {
@@ -383,9 +363,8 @@ fenced_manager_check_signalled_locked(struct fenced_manager *fenced_mgr,
              * following buffers' fences already expired,
              * without further waits.
              */
-            wait = FALSE;
-         }
-         else {
+            wait = false;
+         } else {
             signaled = ops->fence_signalled(ops, fenced_buf->fence, 0);
          }
 
@@ -394,8 +373,7 @@ fenced_manager_check_signalled_locked(struct fenced_manager *fenced_mgr,
          }
 
          prev_fence = fenced_buf->fence;
-      }
-      else {
+      } else {
          /* This buffer's fence object is identical to the previous buffer's
           * fence object, so no need to check the fence again.
           */
@@ -404,7 +382,7 @@ fenced_manager_check_signalled_locked(struct fenced_manager *fenced_mgr,
 
       fenced_buffer_remove_locked(fenced_mgr, fenced_buf);
 
-      ret = TRUE;
+      ret = true;
 
       curr = next;
       next = curr->next;
@@ -420,7 +398,7 @@ fenced_manager_check_signalled_locked(struct fenced_manager *fenced_mgr,
 static void
 fenced_buffer_destroy_gpu_storage_locked(struct fenced_buffer *fenced_buf)
 {
-   if(fenced_buf->buffer) {
+   if (fenced_buf->buffer) {
       pb_reference(&fenced_buf->buffer, NULL);
    }
 }
@@ -432,7 +410,7 @@ fenced_buffer_destroy_gpu_storage_locked(struct fenced_buffer *fenced_buf)
  * This function is a shorthand around pb_manager::create_buffer for
  * fenced_buffer_create_gpu_storage_locked()'s benefit.
  */
-static inline boolean
+static inline bool
 fenced_buffer_try_create_gpu_storage_locked(struct fenced_manager *fenced_mgr,
                                             struct fenced_buffer *fenced_buf,
                                             const struct pb_desc *desc)
@@ -443,7 +421,7 @@ fenced_buffer_try_create_gpu_storage_locked(struct fenced_manager *fenced_mgr,
 
    fenced_buf->buffer = provider->create_buffer(fenced_mgr->provider,
                                                 fenced_buf->size, desc);
-   return fenced_buf->buffer ? TRUE : FALSE;
+   return fenced_buf->buffer ? true : false;
 }
 
 
@@ -454,14 +432,14 @@ static enum pipe_error
 fenced_buffer_create_gpu_storage_locked(struct fenced_manager *fenced_mgr,
                                         struct fenced_buffer *fenced_buf,
                                         const struct pb_desc *desc,
-                                        boolean wait)
+                                        bool wait)
 {
    assert(!fenced_buf->buffer);
 
    /*
     * Check for signaled buffers before trying to allocate.
     */
-   fenced_manager_check_signalled_locked(fenced_mgr, FALSE);
+   fenced_manager_check_signalled_locked(fenced_mgr, false);
 
    fenced_buffer_try_create_gpu_storage_locked(fenced_mgr, fenced_buf, desc);
 
@@ -470,26 +448,26 @@ fenced_buffer_create_gpu_storage_locked(struct fenced_manager *fenced_mgr,
     * - fences are expiring,
     * - or buffers are being being swapped out from GPU memory into CPU memory.
     */
-   while(!fenced_buf->buffer &&
-         (fenced_manager_check_signalled_locked(fenced_mgr, FALSE))) {
+   while (!fenced_buf->buffer &&
+         (fenced_manager_check_signalled_locked(fenced_mgr, false))) {
      fenced_buffer_try_create_gpu_storage_locked(fenced_mgr, fenced_buf,
                                                  desc);
    }
 
-   if(!fenced_buf->buffer && wait) {
+   if (!fenced_buf->buffer && wait) {
       /*
        * Same as before, but this time around, wait to free buffers if
        * necessary.
        */
-      while(!fenced_buf->buffer &&
-            (fenced_manager_check_signalled_locked(fenced_mgr, TRUE))) {
+      while (!fenced_buf->buffer &&
+            (fenced_manager_check_signalled_locked(fenced_mgr, true))) {
         fenced_buffer_try_create_gpu_storage_locked(fenced_mgr, fenced_buf,
                                                     desc);
       }
    }
 
-   if(!fenced_buf->buffer) {
-      if(0)
+   if (!fenced_buf->buffer) {
+      if (0)
          fenced_manager_dump_locked(fenced_mgr);
 
       /* give up */
@@ -506,7 +484,7 @@ fenced_buffer_destroy(void *winsys, struct pb_buffer *buf)
    struct fenced_buffer *fenced_buf = fenced_buffer(buf);
    struct fenced_manager *fenced_mgr = fenced_buf->mgr;
 
-   assert(!pipe_is_referenced(&fenced_buf->base.reference));
+   assert(!pipe_is_referenced(&fenced_buf->base.base.reference));
 
    mtx_lock(&fenced_mgr->mutex);
 
@@ -532,7 +510,7 @@ fenced_buffer_map(struct pb_buffer *buf,
    /*
     * Serialize writes.
     */
-   while((fenced_buf->flags & PB_USAGE_GPU_WRITE) ||
+   while ((fenced_buf->flags & PB_USAGE_GPU_WRITE) ||
          ((fenced_buf->flags & PB_USAGE_GPU_READ) &&
           (flags & PB_USAGE_CPU_WRITE))) {
 
@@ -540,7 +518,7 @@ fenced_buffer_map(struct pb_buffer *buf,
        * Don't wait for the GPU to finish accessing it,
        * if blocking is forbidden.
        */
-      if((flags & PB_USAGE_DONTBLOCK) &&
+      if ((flags & PB_USAGE_DONTBLOCK) &&
           ops->fence_signalled(ops, fenced_buf->fence, 0) != 0) {
          goto done;
       }
@@ -558,7 +536,7 @@ fenced_buffer_map(struct pb_buffer *buf,
 
    map = pb_map(fenced_buf->buffer, flags, flush_ctx);
 
-   if(map) {
+   if (map) {
       ++fenced_buf->mapcount;
       fenced_buf->flags |= flags & PB_USAGE_CPU_READ_WRITE;
    }
@@ -579,11 +557,11 @@ fenced_buffer_unmap(struct pb_buffer *buf)
    mtx_lock(&fenced_mgr->mutex);
 
    assert(fenced_buf->mapcount);
-   if(fenced_buf->mapcount) {
+   if (fenced_buf->mapcount) {
       if (fenced_buf->buffer)
          pb_unmap(fenced_buf->buffer);
       --fenced_buf->mapcount;
-      if(!fenced_buf->mapcount)
+      if (!fenced_buf->mapcount)
          fenced_buf->flags &= ~PB_USAGE_CPU_READ_WRITE;
    }
 
@@ -602,7 +580,7 @@ fenced_buffer_validate(struct pb_buffer *buf,
 
    mtx_lock(&fenced_mgr->mutex);
 
-   if(!vl) {
+   if (!vl) {
       /* invalidate */
       fenced_buf->vl = NULL;
       fenced_buf->validation_flags = 0;
@@ -615,12 +593,12 @@ fenced_buffer_validate(struct pb_buffer *buf,
    flags &= PB_USAGE_GPU_READ_WRITE;
 
    /* Buffer cannot be validated in two different lists */
-   if(fenced_buf->vl && fenced_buf->vl != vl) {
+   if (fenced_buf->vl && fenced_buf->vl != vl) {
       ret = PIPE_ERROR_RETRY;
       goto done;
    }
 
-   if(fenced_buf->vl == vl &&
+   if (fenced_buf->vl == vl &&
       (fenced_buf->validation_flags & flags) == flags) {
       /* Nothing to do -- buffer already validated */
       ret = PIPE_OK;
@@ -651,15 +629,15 @@ fenced_buffer_fence(struct pb_buffer *buf,
 
    mtx_lock(&fenced_mgr->mutex);
 
-   assert(pipe_is_referenced(&fenced_buf->base.reference));
+   assert(pipe_is_referenced(&fenced_buf->base.base.reference));
    assert(fenced_buf->buffer);
 
-   if(fence != fenced_buf->fence) {
+   if (fence != fenced_buf->fence) {
       assert(fenced_buf->vl);
       assert(fenced_buf->validation_flags);
 
       if (fenced_buf->fence) {
-         boolean destroyed;
+         bool destroyed;
          destroyed = fenced_buffer_remove_locked(fenced_mgr, fenced_buf);
          assert(!destroyed);
          (void) destroyed;
@@ -692,9 +670,9 @@ fenced_buffer_get_base_buffer(struct pb_buffer *buf,
 
    assert(fenced_buf->buffer);
 
-   if(fenced_buf->buffer)
+   if (fenced_buf->buffer) {
       pb_get_base_buffer(fenced_buf->buffer, base_buf, offset);
-   else {
+   } else {
       *base_buf = buf;
       *offset = 0;
    }
@@ -705,12 +683,12 @@ fenced_buffer_get_base_buffer(struct pb_buffer *buf,
 
 static const struct pb_vtbl
 fenced_buffer_vtbl = {
-      fenced_buffer_destroy,
-      fenced_buffer_map,
-      fenced_buffer_unmap,
-      fenced_buffer_validate,
-      fenced_buffer_fence,
-      fenced_buffer_get_base_buffer
+   fenced_buffer_destroy,
+   fenced_buffer_map,
+   fenced_buffer_unmap,
+   fenced_buffer_validate,
+   fenced_buffer_fence,
+   fenced_buffer_get_base_buffer
 };
 
 
@@ -727,13 +705,13 @@ fenced_bufmgr_create_buffer(struct pb_manager *mgr,
    enum pipe_error ret;
 
    fenced_buf = CALLOC_STRUCT(fenced_buffer);
-   if(!fenced_buf)
+   if (!fenced_buf)
       goto no_buffer;
 
-   pipe_reference_init(&fenced_buf->base.reference, 1);
-   fenced_buf->base.alignment_log2 = util_logbase2(desc->alignment);
-   fenced_buf->base.usage = desc->usage;
-   fenced_buf->base.size = size;
+   pipe_reference_init(&fenced_buf->base.base.reference, 1);
+   fenced_buf->base.base.alignment_log2 = util_logbase2(desc->alignment);
+   fenced_buf->base.base.usage = desc->usage;
+   fenced_buf->base.base.size = size;
    fenced_buf->size = size;
 
    fenced_buf->base.vtbl = &fenced_buffer_vtbl;
@@ -745,12 +723,12 @@ fenced_bufmgr_create_buffer(struct pb_manager *mgr,
     * Try to create GPU storage without stalling,
     */
    ret = fenced_buffer_create_gpu_storage_locked(fenced_mgr, fenced_buf,
-                                                 desc, TRUE);
+                                                 desc, true);
 
    /*
     * Give up.
     */
-   if(ret != PIPE_OK) {
+   if (ret != PIPE_OK) {
       goto no_storage;
    }
 
@@ -776,12 +754,12 @@ fenced_bufmgr_flush(struct pb_manager *mgr)
    struct fenced_manager *fenced_mgr = fenced_manager(mgr);
 
    mtx_lock(&fenced_mgr->mutex);
-   while(fenced_manager_check_signalled_locked(fenced_mgr, TRUE))
+   while (fenced_manager_check_signalled_locked(fenced_mgr, true))
       ;
    mtx_unlock(&fenced_mgr->mutex);
 
    assert(fenced_mgr->provider->flush);
-   if(fenced_mgr->provider->flush)
+   if (fenced_mgr->provider->flush)
       fenced_mgr->provider->flush(fenced_mgr->provider);
 }
 
@@ -800,11 +778,11 @@ fenced_bufmgr_destroy(struct pb_manager *mgr)
       sched_yield();
 #endif
       mtx_lock(&fenced_mgr->mutex);
-      while(fenced_manager_check_signalled_locked(fenced_mgr, TRUE))
+      while (fenced_manager_check_signalled_locked(fenced_mgr, true))
          ;
    }
 
-#ifdef DEBUG
+#if MESA_DEBUG
    /*assert(!fenced_mgr->num_unfenced);*/
 #endif
 
@@ -821,7 +799,7 @@ simple_fenced_bufmgr_create(struct pb_manager *provider,
 {
    struct fenced_manager *fenced_mgr;
 
-   if(!provider)
+   if (!provider)
       return NULL;
 
    fenced_mgr = CALLOC_STRUCT(fenced_manager);

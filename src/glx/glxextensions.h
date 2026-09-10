@@ -60,12 +60,11 @@ enum
    ATI_pixel_format_float_bit,
    INTEL_swap_event_bit,
    MESA_copy_sub_buffer_bit,
-   MESA_depth_float_bit,
+   MESA_gl_interop_bit,
    MESA_query_renderer_bit,
    MESA_swap_control_bit,
    MESA_swap_frame_usage_bit,
    NV_float_buffer_bit,
-   OML_swap_method_bit,
    OML_sync_control_bit,
    SGIS_multisample_bit,
    SGIX_fbconfig_bit,
@@ -192,11 +191,6 @@ enum
    GL_NV_texgen_reflection_bit,
    GL_NV_texture_compression_vtc_bit,
    GL_NV_texture_env_combine4_bit,
-   GL_NV_vertex_program_bit,
-   GL_NV_vertex_program1_1_bit,
-   GL_NV_vertex_program2_bit,
-   GL_NV_vertex_program2_option_bit,
-   GL_NV_vertex_program3_bit,
    GL_OES_compressed_paletted_texture_bit,
    GL_OES_read_format_bit,
    GL_SGI_color_matrix_bit,
@@ -276,6 +270,9 @@ extern GLboolean __glExtensionBitIsEnabled(struct glx_context *gc,
 
 extern void
 __glXEnableDirectExtension(struct glx_screen *psc, const char *name);
+
+extern void
+__glXForceEnableExtension(struct glx_screen *psc, const char *name);
 
 
 /* GLX_ALIAS should be used for functions with a non-void return type.

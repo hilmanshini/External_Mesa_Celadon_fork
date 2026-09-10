@@ -24,7 +24,7 @@
 #include "dxil_function.h"
 #include "dxil_module.h"
 
-#define MAX_FUNC_PARAMS 17
+#define MAX_FUNC_PARAMS 18
 
 struct predefined_func_descr {
    const char *base_name;
@@ -51,7 +51,9 @@ static struct  predefined_func_descr predefined_funcs[] = {
 {"dx.op.isSpecialFloat", "b", "iO", DXIL_ATTR_KIND_READ_NONE},
 {"dx.op.binary", "O", "iOO", DXIL_ATTR_KIND_READ_NONE},
 {"dx.op.bufferStore", "v", "i@iiOOOOc", DXIL_ATTR_KIND_NONE},
+{"dx.op.rawBufferStore", "v", "i@iiOOOOci", DXIL_ATTR_KIND_NONE},
 {"dx.op.bufferLoad", "R", "i@ii", DXIL_ATTR_KIND_READ_ONLY},
+{"dx.op.rawBufferLoad", "R", "i@iici", DXIL_ATTR_KIND_READ_ONLY},
 {"dx.op.attributeAtVertex", "O", "iiicc", DXIL_ATTR_KIND_READ_NONE},
 {"dx.op.sample", "R", "i@@ffffiiif", DXIL_ATTR_KIND_READ_ONLY},
 {"dx.op.sampleBias", "R", "i@@ffffiiiff", DXIL_ATTR_KIND_READ_ONLY},
@@ -60,6 +62,8 @@ static struct  predefined_func_descr predefined_funcs[] = {
 {"dx.op.sampleCmp", "R", "i@@ffffiiiff", DXIL_ATTR_KIND_READ_ONLY},
 {"dx.op.sampleCmpLevel", "R", "i@@ffffiiiff", DXIL_ATTR_KIND_READ_ONLY},
 {"dx.op.sampleCmpLevelZero", "R", "i@@ffffiiif", DXIL_ATTR_KIND_READ_ONLY},
+{"dx.op.sampleCmpBias", "R", "i@@ffffiiifff", DXIL_ATTR_KIND_READ_ONLY},
+{"dx.op.sampleCmpGrad", "R", "i@@ffffiiiffffffff", DXIL_ATTR_KIND_READ_ONLY},
 {"dx.op.textureLoad", "R", "i@iiiiiii", DXIL_ATTR_KIND_READ_ONLY},
 {"dx.op.textureGather", "R", "i@@ffffiii", DXIL_ATTR_KIND_READ_ONLY},
 {"dx.op.textureGatherCmp", "R", "i@@ffffiiif", DXIL_ATTR_KIND_READ_ONLY},
@@ -75,7 +79,8 @@ static struct  predefined_func_descr predefined_funcs[] = {
 {"dx.op.primitiveID", "i", "i", DXIL_ATTR_KIND_READ_NONE},
 {"dx.op.outputControlPointID", "i", "i", DXIL_ATTR_KIND_READ_NONE},
 {"dx.op.gsInstanceID", "i", "i", DXIL_ATTR_KIND_READ_NONE},
-{"dx.op.domainLocation", "f", "ii", DXIL_ATTR_KIND_READ_NONE},
+{"dx.op.viewID", "i", "i", DXIL_ATTR_KIND_READ_NONE},
+{"dx.op.domainLocation", "f", "ic", DXIL_ATTR_KIND_READ_NONE},
 {"dx.op.legacyF16ToF32", "f", "ii", DXIL_ATTR_KIND_READ_ONLY},
 {"dx.op.legacyF32ToF16", "i", "if", DXIL_ATTR_KIND_READ_ONLY},
 {"dx.op.makeDouble", "g", "iii", DXIL_ATTR_KIND_READ_NONE},
@@ -90,8 +95,26 @@ static struct  predefined_func_descr predefined_funcs[] = {
 {"dx.op.loadPatchConstant", "O", "iiic", DXIL_ATTR_KIND_READ_NONE},
 {"dx.op.loadOutputControlPoint", "O", "iiici", DXIL_ATTR_KIND_READ_NONE},
 {"dx.op.createHandleFromBinding", "@", "i#ib", DXIL_ATTR_KIND_READ_NONE},
+{"dx.op.createHandleFromHeap", "@", "iibb", DXIL_ATTR_KIND_READ_NONE},
 {"dx.op.annotateHandle", "@", "i@P", DXIL_ATTR_KIND_READ_NONE},
 {"dx.op.isHelperLane", "b", "i", DXIL_ATTR_KIND_READ_ONLY},
+{"dx.op.waveIsFirstLane", "b", "i", DXIL_ATTR_KIND_NO_UNWIND},
+{"dx.op.waveGetLaneIndex", "i", "i", DXIL_ATTR_KIND_READ_NONE},
+{"dx.op.waveGetLaneCount", "i", "i", DXIL_ATTR_KIND_READ_NONE},
+{"dx.op.waveReadLaneFirst", "O", "iO", DXIL_ATTR_KIND_NO_UNWIND},
+{"dx.op.waveReadLaneAt", "O", "iOi", DXIL_ATTR_KIND_NO_UNWIND},
+{"dx.op.waveAnyTrue", "b", "ib", DXIL_ATTR_KIND_NO_UNWIND},
+{"dx.op.waveAllTrue", "b", "ib", DXIL_ATTR_KIND_NO_UNWIND},
+{"dx.op.waveActiveAllEqual", "b", "iO", DXIL_ATTR_KIND_NO_UNWIND},
+{"dx.op.waveActiveBallot", "F", "ib", DXIL_ATTR_KIND_NO_UNWIND},
+{"dx.op.waveActiveOp", "O", "iOcc", DXIL_ATTR_KIND_NO_UNWIND},
+{"dx.op.waveActiveBit", "O", "iOc", DXIL_ATTR_KIND_NO_UNWIND},
+{"dx.op.wavePrefixOp", "O", "iOcc", DXIL_ATTR_KIND_NO_UNWIND},
+{"dx.op.quadReadLaneAt", "O", "iOi", DXIL_ATTR_KIND_NO_UNWIND},
+{"dx.op.quadOp", "O", "iOc", DXIL_ATTR_KIND_NO_UNWIND},
+{"dx.op.dot4AddPacked", "i", "iiii", DXIL_ATTR_KIND_READ_NONE},
+{"dx.op.startVertexLocation", "i", "i", DXIL_ATTR_KIND_READ_NONE},
+{"dx.op.startInstanceLocation", "i", "i", DXIL_ATTR_KIND_READ_NONE},
 };
 
 struct func_descr {
@@ -138,7 +161,7 @@ allocate_function_from_predefined(struct dxil_module *mod,
                                 predefined_funcs[i].attr);
       }
    }
-   unreachable("Invalid function name");
+   UNREACHABLE("Invalid function name");
 }
 
 const struct dxil_func *
@@ -202,6 +225,7 @@ get_type_from_string(struct dxil_module *mod, const char *param_descr,
          const struct dxil_type *target = get_type_from_string(mod, param_descr, overload, idx);
          return dxil_module_get_pointer_type(mod, target);
       }
+   case DXIL_FUNC_PARAM_FOURI32: return dxil_module_get_fouri32_type(mod);
    default:
       assert(0 && "unknown type identifier");
    }
@@ -224,7 +248,7 @@ dxil_alloc_func_with_rettype(struct dxil_module *mod, const char *name,
    while (param_descr[num_params]) {
       const struct dxil_type *t = get_type_from_string(mod, param_descr, overload, &index);
       if (!t)
-         return false;
+         return NULL;
       assert(num_params < MAX_FUNC_PARAMS);
       arg_types[num_params++] = t;
    }
@@ -234,7 +258,7 @@ dxil_alloc_func_with_rettype(struct dxil_module *mod, const char *name,
                                     arg_types, num_params);
    if (!func_type) {
       fprintf(stderr, "%s: Func type allocation failed\n", __func__);
-      return false;
+      return NULL;
    }
 
    char full_name[100];

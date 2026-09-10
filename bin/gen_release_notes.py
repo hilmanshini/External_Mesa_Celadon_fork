@@ -40,7 +40,8 @@ import docutils.utils
 import docutils.parsers.rst.states as states
 
 CURRENT_GL_VERSION = '4.6'
-CURRENT_VK_VERSION = '1.3'
+CURRENT_CL_VERSION = '3.1'
+CURRENT_VK_VERSION = '1.4'
 
 TEMPLATE = Template(textwrap.dedent("""\
     ${header}
@@ -61,12 +62,16 @@ TEMPLATE = Template(textwrap.dedent("""\
     ${gl_version} is **only** available if requested at context creation.
     Compatibility contexts may report a lower version depending on each driver.
 
+    Mesa ${this_version} implements the OpenCL ${cl_version} API, but the version reported by
+    the CL_DEVICE_VERSION, CL_DEVICE_NUMERIC_VERSION and CL_DEVICE_OPENCL_C_ALL_VERSIONS
+    clGetDeviceInfo queries depends on the particular driver being used.
+
     Mesa ${this_version} implements the Vulkan ${vk_version} API, but the version reported by
     the apiVersion property of the VkPhysicalDeviceProperties struct
     depends on the particular driver being used.
 
-    SHA256 checksum
-    ---------------
+    SHA checksums
+    -------------
 
     ::
 
@@ -168,6 +173,7 @@ class Inliner(states.Inliner):
                 break
         # Quote all original backslashes
         checked = re.sub('\x00', "\\\x00", checked)
+        checked = re.sub('@', '\\@', checked)
         return docutils.utils.unescape(checked, 1)
 
 inliner = Inliner();
@@ -200,7 +206,7 @@ async def parse_issues(commits: str) -> typing.List[str]:
                 # Avoid parsing "merge_requests" URL. Note that a valid issue
                 # URL may or may not contain the "/-/" text, so we check if
                 # the word "issues" is contained in URL.
-                and '/issues' in bug):
+                and ('/issues/' in bug or '/work_items/' in bug)):
                 # This means we have a bug in the form "Closes: https://..."
                 issues.append(os.path.basename(urllib.parse.urlparse(bug).path))
             elif ',' in bug:
@@ -225,8 +231,8 @@ async def gather_bugs(version: str) -> typing.List[str]:
     loop = asyncio.get_event_loop()
     async with aiohttp.ClientSession(loop=loop) as session:
         results = await asyncio.gather(*[get_bug(session, i) for i in issues])
-    typing.cast(typing.Tuple[str, ...], results)
-    bugs = list(results)
+    # Remove duplicates.
+    bugs = sorted(set(results))
     if not bugs:
         bugs = ['None']
     return bugs
@@ -279,7 +285,7 @@ def calculate_next_version(version: str, is_point: bool) -> str:
 def calculate_previous_version(version: str, is_point: bool) -> str:
     """Calculate the previous version to compare to.
 
-    In the case of -rc to final that verison is the previous .0 release,
+    In the case of -rc to final that version is the previous .0 release,
     (19.3.0 in the case of 20.0.0, for example). for point releases that is
     the last point release. This value will be the same as the input value
     for a point release, but different for a major release.
@@ -306,6 +312,7 @@ def get_features(is_point_release: bool) -> typing.Generator[str, None, None]:
             for line in f:
                 yield line.rstrip()
         p.unlink()
+        subprocess.run(['git', 'add', p])
     else:
         yield "None"
 
@@ -323,12 +330,13 @@ def update_release_notes_index(version: str) -> None:
         if first_list and line.startswith('-'):
             first_list = False
             new_relnotes.append(f'-  :doc:`{version} release notes <relnotes/{version}>`\n')
-        if not first_list and second_list and line.startswith('   relnotes/'):
+        if (not first_list and second_list and
+            re.match(r'   \d+.\d+(.\d+)? <relnotes/\d+.\d+(.\d+)?>', line)):
             second_list = False
-            new_relnotes.append(f'   relnotes/{version}\n')
+            new_relnotes.append(f'   {version} <relnotes/{version}>\n')
         new_relnotes.append(line)
 
-    with relnotes_index_path.open('w') as f:
+    with relnotes_index_path.open('w', encoding='utf-8') as f:
         for line in new_relnotes:
             f.write(line)
 
@@ -354,7 +362,7 @@ async def main() -> None:
     )
 
     final = pathlib.Path('docs') / 'relnotes' / f'{this_version}.rst'
-    with final.open('wt') as f:
+    with final.open('wt', encoding='utf-8') as f:
         try:
             f.write(TEMPLATE.render(
                 bugfix=is_point_release,
@@ -362,6 +370,7 @@ async def main() -> None:
                 changes=walk_shortlog(shortlog),
                 features=get_features(is_point_release),
                 gl_version=CURRENT_GL_VERSION,
+                cl_version=CURRENT_CL_VERSION,
                 this_version=this_version,
                 header=header,
                 header_underline=header_underline,
@@ -382,5 +391,5 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
+    loop = asyncio.new_event_loop()
     loop.run_until_complete(main())

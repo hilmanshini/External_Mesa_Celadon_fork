@@ -16,9 +16,9 @@
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
  * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
 #ifndef _U_TRACE_H
@@ -28,6 +28,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "util/hash_table.h"
+#include "util/u_dynarray.h"
 #include "util/macros.h"
 #include "util/u_atomic.h"
 #include "util/u_queue.h"
@@ -77,23 +79,43 @@ struct u_trace_printer;
  * Special reserved value to indicate that no timestamp was captured,
  * and that the timestamp of the previous trace should be reused.
  */
-#define U_TRACE_NO_TIMESTAMP ((uint64_t)0)
+#define U_TRACE_NO_TIMESTAMP ((uint64_t) 0)
+
+enum u_trace_backend_type {
+   U_TRACE_BACKEND_PRINT,
+   U_TRACE_BACKEND_JSON,
+   U_TRACE_BACKEND_PERFETTO,
+};
 
 /**
- * Driver provided callback to create a timestamp buffer which will be
- * read by u_trace_read_ts function.
+ * Address representation
  */
-typedef void* (*u_trace_create_ts_buffer)(struct u_trace_context *utctx,
-      uint32_t timestamps_count);
+struct u_trace_address {
+   /**
+    * Pointer to a buffer object
+    */
+   void *bo;
+   /**
+    * Offset inside the buffer object or address of bo is NULL
+    */
+   uint64_t offset;
+};
 
 /**
- * Driver provided callback to delete a timestamp buffer.
+ * Driver provided callback to create a buffer which will be read by
+ * u_trace_read_ts function.
  */
-typedef void (*u_trace_delete_ts_buffer)(struct u_trace_context *utctx,
-      void *timestamps);
+typedef void *(*u_trace_create_buffer)(struct u_trace_context *utctx,
+                                       uint64_t size_B);
 
 /**
- * Driver provided callback to emit commands into the soecified command
+ * Driver provided callback to delete a buffer.
+ */
+typedef void (*u_trace_delete_buffer)(struct u_trace_context *utctx,
+                                      void *buffer);
+
+/**
+ * Driver provided callback to emit commands into the specified command
  * stream to capture a 64b timestamp into the specified timestamps buffer,
  * at the specified index.
  *
@@ -101,10 +123,30 @@ typedef void (*u_trace_delete_ts_buffer)(struct u_trace_context *utctx,
  * a fixed rate, even as the GPU freq changes.  The same source used for
  * GL_TIMESTAMP queries should be appropriate.
  */
-typedef void (*u_trace_record_ts)(struct u_trace *ut, void *cs,
-                                  void *timestamps, unsigned idx,
-                                  bool end_of_pipe);
+typedef bool (*u_trace_record_ts)(struct u_trace *ut,
+                                  void *cs,
+                                  void *timestamps,
+                                  uint64_t offset_B,
+                                  uint32_t flags);
 
+/**
+ * Driver provided callback to capture indirect data.
+ */
+typedef void (*u_trace_capture_data)(struct u_trace *ut,
+                                     void *cs,
+                                     void *dst_buffer,
+                                     uint64_t dst_offset_B,
+                                     void *src_buffer,
+                                     uint64_t src_offset_B,
+                                     uint32_t size_B);
+
+/**
+ * Driver provided callback to read back previously recorded indirect data.
+ */
+typedef const void *(*u_trace_get_data)(struct u_trace_context *utctx,
+                                        void *buffer,
+                                        uint64_t offset_B,
+                                        uint32_t size_B);
 /**
  * Driver provided callback to read back a previously recorded timestamp.
  * If necessary, this should block until the GPU has finished writing back
@@ -124,13 +166,28 @@ typedef void (*u_trace_record_ts)(struct u_trace *ut, void *cs,
  * capturing the same timestamp multiple times in a row.
  */
 typedef uint64_t (*u_trace_read_ts)(struct u_trace_context *utctx,
-      void *timestamps, unsigned idx, void *flush_data);
+                                    void *timestamps,
+                                    uint64_t offset_B,
+                                    uint32_t flags,
+                                    void *flush_data);
+
+/**
+ * Driver provided callback to create a buffer which will be read by
+ * u_trace_read_ts function.
+ */
+typedef void *(*u_trace_copy_data)(struct u_trace *ut,
+                                   void *cs,
+                                   void *dst,
+                                   uint64_t dst_offset_B,
+                                   void *src,
+                                   uint64_t src_offset_B,
+                                   uint64_t size_B);
 
 /**
  * Driver provided callback to delete flush data.
  */
 typedef void (*u_trace_delete_flush_data)(struct u_trace_context *utctx,
-      void *flush_data);
+                                          void *flush_data);
 
 enum u_trace_type {
    U_TRACE_TYPE_PRINT = 1u << 0,
@@ -138,18 +195,35 @@ enum u_trace_type {
    U_TRACE_TYPE_PERFETTO_ACTIVE = 1u << 2,
    U_TRACE_TYPE_PERFETTO_ENV = 1u << 3,
    U_TRACE_TYPE_MARKERS = 1u << 4,
+   U_TRACE_TYPE_INDIRECTS = 1u << 5,
+   U_TRACE_TYPE_CSV = 1u << 6,
+   U_TRACE_TYPE_RANGES = 1u << 7,
 
+   U_TRACE_TYPE_PRINT_CSV = U_TRACE_TYPE_PRINT | U_TRACE_TYPE_CSV,
    U_TRACE_TYPE_PRINT_JSON = U_TRACE_TYPE_PRINT | U_TRACE_TYPE_JSON,
-   U_TRACE_TYPE_PERFETTO = U_TRACE_TYPE_PERFETTO_ACTIVE | U_TRACE_TYPE_PERFETTO_ENV,
+   U_TRACE_TYPE_PERFETTO =
+      U_TRACE_TYPE_PERFETTO_ACTIVE | U_TRACE_TYPE_PERFETTO_ENV,
 
    /*
-   * A mask of traces that require appending to the tracepoint chunk list.
-   */
-   U_TRACE_TYPE_REQUIRE_QUEUING = U_TRACE_TYPE_PRINT | U_TRACE_TYPE_PERFETTO,
+    * A mask of traces that require appending to the tracepoint chunk list.
+    */
+   U_TRACE_TYPE_REQUIRE_QUEUING = U_TRACE_TYPE_PRINT | U_TRACE_TYPE_PERFETTO | U_TRACE_TYPE_RANGES,
    /*
-   * A mask of traces that require processing the tracepoint chunk list.
-   */
-   U_TRACE_TYPE_REQUIRE_PROCESSING = U_TRACE_TYPE_PRINT | U_TRACE_TYPE_PERFETTO_ACTIVE,
+    * A mask of traces that require processing the tracepoint chunk list.
+    */
+   U_TRACE_TYPE_REQUIRE_PROCESSING =
+      U_TRACE_TYPE_PRINT | U_TRACE_TYPE_PERFETTO_ACTIVE | U_TRACE_TYPE_RANGES,
+};
+
+struct u_trace_tracepoint_range {
+   struct hash_table child_ranges;
+   uint32_t count;
+   uint64_t duration_ns;
+};
+
+struct u_trace_begin_tracepoint {
+   const void *event;
+   uint64_t timestamp_ns;
 };
 
 /**
@@ -162,11 +236,16 @@ struct u_trace_context {
 
    void *pctx;
 
-   u_trace_create_ts_buffer  create_timestamp_buffer;
-   u_trace_delete_ts_buffer  delete_timestamp_buffer;
-   u_trace_record_ts         record_timestamp;
-   u_trace_read_ts           read_timestamp;
+   u_trace_create_buffer create_buffer;
+   u_trace_delete_buffer delete_buffer;
+   u_trace_capture_data capture_data;
+   u_trace_get_data get_data;
+   u_trace_record_ts record_timestamp;
+   u_trace_read_ts read_timestamp;
    u_trace_delete_flush_data delete_flush_data;
+
+   uint64_t timestamp_size_bytes;
+   uint64_t max_indirect_size_bytes;
 
    FILE *out;
    struct u_trace_printer *out_printer;
@@ -193,8 +272,25 @@ struct u_trace_context {
    uint32_t event_nr;
    bool start_of_frame;
 
+   /* State for printing timestamps. */
+   uint32_t indentation;
+
+   /* State for accumulating timestamps. */
+   struct util_dynarray begin_tracepoints;
+   struct hash_table tracepoint_ranges;
+   uint32_t accumulated_frame_count;
+
+   void *dummy_indirect_data;
+
    /* list of unprocessed trace chunks in fifo order: */
-   struct list_head flushed_trace_chunks;
+   struct util_dynarray flushed_traces;
+};
+
+typedef struct linear_ctx linear_ctx;
+
+struct u_trace_buffer_view {
+   uint32_t buffer_index;
+   uint32_t offset;
 };
 
 /**
@@ -211,53 +307,82 @@ struct u_trace_context {
 struct u_trace {
    struct u_trace_context *utctx;
 
-   struct list_head trace_chunks;  /* list of unflushed trace chunks in fifo order */
+   linear_ctx *linear_alloc;
+   struct util_dynarray events;
+
+   struct u_trace_buffer_view last_timestamp;
+
+   struct util_dynarray buffers[2];
 };
 
 void u_trace_context_init(struct u_trace_context *utctx,
-      void *pctx,
-      u_trace_create_ts_buffer   create_timestamp_buffer,
-      u_trace_delete_ts_buffer   delete_timestamp_buffer,
-      u_trace_record_ts          record_timestamp,
-      u_trace_read_ts            read_timestamp,
-      u_trace_delete_flush_data  delete_flush_data);
+                          void *pctx,
+                          uint32_t timestamp_size_bytes,
+                          uint32_t max_indirect_size_bytes,
+                          u_trace_create_buffer create_buffer,
+                          u_trace_delete_buffer delete_buffer,
+                          u_trace_record_ts record_timestamp,
+                          u_trace_read_ts read_timestamp,
+                          u_trace_capture_data capture_data,
+                          u_trace_get_data get_data,
+                          u_trace_delete_flush_data delete_flush_data);
 void u_trace_context_fini(struct u_trace_context *utctx);
 
 /**
- * Flush (trigger processing) of traces previously flushed to the trace-context
- * by u_trace_flush().
+ * Flush (trigger processing) of traces previously flushed to the
+ * trace-context by u_trace_flush().
  *
  * This should typically be called in the driver's pctx->flush().
  */
 void u_trace_context_process(struct u_trace_context *utctx, bool eof);
 
 void u_trace_init(struct u_trace *ut, struct u_trace_context *utctx);
+void u_trace_move(struct u_trace *dst, struct u_trace *src);
 void u_trace_fini(struct u_trace *ut);
+
+void u_trace_state_init(void);
+bool u_trace_is_enabled(enum u_trace_type type);
 
 bool u_trace_has_points(struct u_trace *ut);
 
-struct u_trace_iterator
-{
+uint32_t u_trace_num_events(struct u_trace *ut);
+
+struct u_trace_iterator {
    struct u_trace *ut;
-   struct u_trace_chunk *chunk;
    uint32_t event_idx;
 };
 
-struct u_trace_iterator
-u_trace_begin_iterator(struct u_trace *ut);
+static inline struct u_trace_iterator
+u_trace_begin_iterator(struct u_trace *ut)
+{
+   struct u_trace_iterator iterator;
+   iterator.ut = ut;
+   iterator.event_idx = 0;
+   return iterator;
+}
 
-struct u_trace_iterator
-u_trace_end_iterator(struct u_trace *ut);
+static inline struct u_trace_iterator
+u_trace_end_iterator(struct u_trace *ut)
+{
+   struct u_trace_iterator iterator;
+   iterator.ut = ut;
+   iterator.event_idx = u_trace_num_events(ut);
+   return iterator;
+}
 
-bool
-u_trace_iterator_equal(struct u_trace_iterator a,
-                       struct u_trace_iterator b);
+static inline bool
+u_trace_iterator_equal(struct u_trace_iterator a, struct u_trace_iterator b)
+{
+   return a.ut == b.ut && a.event_idx == b.event_idx;
+}
 
-typedef void (*u_trace_copy_ts_buffer)(struct u_trace_context *utctx,
-      void *cmdstream,
-      void *ts_from, uint32_t from_offset,
-      void *ts_to, uint32_t to_offset,
-      uint32_t count);
+typedef void (*u_trace_copy_buffer)(struct u_trace_context *utctx,
+                                    void *cmdstream,
+                                    void *ts_from,
+                                    uint64_t from_offset,
+                                    void *ts_to,
+                                    uint64_t to_offset,
+                                    uint64_t size_B);
 
 /**
  * Clones tracepoints range into target u_trace.
@@ -274,38 +399,48 @@ void u_trace_clone_append(struct u_trace_iterator begin_it,
                           struct u_trace_iterator end_it,
                           struct u_trace *into,
                           void *cmdstream,
-                          u_trace_copy_ts_buffer copy_ts_buffer);
+                          u_trace_copy_buffer copy_buffer);
+
+uint32_t u_trace_clone_append_copy_count(struct u_trace_iterator begin_it,
+                                         struct u_trace_iterator end_it);
 
 void u_trace_disable_event_range(struct u_trace_iterator begin_it,
                                  struct u_trace_iterator end_it);
 
+#define U_TRACE_FRAME_UNKNOWN -1
 /**
  * Flush traces to the parent trace-context.  At this point, the expectation
- * is that all the tracepoints are "executed" by the GPU following any previously
- * flushed u_trace batch.
+ * is that all the tracepoints are "executed" by the GPU following any
+ * previously flushed u_trace batch.
  *
- * flush_data is a way for driver to pass additional data, which becomes available
- * only at the point of flush, to the u_trace_read_ts callback and perfetto.
- * The typical example of such data would be a fence to wait on in u_trace_read_ts,
- * and a submission_id to pass into perfetto.
- * The destruction of the data is done via u_trace_delete_flush_data.
+ * flush_data is a way for driver to pass additional data, which becomes
+ * available only at the point of flush, to the u_trace_read_ts callback and
+ * perfetto. The typical example of such data would be a fence to wait on in
+ * u_trace_read_ts, and a submission_id to pass into perfetto. The destruction
+ * of the data is done via u_trace_delete_flush_data.
  *
- * This should typically be called when the corresponding cmdstream (containing
- * the timestamp reads) is flushed to the kernel.
+ * This should typically be called when the corresponding cmdstream
+ * (containing the timestamp reads) is flushed to the kernel.
  */
-void u_trace_flush(struct u_trace *ut, void *flush_data, bool free_data);
+void u_trace_flush(struct u_trace *ut,
+                   void *flush_data,
+                   uint32_t frame_nr,
+                   bool free_data);
 
 #ifdef HAVE_PERFETTO
 static ALWAYS_INLINE bool
-u_trace_perfetto_active(struct u_trace_context* utctx) {
-   return p_atomic_read_relaxed(&utctx->enabled_traces) & U_TRACE_TYPE_PERFETTO_ACTIVE;
+u_trace_perfetto_active(struct u_trace_context *utctx)
+{
+   return p_atomic_read_relaxed(&utctx->enabled_traces) &
+          U_TRACE_TYPE_PERFETTO_ACTIVE;
 }
 
 void u_trace_perfetto_start(void);
 void u_trace_perfetto_stop(void);
 #else
 static ALWAYS_INLINE bool
-u_trace_perfetto_active(UNUSED struct u_trace_context* utctx) {
+u_trace_perfetto_active(UNUSED struct u_trace_context *utctx)
+{
    return false;
 }
 #endif
@@ -315,7 +450,8 @@ u_trace_perfetto_active(UNUSED struct u_trace_context* utctx) {
  * gate any expensive traces.
  */
 static ALWAYS_INLINE bool
-u_trace_enabled(struct u_trace_context *utctx) {
+u_trace_enabled(struct u_trace_context *utctx)
+{
    return p_atomic_read_relaxed(&utctx->enabled_traces) != 0;
 }
 
@@ -323,8 +459,10 @@ u_trace_enabled(struct u_trace_context *utctx) {
  * Return whether chunks should be processed or not.
  */
 static ALWAYS_INLINE bool
-u_trace_should_process(struct u_trace_context *utctx) {
-   return p_atomic_read_relaxed(&utctx->enabled_traces) & U_TRACE_TYPE_REQUIRE_PROCESSING;
+u_trace_should_process(struct u_trace_context *utctx)
+{
+   return p_atomic_read_relaxed(&utctx->enabled_traces) &
+          U_TRACE_TYPE_REQUIRE_PROCESSING;
 }
 
 /**
@@ -332,12 +470,14 @@ u_trace_should_process(struct u_trace_context *utctx) {
  * isn't active.
  */
 static ALWAYS_INLINE bool
-u_trace_markers_enabled(struct u_trace_context *utctx) {
-   return p_atomic_read_relaxed(&utctx->enabled_traces) & U_TRACE_TYPE_MARKERS;
+u_trace_markers_enabled(struct u_trace_context *utctx)
+{
+   return p_atomic_read_relaxed(&utctx->enabled_traces) &
+          U_TRACE_TYPE_MARKERS;
 }
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif  /* _U_TRACE_H */
+#endif /* _U_TRACE_H */

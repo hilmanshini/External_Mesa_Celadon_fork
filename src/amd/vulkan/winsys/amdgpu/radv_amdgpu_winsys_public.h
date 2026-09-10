@@ -6,33 +6,37 @@
  * Copyright © 2011 Marek Olšák <maraeo@gmail.com>
  * Copyright © 2015 Advanced Micro Devices, Inc.
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef RADV_AMDGPU_WINSYS_PUBLIC_H
 #define RADV_AMDGPU_WINSYS_PUBLIC_H
 
-struct radeon_winsys *radv_amdgpu_winsys_create(int fd, uint64_t debug_flags,
-                                                uint64_t perftest_flags,
-                                                bool reserve_vmid);
+#include "ac_gpu_info.h"
+#include "ac_linux_drm.h"
 
-struct radeon_winsys *radv_dummy_winsys_create(void);
+#include "vk_sync.h"
+
+VkResult radv_amdgpu_winsys_create(int fd, const struct radeon_info *info, uint64_t debug_flags,
+                                   uint64_t perftest_flags, bool is_virtio, struct radeon_winsys **winsys);
+
+struct radeon_winsys_info {
+   struct radeon_info base;
+   struct vk_sync_type syncobj_sync_type;
+   uint32_t global_priority_mask;
+};
+
+VkResult radv_amdgpu_winsys_query_info(int fd, uint64_t debug_flags, bool is_virtio, struct radeon_winsys_info *info);
+
+struct radeon_winsys_heap_info {
+   uint64_t allocated_vram;
+   uint64_t vram_usage;
+   uint64_t allocated_vram_vis;
+   uint64_t vram_vis_usage;
+   uint64_t allocated_gtt;
+   uint64_t gtt_usage;
+};
+
+int radv_amdgpu_winsys_query_heap_info(ac_drm_device *dev, struct radeon_winsys_heap_info *heap_info);
 
 #endif /* RADV_AMDGPU_WINSYS_PUBLIC_H */

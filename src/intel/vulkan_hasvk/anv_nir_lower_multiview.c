@@ -42,11 +42,12 @@ struct lower_multiview_state {
 
    uint32_t view_mask;
 
-   nir_ssa_def *instance_id;
-   nir_ssa_def *view_index;
+   nir_def *instance_id_with_views;
+   nir_def *instance_id;
+   nir_def *view_index;
 };
 
-static nir_ssa_def *
+static nir_def *
 build_instance_id(struct lower_multiview_state *state)
 {
    assert(state->builder.shader->info.stage == MESA_SHADER_VERTEX);
@@ -54,21 +55,22 @@ build_instance_id(struct lower_multiview_state *state)
    if (state->instance_id == NULL) {
       nir_builder *b = &state->builder;
 
-      b->cursor = nir_before_block(nir_start_block(b->impl));
+      b->cursor =
+         nir_after_def(state->instance_id_with_views);
 
       /* We use instancing for implementing multiview.  The actual instance id
        * is given by dividing instance_id by the number of views in this
        * subpass.
        */
       state->instance_id =
-         nir_idiv(b, nir_load_instance_id(b),
+         nir_idiv(b, state->instance_id_with_views,
                      nir_imm_int(b, util_bitcount(state->view_mask)));
    }
 
    return state->instance_id;
 }
 
-static nir_ssa_def *
+static nir_def *
 build_view_index(struct lower_multiview_state *state)
 {
    assert(state->builder.shader->info.stage != MESA_SHADER_FRAGMENT);
@@ -76,7 +78,8 @@ build_view_index(struct lower_multiview_state *state)
    if (state->view_index == NULL) {
       nir_builder *b = &state->builder;
 
-      b->cursor = nir_before_block(nir_start_block(b->impl));
+      b->cursor =
+         nir_after_def(state->instance_id_with_views);
 
       assert(state->view_mask != 0);
       if (util_bitcount(state->view_mask) == 1) {
@@ -90,9 +93,9 @@ build_view_index(struct lower_multiview_state *state)
           * id is given by instance_id % view_count.  We then have to convert
           * that to an actual view id.
           */
-         nir_ssa_def *compacted =
-            nir_umod(b, nir_load_instance_id(b),
-                        nir_imm_int(b, util_bitcount(state->view_mask)));
+         nir_def *compacted =
+            nir_umod_imm(b, state->instance_id_with_views,
+                            util_bitcount(state->view_mask));
 
          if (util_is_power_of_two_or_zero(state->view_mask + 1)) {
             /* If we have a full view mask, then compacted is what we want */
@@ -109,24 +112,24 @@ build_view_index(struct lower_multiview_state *state)
                remap |= (uint64_t)bit << (i++ * 4);
             }
 
-            nir_ssa_def *shift = nir_imul(b, compacted, nir_imm_int(b, 4));
+            nir_def *shift = nir_imul_imm(b, compacted, 4);
 
             /* One of these days, when we have int64 everywhere, this will be
              * easier.
              */
-            nir_ssa_def *shifted;
+            nir_def *shifted;
             if (remap <= UINT32_MAX) {
                shifted = nir_ushr(b, nir_imm_int(b, remap), shift);
             } else {
-               nir_ssa_def *shifted_low =
+               nir_def *shifted_low =
                   nir_ushr(b, nir_imm_int(b, remap), shift);
-               nir_ssa_def *shifted_high =
+               nir_def *shifted_high =
                   nir_ushr(b, nir_imm_int(b, remap >> 32),
-                              nir_isub(b, shift, nir_imm_int(b, 32)));
-               shifted = nir_bcsel(b, nir_ilt(b, shift, nir_imm_int(b, 32)),
+                              nir_iadd_imm(b, shift, -32));
+               shifted = nir_bcsel(b, nir_ilt_imm(b, shift, 32),
                                       shifted_low, shifted_high);
             }
-            state->view_index = nir_iand(b, shifted, nir_imm_int(b, 0xf));
+            state->view_index = nir_iand_imm(b, shifted, 0xf);
          }
       } else {
          const struct glsl_type *type = glsl_int_type();
@@ -159,7 +162,7 @@ is_load_view_index(const nir_instr *instr, const void *data)
           nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_view_index;
 }
 
-static nir_ssa_def *
+static nir_def *
 replace_load_view_index_with_zero(struct nir_builder *b,
                                   nir_instr *instr, void *data)
 {
@@ -167,7 +170,7 @@ replace_load_view_index_with_zero(struct nir_builder *b,
    return nir_imm_zero(b, 1, 32);
 }
 
-static nir_ssa_def *
+static nir_def *
 replace_load_view_index_with_layer_id(struct nir_builder *b,
                                       nir_instr *instr, void *data)
 {
@@ -198,7 +201,44 @@ anv_nir_lower_multiview(nir_shader *shader, uint32_t view_mask)
       .view_mask = view_mask,
    };
 
-   nir_builder_init(&state.builder, entrypoint);
+   state.builder = nir_builder_at(nir_before_impl(entrypoint));
+   nir_builder *b = &state.builder;
+
+   /* Save the original "instance ID" which is the actual instance ID
+    * multiplied by the number of views.
+    */
+   state.instance_id_with_views = nir_load_instance_id(b);
+
+   /* The view index is available in all stages but the instance id is only
+    * available in the VS.  If it's not a fragment shader, we need to pass
+    * the view index on to the next stage.
+    */
+   nir_def *view_index = build_view_index(&state);
+
+   assert(nir_def_block(view_index) == nir_start_block(entrypoint));
+   b->cursor = nir_after_def(view_index);
+
+   /* Unless there is only one possible view index (that would be set
+    * directly), pass it to the next stage.
+    */
+   nir_variable *view_index_out = NULL;
+   if (util_bitcount(state.view_mask) != 1) {
+      view_index_out = nir_variable_create(shader, nir_var_shader_out,
+                                           glsl_int_type(), "view index");
+      view_index_out->data.location = VARYING_SLOT_VIEW_INDEX;
+   }
+
+   nir_variable *layer_id_out =
+      nir_variable_create(shader, nir_var_shader_out,
+                          glsl_int_type(), "layer ID");
+   layer_id_out->data.location = VARYING_SLOT_LAYER;
+
+   if (shader->info.stage != MESA_SHADER_GEOMETRY) {
+      if (view_index_out)
+         nir_store_var(b, view_index_out, view_index, 0x1);
+
+      nir_store_var(b, layer_id_out, view_index, 0x1);
+   }
 
    nir_foreach_block(block, entrypoint) {
       nir_foreach_instr_safe(instr, block) {
@@ -207,55 +247,30 @@ anv_nir_lower_multiview(nir_shader *shader, uint32_t view_mask)
 
          nir_intrinsic_instr *load = nir_instr_as_intrinsic(instr);
 
-         if (load->intrinsic != nir_intrinsic_load_instance_id &&
-             load->intrinsic != nir_intrinsic_load_view_index)
-            continue;
+         switch (load->intrinsic) {
+         case nir_intrinsic_load_instance_id:
+            if (&load->def != state.instance_id_with_views) {
+               nir_def_replace(&load->def, build_instance_id(&state));
+            }
+            break;
+         case nir_intrinsic_load_view_index:
+            nir_def_replace(&load->def, view_index);
+            break;
+         case nir_intrinsic_emit_vertex_with_counter:
+            /* In geometry shaders, outputs become undefined after every
+             * EmitVertex() call.  We need to re-emit them for each vertex.
+             */
+            b->cursor = nir_before_instr(instr);
+            if (view_index_out)
+               nir_store_var(b, view_index_out, view_index, 0x1);
 
-         assert(load->dest.is_ssa);
-
-         nir_ssa_def *value;
-         if (load->intrinsic == nir_intrinsic_load_instance_id) {
-            value = build_instance_id(&state);
-         } else {
-            assert(load->intrinsic == nir_intrinsic_load_view_index);
-            value = build_view_index(&state);
+            nir_store_var(b, layer_id_out, view_index, 0x1);
+            break;
+         default:
+            break;
          }
-
-         nir_ssa_def_rewrite_uses(&load->dest.ssa, value);
-
-         nir_instr_remove(&load->instr);
       }
    }
 
-   /* The view index is available in all stages but the instance id is only
-    * available in the VS.  If it's not a fragment shader, we need to pass
-    * the view index on to the next stage.
-    */
-   nir_ssa_def *view_index = build_view_index(&state);
-
-   nir_builder *b = &state.builder;
-
-   assert(view_index->parent_instr->block == nir_start_block(entrypoint));
-   b->cursor = nir_after_instr(view_index->parent_instr);
-
-   /* Unless there is only one possible view index (that would be set
-    * directly), pass it to the next stage. */
-   if (util_bitcount(state.view_mask) != 1) {
-      nir_variable *view_index_out =
-         nir_variable_create(shader, nir_var_shader_out,
-                             glsl_int_type(), "view index");
-      view_index_out->data.location = VARYING_SLOT_VIEW_INDEX;
-      nir_store_var(b, view_index_out, view_index, 0x1);
-   }
-
-   nir_variable *layer_id_out =
-      nir_variable_create(shader, nir_var_shader_out,
-                          glsl_int_type(), "layer ID");
-   layer_id_out->data.location = VARYING_SLOT_LAYER;
-   nir_store_var(b, layer_id_out, view_index, 0x1);
-
-   nir_metadata_preserve(entrypoint, nir_metadata_block_index |
-                                     nir_metadata_dominance);
-
-   return true;
+   return nir_progress(true, entrypoint, nir_metadata_control_flow);
 }

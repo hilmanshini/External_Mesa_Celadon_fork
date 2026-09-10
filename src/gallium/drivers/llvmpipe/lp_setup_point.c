@@ -37,7 +37,6 @@
 #include "lp_state_fs.h"
 #include "lp_state_setup.h"
 #include "lp_context.h"
-#include "tgsi/tgsi_scan.h"
 #include "draw/draw_context.h"
 
 #define NUM_CHANNELS 4
@@ -53,7 +52,7 @@ struct point_info {
    float (*dadx)[4];
    float (*dady)[4];
 
-   boolean frontfacing;
+   bool frontfacing;
 };
 
 
@@ -110,17 +109,18 @@ texcoord_coef(struct lp_setup_context *setup,
               unsigned slot,
               unsigned i,
               unsigned sprite_coord_origin,
-              boolean perspective)
+              bool perspective)
 {
    float w0 = info->v0[0][3];
 
    assert(i < 4);
 
+   const float pixel_offset = setup->pixel_offset;
    if (i == 0) {
       float dadx = FIXED_ONE / (float)info->dx12;
       float dady =  0.0f;
-      float x0 = info->v0[0][0] - setup->pixel_offset;
-      float y0 = info->v0[0][1] - setup->pixel_offset;
+      float x0 = info->v0[0][0] - pixel_offset;
+      float y0 = info->v0[0][1] - pixel_offset;
 
       info->dadx[slot][0] = dadx;
       info->dady[slot][0] = dady;
@@ -134,8 +134,8 @@ texcoord_coef(struct lp_setup_context *setup,
    } else if (i == 1) {
       float dadx = 0.0f;
       float dady = FIXED_ONE / (float)info->dx12;
-      float x0 = info->v0[0][0] - setup->pixel_offset;
-      float y0 = info->v0[0][1] - setup->pixel_offset;
+      float x0 = info->v0[0][0] - pixel_offset;
+      float y0 = info->v0[0][1] - pixel_offset;
 
       if (sprite_coord_origin == PIPE_SPRITE_COORD_LOWER_LEFT) {
          dady = -dady;
@@ -216,7 +216,7 @@ setup_point_coefficients(struct lp_setup_context *setup,
       unsigned vert_attr = key->inputs[slot].src_index;
       unsigned usage_mask = key->inputs[slot].usage_mask;
       enum lp_interp interp = key->inputs[slot].interp;
-      boolean perspective = !!(interp == LP_INTERP_PERSPECTIVE);
+      bool perspective = !!(interp == LP_INTERP_PERSPECTIVE);
       unsigned i;
 
       if (perspective && usage_mask) {
@@ -322,7 +322,7 @@ print_point(struct lp_setup_context *setup,
 }
 
 
-static boolean
+static bool
 try_setup_point(struct lp_setup_context *setup,
                 const float (*v0)[4])
 {
@@ -343,7 +343,7 @@ try_setup_point(struct lp_setup_context *setup,
     * slightly different rounding.
     */
    const int adj = (setup->bottom_edge_rule != 0) ? 1 : 0;
-   const float pixel_offset = setup->multisample ? 0.0 : setup->pixel_offset;
+   const float pixel_offset = setup->pixel_offset;
    struct lp_scene *scene = setup->scene;
    int x[2], y[2];
 
@@ -434,10 +434,10 @@ try_setup_point(struct lp_setup_context *setup,
          bbox.y1 = bbox.y0 + int_width - 1;
       }
 
-      x[0] = (bbox.x0 - 1) << 8;
-      x[1] = (bbox.x1 + 1) << 8;
-      y[0] = (bbox.y0 - 1) << 8;
-      y[1] = (bbox.y1 + 1) << 8;
+      x[0] = (bbox.x0 - 1) << FIXED_ORDER;
+      x[1] = (bbox.x1 + 1) << FIXED_ORDER;
+      y[0] = (bbox.y0 - 1) << FIXED_ORDER;
+      y[1] = (bbox.y1 + 1) << FIXED_ORDER;
    }
 
    if (0) {
@@ -453,13 +453,13 @@ try_setup_point(struct lp_setup_context *setup,
    if (lp_setup_zero_sample_mask(setup)) {
       if (0) debug_printf("zero sample mask\n");
       LP_COUNT(nr_culled_tris);
-      return TRUE;
+      return true;
    }
 
    if (!u_rect_test_intersection(&setup->draw_regions[viewport_index], &bbox)) {
       if (0) debug_printf("no intersection\n");
       LP_COUNT(nr_culled_tris);
-      return TRUE;
+      return true;
    }
 
    u_rect_find_intersection(&setup->draw_regions[viewport_index], &bbox);
@@ -468,17 +468,15 @@ try_setup_point(struct lp_setup_context *setup,
    if (!setup->legacy_points || setup->multisample) {
       struct lp_rast_triangle *point;
       struct lp_rast_plane *plane;
-      unsigned bytes;
       unsigned nr_planes = 4;
 
       point = lp_setup_alloc_triangle(scene,
                                       key->num_inputs,
-                                      nr_planes,
-                                      &bytes);
+                                      nr_planes);
      if (!point)
-        return FALSE;
+        return false;
 
-#ifdef DEBUG
+#if MESA_DEBUG
       point->v[0][0] = v0[0][0];
       point->v[0][1] = v0[0][1];
 #endif
@@ -489,7 +487,7 @@ try_setup_point(struct lp_setup_context *setup,
           setup->face_slot > 0) {
          point->inputs.frontfacing = v0[setup->face_slot][0];
       } else {
-         point->inputs.frontfacing = TRUE;
+         point->inputs.frontfacing = true;
       }
 
       struct point_info info;
@@ -507,32 +505,32 @@ try_setup_point(struct lp_setup_context *setup,
        */
       setup_point_coefficients(setup, &info);
 
-      point->inputs.disable = FALSE;
-      point->inputs.is_blit = FALSE;
+      point->inputs.disable = false;
+      point->inputs.is_blit = false;
       point->inputs.layer = layer;
       point->inputs.viewport_index = viewport_index;
       point->inputs.view_index = setup->view_index;
 
       plane = GET_PLANES(point);
 
-      plane[0].dcdx = ~0U << 8;
+      plane[0].dcdx = ~0U;
       plane[0].dcdy = 0;
-      plane[0].c = -MAX2(x[0], bbox.x0 << 8);
-      plane[0].eo = 1 << 8;
+      plane[0].c = -MAX2(x[0], bbox.x0 << FIXED_ORDER);
+      plane[0].eo = 1;
 
-      plane[1].dcdx = 1 << 8;
+      plane[1].dcdx = 1;
       plane[1].dcdy = 0;
-      plane[1].c = MIN2(x[1], (bbox.x1 + 1) << 8);
+      plane[1].c = MIN2(x[1], (bbox.x1 + 1) << FIXED_ORDER);
       plane[1].eo = 0;
 
       plane[2].dcdx = 0;
-      plane[2].dcdy = 1 << 8;
-      plane[2].c = -MAX2(y[0], (bbox.y0 << 8) - adj);
-      plane[2].eo = 1 << 8;
+      plane[2].dcdy = 1;
+      plane[2].c = -MAX2(y[0], (bbox.y0 << FIXED_ORDER) - adj);
+      plane[2].eo = 1;
 
       plane[3].dcdx = 0;
-      plane[3].dcdy = ~0U << 8;
-      plane[3].c = MIN2(y[1], (bbox.y1 + 1) << 8);
+      plane[3].dcdy = ~0U;
+      plane[3].c = MIN2(y[1], (bbox.y1 + 1) << FIXED_ORDER);
       plane[3].eo = 0;
 
       if (!setup->legacy_points) {
@@ -546,9 +544,7 @@ try_setup_point(struct lp_setup_context *setup,
 
       int max_szorig = ((bbox.x1 - (bbox.x0 & ~3)) |
                         (bbox.y1 - (bbox.y0 & ~3)));
-      boolean use_32bits = max_szorig <= MAX_FIXED_LENGTH32;
-
-      return lp_setup_bin_triangle(setup, point, use_32bits,
+      return lp_setup_bin_triangle(setup, point, max_szorig,
                                    setup->fs.current.variant->opaque,
                                    &bbox, nr_planes, viewport_index);
 
@@ -556,8 +552,8 @@ try_setup_point(struct lp_setup_context *setup,
       struct lp_rast_rectangle *point =
          lp_setup_alloc_rectangle(scene, key->num_inputs);
       if (!point)
-         return FALSE;
-#ifdef DEBUG
+         return false;
+#if MESA_DEBUG
       point->v[0][0] = v0[0][0];
       point->v[0][1] = v0[0][1];
 #endif
@@ -573,7 +569,7 @@ try_setup_point(struct lp_setup_context *setup,
           setup->face_slot > 0) {
          point->inputs.frontfacing = v0[setup->face_slot][0];
       } else {
-         point->inputs.frontfacing = TRUE;
+         point->inputs.frontfacing = true;
       }
 
       struct point_info info;
@@ -591,8 +587,8 @@ try_setup_point(struct lp_setup_context *setup,
        */
       setup_point_coefficients(setup, &info);
 
-      point->inputs.disable = FALSE;
-      point->inputs.is_blit = FALSE;
+      point->inputs.disable = false;
+      point->inputs.is_blit = false;
       point->inputs.layer = layer;
       point->inputs.viewport_index = viewport_index;
       point->inputs.view_index = setup->view_index;
@@ -633,5 +629,3 @@ lp_setup_choose_point(struct lp_setup_context *setup)
       setup->point = lp_setup_point;
    }
 }
-
-

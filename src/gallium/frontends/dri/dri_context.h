@@ -33,7 +33,7 @@
 #define DRI_CONTEXT_H
 
 #include "dri_util.h"
-#include "pipe/p_compiler.h"
+#include "util/compiler.h"
 #include "hud/hud_context.h"
 
 struct pipe_context;
@@ -75,30 +75,18 @@ struct dri_context
 
    /* gallium */
    struct st_context *st;
-   struct pp_queue_t *pp;
    struct hud_context *hud;
 };
-
-static inline struct dri_context *
-dri_context(__DRIcontext *driContextPriv)
-{
-   return (struct dri_context *)driContextPriv;
-}
-
-static inline __DRIcontext *
-opaque_dri_context(struct dri_context *ctx)
-{
-   return (__DRIcontext *)ctx;
-}
 
 /***********************************************************************
  * dri_context.c
  */
 void dri_destroy_context(struct dri_context *ctx);
 
-boolean dri_unbind_context(struct dri_context *ctx);
+bool
+dri_unbind_context(struct dri_context *ctx);
 
-boolean
+bool
 dri_make_current(struct dri_context *ctx,
                  struct dri_drawable *draw,
 		 struct dri_drawable *read);
@@ -112,7 +100,8 @@ dri_create_context(struct dri_screen *screen,
                    const struct __DriverContextConfig *ctx_config,
                    unsigned *error,
                    struct dri_context *sharedContextPrivate,
-                   void *loaderPrivate);
+                   void *loaderPrivate,
+                   bool thread_safe);
 
 #endif
 

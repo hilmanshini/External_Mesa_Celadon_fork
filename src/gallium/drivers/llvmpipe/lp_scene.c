@@ -35,6 +35,7 @@
 #include "lp_fence.h"
 #include "lp_debug.h"
 #include "lp_context.h"
+#include "lp_screen.h"
 #include "lp_state_fs.h"
 #include "lp_setup_context.h"
 
@@ -51,7 +52,7 @@ struct resource_ref {
 #define SHADER_REF_SZ 32
 /** List of shader variant references */
 struct shader_ref {
-   struct lp_fragment_shader_variant *variant[SHADER_REF_SZ];
+   struct util_shader_variant *variant[SHADER_REF_SZ];
    int count;
    struct shader_ref *next;
 };
@@ -75,7 +76,7 @@ lp_scene_create(struct lp_setup_context *setup)
 
    (void) mtx_init(&scene->mutex, mtx_plain);
 
-#ifdef DEBUG
+#if MESA_DEBUG
    /* Do some scene limit sanity checks here */
    {
       size_t maxBins = TILES_X * TILES_Y;
@@ -112,18 +113,18 @@ lp_scene_destroy(struct lp_scene *scene)
  * Check if the scene's bins are all empty.
  * For debugging purposes.
  */
-boolean
+bool
 lp_scene_is_empty(struct lp_scene *scene)
 {
    for (unsigned y = 0; y < scene->tiles_y; y++) {
       for (unsigned x = 0; x < scene->tiles_x; x++) {
          const struct cmd_bin *bin = lp_scene_get_bin(scene, x, y);
          if (bin->head) {
-            return FALSE;
+            return false;
          }
       }
    }
-   return TRUE;
+   return true;
 }
 
 
@@ -131,7 +132,7 @@ lp_scene_is_empty(struct lp_scene *scene)
  * this scene.  Used in triangle/rectangle emit to avoid having to
  * check success at each bin.
  */
-boolean
+bool
 lp_scene_is_oom(struct lp_scene *scene)
 {
    return scene->alloc_failed;
@@ -167,49 +168,36 @@ init_scene_texture(struct lp_scene_surface *ssurf, struct pipe_surface *psurf)
       return;
    }
 
-   if (llvmpipe_resource_is_texture(psurf->texture)) {
-      ssurf->stride = llvmpipe_resource_stride(psurf->texture,
-                                               psurf->u.tex.level);
-      ssurf->layer_stride = llvmpipe_layer_stride(psurf->texture,
-                                                           psurf->u.tex.level);
-      ssurf->sample_stride = llvmpipe_sample_stride(psurf->texture);
+   ssurf->stride = llvmpipe_resource_stride(psurf->texture,
+                                             psurf->level);
+   ssurf->layer_stride = llvmpipe_layer_stride(psurf->texture,
+                                                         psurf->level);
+   ssurf->sample_stride = llvmpipe_sample_stride(psurf->texture);
 
-      ssurf->map = llvmpipe_resource_map(psurf->texture,
-                                         psurf->u.tex.level,
-                                         psurf->u.tex.first_layer,
-                                         LP_TEX_USAGE_READ_WRITE);
-      ssurf->format_bytes = util_format_get_blocksize(psurf->format);
-      ssurf->nr_samples = util_res_sample_count(psurf->texture);
-   } else {
-      struct llvmpipe_resource *lpr = llvmpipe_resource(psurf->texture);
-      unsigned pixstride = util_format_get_blocksize(psurf->format);
-      ssurf->stride = psurf->texture->width0;
-      ssurf->layer_stride = 0;
-      ssurf->sample_stride = 0;
-      ssurf->nr_samples = 1;
-      ssurf->map = lpr->data;
-      ssurf->map += psurf->u.buf.first_element * pixstride;
-      ssurf->format_bytes = util_format_get_blocksize(psurf->format);
-   }
+   ssurf->map = llvmpipe_resource_map(psurf->texture,
+                                       psurf->level,
+                                       psurf->first_layer,
+                                       LP_TEX_USAGE_READ_WRITE);
+   assert(ssurf->map);
+   ssurf->format_bytes = util_format_get_blocksize(psurf->format);
+   ssurf->nr_samples = util_res_sample_count(psurf->texture);
+   ssurf->base_layer = psurf->first_layer;
+   ssurf->layer_count = psurf->last_layer - psurf->first_layer + 1;
 }
 
 
 void
 lp_scene_begin_rasterization(struct lp_scene *scene)
 {
-   const struct pipe_framebuffer_state *fb = &scene->fb;
-
    //LP_DBG(DEBUG_RAST, "%s\n", __func__);
 
    for (unsigned i = 0; i < scene->fb.nr_cbufs; i++) {
-      struct pipe_surface *cbuf = scene->fb.cbufs[i];
-      init_scene_texture(&scene->cbufs[i], cbuf);
+      struct pipe_surface *cbuf = &scene->fb.cbufs[i];
+      init_scene_texture(&scene->cbufs[i], cbuf->texture ? cbuf : NULL);
    }
 
-   if (fb->zsbuf) {
-      struct pipe_surface *zsbuf = scene->fb.zsbuf;
-      init_scene_texture(&scene->zsbuf, zsbuf);
-   }
+   struct pipe_surface *zsbuf = &scene->fb.zsbuf;
+   init_scene_texture(&scene->zsbuf, zsbuf->texture ? zsbuf : NULL);
 }
 
 
@@ -219,14 +207,16 @@ lp_scene_begin_rasterization(struct lp_scene *scene)
 void
 lp_scene_end_rasterization(struct lp_scene *scene)
 {
+   mtx_lock(&scene->mutex);
+
    /* Unmap color buffers */
    for (unsigned i = 0; i < scene->fb.nr_cbufs; i++) {
       if (scene->cbufs[i].map) {
-         struct pipe_surface *cbuf = scene->fb.cbufs[i];
+         struct pipe_surface *cbuf = &scene->fb.cbufs[i];
          if (llvmpipe_resource_is_texture(cbuf->texture)) {
             llvmpipe_resource_unmap(cbuf->texture,
-                                    cbuf->u.tex.level,
-                                    cbuf->u.tex.first_layer);
+                                    cbuf->level,
+                                    cbuf->first_layer);
          }
          scene->cbufs[i].map = NULL;
       }
@@ -234,10 +224,10 @@ lp_scene_end_rasterization(struct lp_scene *scene)
 
    /* Unmap z/stencil buffer */
    if (scene->zsbuf.map) {
-      struct pipe_surface *zsbuf = scene->fb.zsbuf;
+      struct pipe_surface *zsbuf = &scene->fb.zsbuf;
       llvmpipe_resource_unmap(zsbuf->texture,
-                              zsbuf->u.tex.level,
-                              zsbuf->u.tex.first_layer);
+                              zsbuf->level,
+                              zsbuf->first_layer);
       scene->zsbuf.map = NULL;
    }
 
@@ -292,8 +282,8 @@ lp_scene_end_rasterization(struct lp_scene *scene)
          if (LP_DEBUG & DEBUG_SETUP)
             debug_printf("shader %d: %p\n", j, (void *) ref->variant[i]);
          j++;
-         lp_fs_variant_reference(llvmpipe_context(scene->pipe),
-                                 &ref->variant[i], NULL);
+         util_shader_variant_reference(&llvmpipe_screen(scene->pipe->screen)->fs_variant_opts,
+                                       &ref->variant[i], NULL);
       }
    }
 
@@ -321,9 +311,11 @@ lp_scene_end_rasterization(struct lp_scene *scene)
    scene->scene_size = 0;
    scene->resource_reference_size = 0;
 
-   scene->alloc_failed = FALSE;
+   scene->alloc_failed = false;
 
    util_unreference_framebuffer_state(&scene->fb);
+
+   mtx_unlock(&scene->mutex);
 }
 
 
@@ -353,7 +345,7 @@ lp_scene_new_data_block(struct lp_scene *scene)
 {
    if (scene->scene_size + DATA_BLOCK_SIZE > LP_SCENE_MAX_SIZE) {
       if (0) debug_printf("%s: failed\n", __func__);
-      scene->alloc_failed = TRUE;
+      scene->alloc_failed = true;
       return NULL;
    } else {
       struct data_block *block = MALLOC_STRUCT(data_block);
@@ -391,16 +383,18 @@ lp_scene_data_size(const struct lp_scene *scene)
 /**
  * Add a reference to a resource by the scene.
  */
-boolean
+bool
 lp_scene_add_resource_reference(struct lp_scene *scene,
                                 struct pipe_resource *resource,
-                                boolean initializing_scene,
-                                boolean writeable)
+                                bool initializing_scene,
+                                bool writeable)
 {
    struct resource_ref *ref;
    int i;
    struct resource_ref **list = writeable ? &scene->writeable_resources : &scene->resources;
    struct resource_ref **last = list;
+
+   mtx_lock(&scene->mutex);
 
    /* Look at existing resource blocks:
     */
@@ -410,8 +404,10 @@ lp_scene_add_resource_reference(struct lp_scene *scene,
       /* Search for this resource:
        */
       for (i = 0; i < ref->count; i++)
-         if (ref->resource[i] == resource)
-            return TRUE;
+         if (ref->resource[i] == resource) {
+            mtx_unlock(&scene->mutex);
+            return true;
+      }
 
       if (ref->count < RESOURCE_REF_SZ) {
          /* If the block is half-empty, then append the reference here.
@@ -425,8 +421,10 @@ lp_scene_add_resource_reference(struct lp_scene *scene,
    if (!ref) {
       assert(*last == NULL);
       *last = lp_scene_alloc(scene, sizeof *ref);
-      if (*last == NULL)
-          return FALSE;
+      if (*last == NULL) {
+          mtx_unlock(&scene->mutex);
+          return false;
+      }
 
       ref = *last;
       memset(ref, 0, sizeof *ref);
@@ -448,19 +446,16 @@ lp_scene_add_resource_reference(struct lp_scene *scene,
     * next resource added which exceeds 64MB in referenced texture
     * data.
     */
-   if (!initializing_scene &&
-       scene->resource_reference_size >= LP_SCENE_MAX_RESOURCE_SIZE)
-      return FALSE;
-
-   return TRUE;
+   int flush = (initializing_scene || scene->resource_reference_size < LP_SCENE_MAX_RESOURCE_SIZE);
+   mtx_unlock(&scene->mutex);
+   return flush;
 }
-
 
 /**
  * Add a reference to a fragment shader variant
  * Return FALSE if out of memory, TRUE otherwise.
  */
-boolean
+bool
 lp_scene_add_frag_shader_reference(struct lp_scene *scene,
                                    struct lp_fragment_shader_variant *variant)
 {
@@ -474,8 +469,8 @@ lp_scene_add_frag_shader_reference(struct lp_scene *scene,
       /* Search for this resource:
        */
       for (int i = 0; i < ref->count; i++)
-         if (ref->variant[i] == variant)
-            return TRUE;
+         if (ref->variant[i] == &variant->base)
+            return true;
 
       if (ref->count < SHADER_REF_SZ) {
          /* If the block is half-empty, then append the reference here.
@@ -490,7 +485,7 @@ lp_scene_add_frag_shader_reference(struct lp_scene *scene,
       assert(*last == NULL);
       *last = lp_scene_alloc(scene, sizeof *ref);
       if (*last == NULL)
-          return FALSE;
+          return false;
 
       ref = *last;
       memset(ref, 0, sizeof *ref);
@@ -498,10 +493,10 @@ lp_scene_add_frag_shader_reference(struct lp_scene *scene,
 
    /* Append the reference to the reference block.
     */
-   lp_fs_variant_reference(llvmpipe_context(scene->pipe),
-                           &ref->variant[ref->count++], variant);
+   util_shader_variant_reference(&llvmpipe_screen(scene->pipe->screen)->fs_variant_opts,
+                                 &ref->variant[ref->count++], &variant->base);
 
-   return TRUE;
+   return true;
 }
 
 
@@ -514,6 +509,15 @@ lp_scene_is_resource_referenced(const struct lp_scene *scene,
                                 const struct pipe_resource *resource)
 {
    const struct resource_ref *ref;
+
+   /* check the render targets */
+   for (unsigned j = 0; j < scene->fb.nr_cbufs; j++) {
+     if (scene->fb.cbufs[j].texture == resource)
+       return LP_REFERENCED_FOR_READ | LP_REFERENCED_FOR_WRITE;
+   }
+   if (scene->fb.zsbuf.texture == resource) {
+     return LP_REFERENCED_FOR_READ | LP_REFERENCED_FOR_WRITE;
+   }
 
    for (ref = scene->resources; ref; ref = ref->next) {
       for (int i = 0; i < ref->count; i++)
@@ -532,7 +536,7 @@ lp_scene_is_resource_referenced(const struct lp_scene *scene,
 
 
 /** advance curr_x,y to the next bin */
-static boolean
+static bool
 next_bin(struct lp_scene *scene)
 {
    scene->curr_x++;
@@ -542,9 +546,9 @@ next_bin(struct lp_scene *scene)
    }
    if (scene->curr_y >= scene->tiles_y) {
       /* no more bins */
-      return FALSE;
+      return false;
    }
-   return TRUE;
+   return true;
 }
 
 
@@ -619,30 +623,23 @@ lp_scene_begin_binning(struct lp_scene *scene,
     */
    unsigned max_layer = ~0;
    for (unsigned i = 0; i < scene->fb.nr_cbufs; i++) {
-      struct pipe_surface *cbuf = scene->fb.cbufs[i];
-      if (cbuf) {
+      struct pipe_surface *cbuf = &scene->fb.cbufs[i];
+      if (cbuf->texture) {
          if (llvmpipe_resource_is_texture(cbuf->texture)) {
             max_layer = MIN2(max_layer,
-                             cbuf->u.tex.last_layer - cbuf->u.tex.first_layer);
+                             cbuf->last_layer - cbuf->first_layer);
          } else {
             max_layer = 0;
          }
       }
    }
 
-   if (fb->zsbuf) {
-      struct pipe_surface *zsbuf = scene->fb.zsbuf;
-      max_layer = MIN2(max_layer, zsbuf->u.tex.last_layer - zsbuf->u.tex.first_layer);
+   if (fb->zsbuf.texture) {
+      struct pipe_surface *zsbuf = &scene->fb.zsbuf;
+      max_layer = MIN2(max_layer, zsbuf->last_layer - zsbuf->first_layer);
    }
 
    scene->fb_max_layer = max_layer;
-   scene->fb_max_samples = util_framebuffer_get_num_samples(fb);
-   if (scene->fb_max_samples == 4) {
-      for (unsigned i = 0; i < 4; i++) {
-         scene->fixed_sample_pos[i][0] = util_iround(lp_sample_pos_4x[i][0] * FIXED_ONE);
-         scene->fixed_sample_pos[i][1] = util_iround(lp_sample_pos_4x[i][1] * FIXED_ONE);
-      }
-   }
 }
 
 

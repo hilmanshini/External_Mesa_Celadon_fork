@@ -30,6 +30,7 @@
 #include "util/u_debug.h"
 #include "util/u_string.h"
 #include "util/u_math.h"
+#include "c11/threads.h"
 #include <inttypes.h>
 
 #include <stdio.h>
@@ -67,10 +68,11 @@ _util_debug_message(struct util_debug_callback *cb,
                     enum util_debug_type type,
                     const char *fmt, ...)
 {
+   if (!cb || !cb->debug_message)
+      return;
    va_list args;
    va_start(args, fmt);
-   if (cb && cb->debug_message)
-      cb->debug_message(cb->data, id, type, fmt, args);
+   cb->debug_message(cb->data, id, type, fmt, args);
    va_end(args);
 }
 
@@ -85,6 +87,7 @@ debug_disable_win32_error_dialogs(void)
     */
    UINT uMode = SetErrorMode(0);
    SetErrorMode(uMode);
+#ifndef _GAMING_XBOX
    if (uMode & SEM_FAILCRITICALERRORS) {
       /* Disable assertion failure message box.
        * http://msdn.microsoft.com/en-us/library/sas1dkb2.aspx
@@ -97,6 +100,7 @@ debug_disable_win32_error_dialogs(void)
       _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
 #endif
    }
+#endif /* _GAMING_XBOX */
 }
 #endif /* _WIN32 */
 
@@ -226,6 +230,35 @@ debug_get_num_option(const char *name, int64_t dfault)
 
    if (debug_get_option_should_print())
       debug_printf("%s: %s = %"PRId64"\n", __func__, name, result);
+
+   return result;
+}
+
+uint64_t
+debug_parse_unsigned_option(const char *str, uint64_t dfault)
+{
+   uint64_t result;
+   if (!str) {
+      result = dfault;
+   } else {
+      char *endptr;
+
+      result = strtoull(str, &endptr, 0);
+      if (str == endptr) {
+         /* Restore the default value when no digits were found. */
+         result = dfault;
+      }
+   }
+   return result;
+}
+
+uint64_t
+debug_get_unsigned_option(const char *name, uint64_t dfault)
+{
+   uint64_t result = debug_parse_unsigned_option(os_get_option(name), dfault);
+
+   if (debug_get_option_should_print())
+      debug_printf("%s: %s = %"PRIu64"\n", __func__, name, result);
 
    return result;
 }
@@ -375,8 +408,8 @@ debug_dump_enum(const struct debug_named_value *names,
 const char *
 debug_dump_flags(const struct debug_named_value *names, uint64_t value)
 {
-   static char output[4096];
-   static char rest[256];
+   static thread_local char output[4096];
+   static thread_local char rest[256];
    int first = 1;
 
    output[0] = '\0';
@@ -420,18 +453,17 @@ parse_debug_string(const char *debug,
 
    if (debug != NULL) {
       for (; control->string != NULL; control++) {
-         if (!strcmp(debug, "all")) {
-            flag |= control->flag;
+         const char *s = debug;
+         unsigned n;
 
-         } else {
-            const char *s = debug;
-            unsigned n;
+         for (; n = strcspn(s, ", \n"), *s; s += MAX2(1, n)) {
+            if (!n)
+               continue;
 
-            for (; n = strcspn(s, ", "), *s; s += MAX2(1, n)) {
-               if (strlen(control->string) == n &&
-                   !strncmp(control->string, s, n))
-                  flag |= control->flag;
-            }
+            if (!strncmp("all", s, n) ||
+                (strlen(control->string) == n &&
+                !strncmp(control->string, s, n)))
+               flag |= control->flag;
          }
       }
    }
@@ -448,31 +480,33 @@ parse_enable_string(const char *debug,
    uint64_t flag = default_value;
 
    if (debug != NULL) {
-      for (; control->string != NULL; control++) {
-         if (!strcmp(debug, "all")) {
-            flag |= control->flag;
+      const char *s = debug;
+      unsigned n;
 
+      for (; n = strcspn(s, ", \n"), *s; s += MAX2(1, n)) {
+         bool enable;
+         if (s[0] == '+') {
+            enable = true;
+            s++; n--;
+         } else if (s[0] == '-') {
+            enable = false;
+            s++; n--;
          } else {
-            const char *s = debug;
-            unsigned n;
-
-            for (; n = strcspn(s, ", "), *s; s += MAX2(1, n)) {
-               bool enable;
-               if (s[0] == '+') {
-                  enable = true;
-                  s++; n--;
-               } else if (s[0] == '-') {
-                  enable = false;
-                  s++; n--;
-               } else {
-                  enable = true;
-               }
-               if (strlen(control->string) == n &&
-                   !strncmp(control->string, s, n)) {
+            enable = true;
+         }
+         if (!strncmp(s, "all", 3)) {
+            if (enable)
+               flag = ~0ull;
+            else
+               flag = 0;
+         } else {
+            for (const struct debug_control *c = control; c->string != NULL; c++) {
+               if (strlen(c->string) == n &&
+                   !strncmp(c->string, s, n)) {
                   if (enable)
-                     flag |= control->flag;
+                     flag |= c->flag;
                   else
-                     flag &= ~control->flag;
+                     flag &= ~c->flag;
                }
             }
          }
@@ -495,4 +529,40 @@ comma_separated_list_contains(const char *list, const char *s)
    }
 
    return false;
+}
+
+void
+dump_debug_control_string(char *output,
+                          size_t max_size,
+                          const struct debug_control *control,
+                          uint64_t flags)
+{
+   size_t pos = 0;
+   int ret;
+   bool first = true;
+
+   for (const struct debug_control *c = control; c->string != NULL; c++) {
+      if (!(flags & c->flag))
+         continue;
+      ret = snprintf(output + pos, max_size - pos,
+                     first ? "%s" : "|%s", c->string);
+      if (ret < 0 || ret >= max_size - pos) {
+         output[max_size-3] = output[max_size-2] = '.';
+         output[max_size-1] = '\0';
+         return;
+      }
+
+      pos += ret;
+      first = false;
+      flags &= ~(c->flag);
+   }
+
+   if (flags) {
+      ret = snprintf(output + pos, max_size - pos,
+                     first ? "0x%" PRIx64 : "|0x%" PRIx64, flags);
+      if (ret < 0 || ret >= max_size - pos) {
+         output[max_size-3] = output[max_size-2] = '.';
+         output[max_size-1] = '\0';
+      }
+   }
 }

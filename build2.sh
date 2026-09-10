@@ -1,0 +1,14 @@
+LLVM_CONFIG=/usr/bin/llvm-config-17 meson setup build-android-x86_64 \
+    --cross-file=init/android-x86_64 \
+    --native-file=native-llvm.ini \
+    -Dplatforms=android \
+    -Dplatform-sdk-version=34 \
+    -Dandroid-stub=true \
+    -Dandroid-libbacktrace=disabled \
+    -Degl=enabled \
+    -Dgallium-drivers=iris \
+    -Dvulkan-drivers=intel \
+    -Dallow-fallback-for=libdrm \
+    -Dmesa-clc=enabled \
+    -Dprecomp-compiler=enabled \
+    -Dvideo-codecs=all

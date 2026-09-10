@@ -36,8 +36,10 @@
 #include <vulkan/vulkan.h>
 
 #include "pvr_bo.h"
+#include "pvr_macros.h"
 #include "pvr_types.h"
 #include "pvr_winsys.h"
+
 #include "util/list.h"
 #include "util/macros.h"
 #include "util/u_dynarray.h"
@@ -48,7 +50,18 @@
 #define __pvr_make_address(addr_u64) PVR_DEV_ADDR(addr_u64)
 /* clang-format on */
 
-#include "csbgen/rogue_hwdefs.h"
+#if defined(PVR_BUILD_ARCH_ROGUE)
+#   include "csbgen/rogue/cdm.h"
+#   include "csbgen/rogue/cr.h"
+#   include "csbgen/rogue/ipf.h"
+#   include "csbgen/rogue/kmd_stream.h"
+#   include "csbgen/rogue/lls.h"
+#   include "csbgen/rogue/pbestate.h"
+#   include "csbgen/rogue/pds.h"
+#   include "csbgen/rogue/ppp.h"
+#   include "csbgen/rogue/texstate.h"
+#   include "csbgen/rogue/vdm.h"
+#endif
 
 /**
  * \brief Size of the individual csb buffer object.
@@ -74,6 +87,27 @@ struct pvr_csb {
    void *start;
    void *end;
    void *next;
+
+   /* When extending the control stream we can't break state updates across bos.
+    * This indicates where the current state update starts, so that it can be
+    * be relocated into the new bo without breaking the update.
+    */
+   void *relocation_mark;
+#if MESA_DEBUG
+   /* Used to track the state of the `relocation_mark` and to catch cases where
+    * the driver might have emitted to the cs without using the
+    * `relocation_mark`. Doing so is mostly harmless but will waste memory in
+    * case the cs is extended while an untracked state update is emitted, as
+    * we'll have to relocate the cs contents from the last tracked state update
+    * instead of just the one currently being emitted.
+    */
+   enum pvr_csb_relocation_mark_status {
+      PVR_CSB_RELOCATION_MARK_UNINITIALIZED,
+      PVR_CSB_RELOCATION_MARK_SET,
+      PVR_CSB_RELOCATION_MARK_SET_AND_CONSUMED,
+      PVR_CSB_RELOCATION_MARK_CLEARED,
+   } relocation_mark_status;
+#endif
 
    /* List of csb buffer objects */
    struct list_head pvr_bo_list;
@@ -127,45 +161,134 @@ pvr_csb_get_start_address(const struct pvr_csb *csb)
    return PVR_DEV_ADDR_INVALID;
 }
 
+/** \defgroup CSB relocation marking.
+ * Functions and macros related to relocation marking for control stream words.
+ *
+ * When there is no more space left in the current bo, csb needs has to extend
+ * the control stream by allocating a new bo and emitting a link to it. State
+ * updates have to be contiguous so cannot be broken by a link. Thus csb copies
+ * the current, in construction, state update into the new bo and emits a link
+ * in its place in the old bo. To do so however, it needs a hint from the driver
+ * to determine where the current state update started from, so a relocation
+ * mark is used.
+ *
+ * List of words demarking the beginning of state updates (i.e. state update
+ * headers):
+ *  - ROGUE_VDMCTRL_PPP_STATE0
+ *  - ROGUE_VDMCTRL_PDS_STATE0
+ *  - ROGUE_VDMCTRL_VDM_STATE0
+ *  - ROGUE_VDMCTRL_INDEX_LIST0
+ *  - ROGUE_VDMCTRL_STREAM_LINK0
+ *  - ROGUE_VDMCTRL_STREAM_RETURN
+ *  - ROGUE_VDMCTRL_STREAM_TERMINATE
+ *
+ *  - ROGUE_CDMCTRL_KERNEL0
+ *  - ROGUE_CDMCTRL_STREAM_LINK0
+ *  - ROGUE_CDMCTRL_STREAM_TERMINATE
+ *
+ * The driver should set the relocation mark whenever a new state update is
+ * started. And clear it when the state update is fully formed.
+ *
+ * PVR_CSB_RELOCATION_MARK state machine:
+ *
+ *    UNINITIALIZED
+ *         ↓
+ * ┌─── → SET ─────────┐
+ * │       ↓           │
+ * │ SET_AND_CONSUMED  │
+ * │       ↓           │
+ * │    CLEARED ← ─────┘
+ * └───────┘
+ *
+ * @{
+ */
+/* TODO: Add in the IPF transfer control stream state updates to the list once
+ * csb gets used for it
+ */
+
+/**
+ * \brief Set the relocation mark.
+ *
+ * Indicates to csb that on cs extension it should relocate all words, starting
+ * from now, into the new bo.
+ */
+static inline void pvr_csb_set_relocation_mark(struct pvr_csb *csb)
+{
+#if MESA_DEBUG
+   assert(csb->relocation_mark_status ==
+             PVR_CSB_RELOCATION_MARK_UNINITIALIZED ||
+          csb->relocation_mark_status == PVR_CSB_RELOCATION_MARK_CLEARED);
+
+   csb->relocation_mark_status = PVR_CSB_RELOCATION_MARK_SET;
+#endif
+
+   csb->relocation_mark = csb->next;
+}
+
+/**
+ * \brief Clear the relocation mark.
+ *
+ * Indicate to csb that the state update is fully formed so it doesn't need to
+ * relocate it in case of cs extension.
+ */
+static inline void pvr_csb_clear_relocation_mark(UNUSED struct pvr_csb *csb)
+{
+#if MESA_DEBUG
+   assert(csb->relocation_mark_status == PVR_CSB_RELOCATION_MARK_SET ||
+          csb->relocation_mark_status ==
+             PVR_CSB_RELOCATION_MARK_SET_AND_CONSUMED);
+
+   csb->relocation_mark_status = PVR_CSB_RELOCATION_MARK_CLEARED;
+#endif
+}
+
+/** @} */
+/* End of \defgroup CSB relocation marking. */
+
 void pvr_csb_init(struct pvr_device *device,
                   enum pvr_cmd_stream_type stream_type,
                   struct pvr_csb *csb);
 void pvr_csb_finish(struct pvr_csb *csb);
-void *pvr_csb_alloc_dwords(struct pvr_csb *csb, uint32_t num_dwords);
-VkResult pvr_csb_copy(struct pvr_csb *csb_dst, struct pvr_csb *csb_src);
-void pvr_csb_emit_link(struct pvr_csb *csb, pvr_dev_addr_t addr, bool ret);
-VkResult pvr_csb_emit_return(struct pvr_csb *csb);
-VkResult pvr_csb_emit_terminate(struct pvr_csb *csb);
+VkResult pvr_csb_bake(struct pvr_csb *csb, struct list_head *bo_list_out);
 
+#ifdef PVR_PER_ARCH
+
+void *PVR_PER_ARCH(csb_alloc_dwords)(struct pvr_csb *csb, uint32_t num_dwords);
+
+#   define pvr_arch_csb_alloc_dwords PVR_PER_ARCH(csb_alloc_dwords)
+
+VkResult PVR_PER_ARCH(csb_copy)(struct pvr_csb *csb_dst,
+                                struct pvr_csb *csb_src);
+
+#   define pvr_arch_csb_copy PVR_PER_ARCH(csb_copy)
+
+void PVR_PER_ARCH(csb_emit_link)(struct pvr_csb *csb,
+                                 pvr_dev_addr_t addr,
+                                 bool ret);
+
+#   define pvr_arch_csb_emit_link PVR_PER_ARCH(csb_emit_link)
+
+VkResult PVR_PER_ARCH(csb_emit_return)(struct pvr_csb *csb);
+
+#   define pvr_arch_csb_emit_return PVR_PER_ARCH(csb_emit_return)
+
+VkResult PVR_PER_ARCH(csb_emit_terminate)(struct pvr_csb *csb);
+
+#   define pvr_arch_csb_emit_terminate PVR_PER_ARCH(csb_emit_terminate)
+
+#endif /* PVR_PER_ARCH */
+
+#ifdef PVR_BUILD_ARCH_ROGUE
 void pvr_csb_dump(const struct pvr_csb *csb,
                   uint32_t frame_num,
                   uint32_t job_num);
+#endif
 
-#define PVRX(x) ROGUE_##x
-#define pvr_cmd_length(x) PVRX(x##_length)
-#define pvr_cmd_header(x) PVRX(x##_header)
-#define pvr_cmd_pack(x) PVRX(x##_pack)
-#define pvr_cmd_unpack(x) PVRX(x##_unpack)
-#define pvr_cmd_enum_to_str(x) PVRX(x##_to_str)
-
-/**
- * \brief Merges dwords0 and dwords1 arrays and stores the result into the
- * control stream pointed by the csb object.
- *
- * \param[in] csb     Control Stream Builder object.
- * \param[in] dwords0 Dwords0 array.
- * \param[in] dwords1 Dwords1 array.
- */
-#define pvr_csb_emit_merge(csb, dwords0, dwords1)                \
-   do {                                                          \
-      uint32_t *dw;                                              \
-      STATIC_ASSERT(ARRAY_SIZE(dwords0) == ARRAY_SIZE(dwords1)); \
-      dw = pvr_csb_alloc_dwords(csb, ARRAY_SIZE(dwords0));       \
-      if (!dw)                                                   \
-         break;                                                  \
-      for (uint32_t i = 0; i < ARRAY_SIZE(dwords0); i++)         \
-         dw[i] = (dwords0)[i] | (dwords1)[i];                    \
-   } while (0)
+#define pvr_cmd_length(x) ROGUE_##x##_length
+#define pvr_cmd_header(x) ROGUE_##x##_header
+#define pvr_cmd_pack(x) ROGUE_##x##_pack
+#define pvr_cmd_unpack(x) ROGUE_##x##_unpack
+#define pvr_cmd_enum_to_str(x) ROGUE_##x##_to_str
 
 /**
  * \brief Packs a command/state into one or more dwords and stores them into
@@ -178,31 +301,15 @@ void pvr_csb_dump(const struct pvr_csb *csb,
  *                     used by the caller to modify the command or state
  *                     information before it's packed.
  */
-#define pvr_csb_emit(csb, cmd, name)                               \
-   for (struct PVRX(cmd)                                           \
-           name = { pvr_cmd_header(cmd) },                         \
-           *_dst = pvr_csb_alloc_dwords(csb, pvr_cmd_length(cmd)); \
-        __builtin_expect(_dst != NULL, 1);                         \
-        ({                                                         \
-           pvr_cmd_pack(cmd)(_dst, &name);                         \
-           _dst = NULL;                                            \
+#define pvr_csb_emit(csb, cmd, name)                                    \
+   for (struct ROGUE_##cmd                                              \
+           name = { pvr_cmd_header(cmd) },                              \
+           *_dst = pvr_arch_csb_alloc_dwords(csb, pvr_cmd_length(cmd)); \
+        __builtin_expect(_dst != NULL, 1);                              \
+        ({                                                              \
+           pvr_cmd_pack(cmd)(_dst, &name);                              \
+           _dst = NULL;                                                 \
         }))
-
-/**
- * \brief Stores dword into the control stream pointed by the csb object.
- *
- * \param[in] csb   Control Stream Builder object.
- * \param[in] dword Dword to store into control stream.
- */
-#define pvr_csb_emit_dword(csb, dword)                  \
-   do {                                                 \
-      uint32_t *dw;                                     \
-      STATIC_ASSERT(sizeof(dword) == sizeof(uint32_t)); \
-      dw = pvr_csb_alloc_dwords(csb, 1U);               \
-      if (!dw)                                          \
-         break;                                         \
-      *dw = dword;                                      \
-   } while (0)
 
 /**
  * \name Raw command/state buffer helpers.
@@ -225,14 +332,15 @@ void pvr_csb_dump(const struct pvr_csb *csb,
  *                     This can be used by the caller to modify the command or
  *                     state information before it's packed.
  */
-#define pvr_csb_pack(_dst, cmd, name)                                 \
-   for (struct PVRX(cmd) name = { pvr_cmd_header(cmd) },              \
-                         *_loop_terminate = &name;                    \
-        __builtin_expect(_loop_terminate != NULL, 1);                 \
-        ({                                                            \
-           STATIC_ASSERT(sizeof(*(_dst)) == pvr_cmd_length(cmd) * 4); \
-           pvr_cmd_pack(cmd)((_dst), &name);                          \
-           _loop_terminate = NULL;                                    \
+#define pvr_csb_pack(_dst, cmd, name)                           \
+   for (struct ROGUE_##cmd name = { pvr_cmd_header(cmd) },      \
+                           *_loop_terminate = &name;            \
+        __builtin_expect(_loop_terminate != NULL, 1);           \
+        ({                                                      \
+           STATIC_ASSERT(sizeof(*(_dst)) ==                     \
+                         PVR_DW_TO_BYTES(pvr_cmd_length(cmd))); \
+           pvr_cmd_pack(cmd)((_dst), &name);                    \
+           _loop_terminate = NULL;                              \
         }))
 
 /**
@@ -244,12 +352,12 @@ void pvr_csb_dump(const struct pvr_csb *csb,
  * \param[in] _src     Pointer to read the packed command/state from.
  * \param[in] cmd      Command/state type.
  */
-#define pvr_csb_unpack(_src, cmd)                                \
-   ({                                                            \
-      struct PVRX(cmd) _name;                                    \
-      STATIC_ASSERT(sizeof(*(_src)) == pvr_cmd_length(cmd) * 4); \
-      pvr_cmd_unpack(cmd)((_src), &_name);                       \
-      _name;                                                     \
+#define pvr_csb_unpack(_src, cmd)                                             \
+   ({                                                                         \
+      struct ROGUE_##cmd _name;                                               \
+      STATIC_ASSERT(sizeof(*(_src)) == PVR_DW_TO_BYTES(pvr_cmd_length(cmd))); \
+      pvr_cmd_unpack(cmd)((_src), &_name);                                    \
+      _name;                                                                  \
    })
 
 /**
@@ -262,13 +370,13 @@ void pvr_csb_dump(const struct pvr_csb *csb,
  * \param[in]     cmd Command/state type.
  * \param[in]     val Pre-packed value to write.
  */
-#define pvr_csb_write_value(dst, cmd, val)                                    \
-   do {                                                                       \
-      static_assert(sizeof(*(dst)) == pvr_cmd_length(cmd) * sizeof(uint32_t), \
-                    "Size mismatch");                                         \
-      static_assert(sizeof(*(dst)) == sizeof(val), "Size mismatch");          \
-      *(dst) = (val);                                                         \
-      (dst)++;                                                                \
+#define pvr_csb_write_value(dst, cmd, val)                                  \
+   do {                                                                     \
+      static_assert(sizeof(*(dst)) == PVR_DW_TO_BYTES(pvr_cmd_length(cmd)), \
+                    "Size mismatch");                                       \
+      static_assert(sizeof(*(dst)) == sizeof(val), "Size mismatch");        \
+      *(dst) = (val);                                                       \
+      (dst)++;                                                              \
    } while (0)
 
 /**
@@ -282,12 +390,12 @@ void pvr_csb_dump(const struct pvr_csb *csb,
  * \param[in]     cmd Command/state type.
  * \param[in]     val Command/state struct to pack and write.
  */
-#define pvr_csb_write_struct(dst, cmd, val)                                   \
-   do {                                                                       \
-      static_assert(sizeof(*(dst)) == pvr_cmd_length(cmd) * sizeof(uint32_t), \
-                    "Size mismatch");                                         \
-      pvr_cmd_pack(cmd)((dst), (val));                                        \
-      (dst)++;                                                                \
+#define pvr_csb_write_struct(dst, cmd, val)                                 \
+   do {                                                                     \
+      static_assert(sizeof(*(dst)) == PVR_DW_TO_BYTES(pvr_cmd_length(cmd)), \
+                    "Size mismatch");                                       \
+      pvr_cmd_pack(cmd)((dst), (val));                                      \
+      (dst)++;                                                              \
    } while (0)
 
 /**@}*/

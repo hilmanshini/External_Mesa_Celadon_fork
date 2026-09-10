@@ -35,7 +35,7 @@
 static bool
 is_swizzleless_move(nir_alu_instr *instr)
 {
-   unsigned num_comp = instr->dest.dest.ssa.num_components;
+   unsigned num_comp = instr->def.num_components;
 
    if (instr->src[0].src.ssa->num_components != num_comp)
       return false;
@@ -56,140 +56,137 @@ is_swizzleless_move(nir_alu_instr *instr)
    return true;
 }
 
-static bool
-rewrite_to_vec(nir_function_impl *impl, nir_alu_instr *mov, nir_alu_instr *vec)
+static void
+merge_vec_and_mov(nir_alu_instr *mov, nir_alu_instr *vec)
 {
-   if (mov->op != nir_op_mov)
-      return false;
+   nir_builder b = nir_builder_at(nir_after_instr(&mov->instr));
 
-   nir_builder b;
-   nir_builder_init(&b, impl);
-   b.cursor = nir_after_instr(&mov->instr);
-
-   unsigned num_comp = mov->dest.dest.ssa.num_components;
+   unsigned num_comp = mov->def.num_components;
    nir_alu_instr *new_vec = nir_alu_instr_create(b.shader, nir_op_vec(num_comp));
    for (unsigned i = 0; i < num_comp; i++)
       new_vec->src[i] = vec->src[mov->src[0].swizzle[i]];
 
-   nir_ssa_def *new = nir_builder_alu_instr_finish_and_insert(&b, new_vec);
-   nir_ssa_def_rewrite_uses(&mov->dest.dest.ssa, new);
+   nir_def *new = nir_builder_alu_instr_finish_and_insert(&b, new_vec);
+   nir_def_rewrite_uses(&mov->def, new);
 
    /* If we remove "mov" and it's the next instruction in the
     * nir_foreach_instr_safe() loop, then we would end copy-propagation early. */
-
-   return true;
 }
 
 static bool
-copy_propagate_alu(nir_function_impl *impl, nir_alu_src *src, nir_alu_instr *copy)
+copy_propagate_alu(nir_alu_src *use_of_copy, nir_alu_instr *copy)
 {
-   nir_ssa_def *def = NULL;
-   nir_alu_instr *user = nir_instr_as_alu(src->src.parent_instr);
-   unsigned src_idx = src - user->src;
+   nir_def *new_use_src = NULL;
+   nir_alu_instr *user = nir_instr_as_alu(nir_src_use_instr(&use_of_copy->src));
+   unsigned src_idx = use_of_copy - user->src;
    assert(src_idx < nir_op_infos[user->op].num_inputs);
-   unsigned num_comp = nir_ssa_alu_instr_src_components(user, src_idx);
+   unsigned num_use_components = nir_ssa_alu_instr_src_components(user, src_idx);
 
    if (copy->op == nir_op_mov) {
-      def = copy->src[0].src.ssa;
+      new_use_src = copy->src[0].src.ssa;
 
-      for (unsigned i = 0; i < num_comp; i++)
-         src->swizzle[i] = copy->src[0].swizzle[src->swizzle[i]];
+      /* Propagate the mov swizzle to the use. */
+      for (unsigned i = 0; i < num_use_components; i++)
+         use_of_copy->swizzle[i] = copy->src[0].swizzle[use_of_copy->swizzle[i]];
    } else {
-      def = copy->src[src->swizzle[0]].src.ssa;
+      /* "copy" is vecN. */
+      new_use_src = copy->src[use_of_copy->swizzle[0]].src.ssa;
 
-      for (unsigned i = 1; i < num_comp; i++) {
-         if (copy->src[src->swizzle[i]].src.ssa != def)
-            return rewrite_to_vec(impl, user, copy);
+      for (unsigned i = 1; i < num_use_components; i++) {
+         if (copy->src[use_of_copy->swizzle[i]].src.ssa != new_use_src) {
+            if (user->op == nir_op_mov) {
+               /* When vecN using different defs is followed by mov, they are
+                * merged, which becomes a new vecN instruction.
+                *
+                * Ideally, mov would be merged into the preceding vecN, but
+                * since the old vecN can have other uses, we create a new vecN.
+                *
+                * TODO: This ends up creating duplicated instructions if
+                * the mov isn't CSE'd before this pass. It also leaves the mov
+                * dead, and the original vecN can end up dead too.
+                */
+               merge_vec_and_mov(user, copy);
+               return true;
+            } else {
+               /* If the use uses at least 2 components of vecN and those
+                * components source at least 2 different defs, it's not
+                * possible to propagate that vecN.
+                */
+               return false;
+            }
+         }
       }
 
-      for (unsigned i = 0; i < num_comp; i++)
-         src->swizzle[i] = copy->src[src->swizzle[i]].swizzle[0];
+      /* Propagate vecN (using the same def in all srcs, so it's equivalent to
+       * a swizzled mov) to the use.
+       */
+      for (unsigned i = 0; i < num_use_components; i++)
+         use_of_copy->swizzle[i] = copy->src[use_of_copy->swizzle[i]].swizzle[0];
    }
 
-   nir_instr_rewrite_src_ssa(src->src.parent_instr, &src->src, def);
+   nir_src_rewrite(&use_of_copy->src, new_use_src);
 
    return true;
 }
 
 static bool
-copy_propagate(nir_src *src, nir_alu_instr *copy)
+copy_propagate(nir_src *use_of_copy, nir_alu_instr *copy)
 {
    if (!is_swizzleless_move(copy))
       return false;
 
-   nir_instr_rewrite_src_ssa(src->parent_instr, src, copy->src[0].src.ssa);
+   nir_src_rewrite(use_of_copy, copy->src[0].src.ssa);
 
    return true;
 }
 
 static bool
-copy_propagate_if(nir_src *src, nir_alu_instr *copy)
-{
-   if (!is_swizzleless_move(copy))
-      return false;
-
-   nir_if_rewrite_condition_ssa(src->parent_if, src, copy->src[0].src.ssa);
-
-   return true;
-}
-
-static bool
-copy_prop_instr(nir_function_impl *impl, nir_instr *instr)
+copy_prop_instr(nir_instr *instr)
 {
    if (instr->type != nir_instr_type_alu)
       return false;
 
-   nir_alu_instr *mov = nir_instr_as_alu(instr);
+   nir_alu_instr *copy = nir_instr_as_alu(instr);
 
-   if (!nir_alu_instr_is_copy(mov))
+   if (!nir_op_is_vec_or_mov(copy->op))
       return false;
 
    bool progress = false;
 
-   nir_foreach_use_safe(src, &mov->dest.dest.ssa) {
-      if (src->parent_instr->type == nir_instr_type_alu)
-         progress |= copy_propagate_alu(impl, container_of(src, nir_alu_src, src), mov);
+   nir_foreach_use_including_if_safe(src, &copy->def) {
+      if (!nir_src_is_if(src) && nir_src_use_instr(src)->type == nir_instr_type_alu)
+         progress |= copy_propagate_alu(container_of(src, nir_alu_src, src), copy);
       else
-         progress |= copy_propagate(src, mov);
+         progress |= copy_propagate(src, copy);
    }
 
-   nir_foreach_if_use_safe(src, &mov->dest.dest.ssa)
-      progress |= copy_propagate_if(src, mov);
-
-   if (progress && nir_ssa_def_is_unused(&mov->dest.dest.ssa))
-      nir_instr_remove(&mov->instr);
+   if (progress && nir_def_is_unused(&copy->def))
+      nir_instr_remove(&copy->instr);
 
    return progress;
 }
 
 bool
-nir_copy_prop_impl(nir_function_impl *impl)
+nir_opt_copy_prop_impl(nir_function_impl *impl)
 {
    bool progress = false;
 
    nir_foreach_block(block, impl) {
       nir_foreach_instr_safe(instr, block) {
-         progress |= copy_prop_instr(impl, instr);
+         progress |= copy_prop_instr(instr);
       }
    }
 
-   if (progress) {
-      nir_metadata_preserve(impl, nir_metadata_block_index |
-                                  nir_metadata_dominance);
-   } else {
-      nir_metadata_preserve(impl, nir_metadata_all);
-   }
-
-   return progress;
+   return nir_progress(progress, impl, nir_metadata_control_flow);
 }
 
 bool
-nir_copy_prop(nir_shader *shader)
+nir_opt_copy_prop(nir_shader *shader)
 {
    bool progress = false;
 
-   nir_foreach_function(function, shader) {
-      if (function->impl && nir_copy_prop_impl(function->impl))
+   nir_foreach_function_impl(impl, shader) {
+      if (nir_opt_copy_prop_impl(impl))
          progress = true;
    }
 

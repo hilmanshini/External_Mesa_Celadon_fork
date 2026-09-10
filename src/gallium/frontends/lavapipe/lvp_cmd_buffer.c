@@ -23,6 +23,7 @@
 
 #include "lvp_private.h"
 #include "pipe/p_context.h"
+#include "vk_render_pass.h"
 #include "vk_util.h"
 
 #include "vk_common_entrypoints.h"
@@ -36,6 +37,7 @@ lvp_cmd_buffer_destroy(struct vk_command_buffer *cmd_buffer)
 
 static VkResult
 lvp_create_cmd_buffer(struct vk_command_pool *pool,
+                      VkCommandBufferLevel level,
                       struct vk_command_buffer **cmd_buffer_out)
 {
    struct lvp_device *device =
@@ -47,14 +49,18 @@ lvp_create_cmd_buffer(struct vk_command_pool *pool,
    if (cmd_buffer == NULL)
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   VkResult result = vk_command_buffer_init(pool, &cmd_buffer->vk,
-                                            &lvp_cmd_buffer_ops, 0);
+   VkResult result = vk_command_buffer_init_with_params(
+      &cmd_buffer->vk,
+      &(struct vk_command_buffer_init_params) {
+         .pool = pool,
+         .ops = &lvp_cmd_buffer_ops,
+         .level = level,
+         .needs_cmd_queue = true,
+      });
    if (result != VK_SUCCESS) {
       vk_free(&pool->alloc, cmd_buffer);
       return result;
    }
-
-   cmd_buffer->device = device;
 
    *cmd_buffer_out = &cmd_buffer->vk;
 
@@ -78,9 +84,15 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_BeginCommandBuffer(
    VkCommandBuffer                             commandBuffer,
    const VkCommandBufferBeginInfo*             pBeginInfo)
 {
-   LVP_FROM_HANDLE(lvp_cmd_buffer, cmd_buffer, commandBuffer);
+   VK_FROM_HANDLE(lvp_cmd_buffer, cmd_buffer, commandBuffer);
 
    vk_command_buffer_begin(&cmd_buffer->vk, pBeginInfo);
+   if (cmd_buffer->vk.level == VK_COMMAND_BUFFER_LEVEL_SECONDARY) {
+      const VkCommandBufferInheritanceRenderingInfo *rendering_info =
+         vk_get_command_buffer_inheritance_rendering_info(VK_COMMAND_BUFFER_LEVEL_SECONDARY, pBeginInfo);
+      if (rendering_info)
+         cmd_buffer->rendering_info = *rendering_info;
+   }
 
    return VK_SUCCESS;
 }
@@ -88,101 +100,7 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_BeginCommandBuffer(
 VKAPI_ATTR VkResult VKAPI_CALL lvp_EndCommandBuffer(
    VkCommandBuffer                             commandBuffer)
 {
-   LVP_FROM_HANDLE(lvp_cmd_buffer, cmd_buffer, commandBuffer);
+   VK_FROM_HANDLE(lvp_cmd_buffer, cmd_buffer, commandBuffer);
 
    return vk_command_buffer_end(&cmd_buffer->vk);
-}
-
-static void
-lvp_free_CmdPushDescriptorSetWithTemplateKHR(struct vk_cmd_queue *queue, struct vk_cmd_queue_entry *cmd)
-{
-   struct lvp_device *device = cmd->driver_data;
-   LVP_FROM_HANDLE(lvp_descriptor_update_template, templ, cmd->u.push_descriptor_set_with_template_khr.descriptor_update_template);
-   lvp_descriptor_template_templ_unref(device, templ);
-}
-
-VKAPI_ATTR void VKAPI_CALL lvp_CmdPushDescriptorSetWithTemplateKHR(
-   VkCommandBuffer                             commandBuffer,
-   VkDescriptorUpdateTemplate                  descriptorUpdateTemplate,
-   VkPipelineLayout                            layout,
-   uint32_t                                    set,
-   const void*                                 pData)
-{
-   LVP_FROM_HANDLE(lvp_cmd_buffer, cmd_buffer, commandBuffer);
-   LVP_FROM_HANDLE(lvp_descriptor_update_template, templ, descriptorUpdateTemplate);
-   size_t info_size = 0;
-   struct vk_cmd_queue_entry *cmd = vk_zalloc(cmd_buffer->vk.cmd_queue.alloc,
-                                              sizeof(*cmd), 8,
-                                              VK_SYSTEM_ALLOCATION_SCOPE_COMMAND);
-   if (!cmd)
-      return;
-
-   cmd->type = VK_CMD_PUSH_DESCRIPTOR_SET_WITH_TEMPLATE_KHR;
-
-   list_addtail(&cmd->cmd_link, &cmd_buffer->vk.cmd_queue.cmds);
-   cmd->driver_free_cb = lvp_free_CmdPushDescriptorSetWithTemplateKHR;
-   cmd->driver_data = cmd_buffer->device;
-
-   cmd->u.push_descriptor_set_with_template_khr.descriptor_update_template = descriptorUpdateTemplate;
-   lvp_descriptor_template_templ_ref(templ);
-   cmd->u.push_descriptor_set_with_template_khr.layout = layout;
-   cmd->u.push_descriptor_set_with_template_khr.set = set;
-
-   for (unsigned i = 0; i < templ->entry_count; i++) {
-      VkDescriptorUpdateTemplateEntry *entry = &templ->entry[i];
-
-      switch (entry->descriptorType) {
-      case VK_DESCRIPTOR_TYPE_SAMPLER:
-      case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
-      case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
-      case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
-      case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
-         info_size += sizeof(VkDescriptorImageInfo) * entry->descriptorCount;
-         break;
-      case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
-      case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
-         info_size += sizeof(VkBufferView) * entry->descriptorCount;
-         break;
-      case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
-      case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
-      case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
-      case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
-      default:
-         info_size += sizeof(VkDescriptorBufferInfo) * entry->descriptorCount;
-         break;
-      }
-   }
-
-   cmd->u.push_descriptor_set_with_template_khr.data = vk_zalloc(cmd_buffer->vk.cmd_queue.alloc, info_size, 8, VK_SYSTEM_ALLOCATION_SCOPE_COMMAND);
-
-   uint64_t offset = 0;
-   for (unsigned i = 0; i < templ->entry_count; i++) {
-      VkDescriptorUpdateTemplateEntry *entry = &templ->entry[i];
-
-      unsigned size = 0;
-      switch (entry->descriptorType) {
-      case VK_DESCRIPTOR_TYPE_SAMPLER:
-      case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
-      case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
-      case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
-      case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
-         size = sizeof(VkDescriptorImageInfo);
-         break;
-      case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
-      case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
-         size = sizeof(VkBufferView);
-         break;
-      case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
-      case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
-      case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
-      case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
-      default:
-         size = sizeof(VkDescriptorBufferInfo);
-         break;
-      }
-      for (unsigned i = 0; i < entry->descriptorCount; i++) {
-         memcpy((uint8_t*)cmd->u.push_descriptor_set_with_template_khr.data + offset, (const uint8_t*)pData + entry->offset + i * entry->stride, size);
-         offset += size;
-      }
-   }
 }

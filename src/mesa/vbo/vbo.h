@@ -203,6 +203,9 @@ void
 vbo_exec_update_eval_maps(struct gl_context *ctx);
 
 void
+vbo_reset_all_attr(struct gl_context *ctx);
+
+void
 vbo_exec_FlushVertices(struct gl_context *ctx, GLuint flags);
 
 void
@@ -226,6 +229,13 @@ vbo_get_minmax_index_mapped(unsigned count, unsigned index_size,
                             unsigned restartIndex, bool restart,
                             const void *indices,
                             unsigned *min_index, unsigned *max_index);
+
+void
+vbo_get_minmax_index(struct gl_context *ctx, struct gl_buffer_object *obj,
+                     const void *ptr, GLintptr offset, unsigned count,
+                     unsigned index_size, bool primitive_restart,
+                     unsigned restart_index, GLuint *min_index,
+                     GLuint *max_index);
 
 bool
 vbo_get_minmax_indices_gallium(struct gl_context *ctx,

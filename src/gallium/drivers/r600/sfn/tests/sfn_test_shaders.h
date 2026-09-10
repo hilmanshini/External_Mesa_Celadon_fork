@@ -2,9 +2,9 @@
 #define SFN_TEST_SHADERS_H
 #include <gtest/gtest.h>
 
-namespace r600 {
+#include "../sfn_shader.h"
 
-class Shader;
+namespace r600 {
 
 extern const char *red_triangle_fs_nir;
 extern const char *red_triangle_fs_expect_from_nir;
@@ -12,6 +12,7 @@ extern const char *red_triangle_fs_expect_from_nir_dce;
 
 extern const char *add_add_1_nir;
 extern const char *add_add_1_expect_from_nir;
+extern const char *add_add_1_expect_from_nir_scheduled;
 extern const char *add_add_1_expect_from_nir_copy_prop_fwd;
 extern const char *add_add_1_expect_from_nir_copy_prop_fwd_dce;
 extern const char *add_add_1_expect_from_nir_copy_prop_fwd_dce_bwd;
@@ -64,8 +65,8 @@ extern const char *shader_with_dest_array2_scheduled_ra;
 extern const char *shader_group_chan_pin_to_combine;
 extern const char *shader_group_chan_pin_combined;
 
-extern const char *shader_group_chan_pin_combined_sheduled;
-extern const char *shader_group_chan_pin_combined_sheduled_ra;
+extern const char *shader_group_chan_pin_combined_scheduled;
+extern const char *shader_group_chan_pin_combined_scheduled_ra;
 
 extern const char *shader_group_chan_pin_to_combine_2;
 extern const char *shader_group_chan_pin_to_combine_2_opt;
@@ -111,6 +112,13 @@ class TestShader : public ::testing::Test {
 
 protected:
    Shader *from_string(const std::string& s);
+};
+
+class TestShaderFromNir : public TestShader {
+
+protected:
+   void check(Shader *s, const char *expect_str);
+   void ra_check(Shader *s, const char *expect_str);
 };
 
 } // namespace r600

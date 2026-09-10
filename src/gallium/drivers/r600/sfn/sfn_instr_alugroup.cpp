@@ -1,60 +1,33 @@
 /* -*- mesa-c++  -*-
- *
- * Copyright (c) 2022 Collabora LTD
- *
+ * Copyright 2022 Collabora LTD
  * Author: Gert Wollny <gert.wollny@collabora.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include "sfn_instr_alugroup.h"
 
 #include "sfn_debug.h"
-#include "sfn_instr_export.h"
-#include "sfn_instr_mem.h"
-#include "sfn_instr_tex.h"
+
+#include "util/macros.h"
 
 #include <algorithm>
 
 namespace r600 {
 
-AluGroup::AluGroup() { std::fill(m_slots.begin(), m_slots.end(), nullptr); }
-
-static bool
-is_kill(EAluOp op)
+AluGroup::AluGroup()
 {
-   switch (op) {
-   case op2_kille:
-   case op2_kille_int:
-   case op2_killne:
-   case op2_killne_int:
-   case op2_killge:
-   case op2_killge_int:
-   case op2_killge_uint:
-   case op2_killgt:
-   case op2_killgt_int:
-   case op2_killgt_uint:
-      return true;
-   default:
-      return false;
-   }
+   std::fill(m_slots.begin(), m_slots.end(), nullptr);
+   m_free_slots = has_t() ? 0x1f : 0xf;
+}
+
+void
+AluGroup::apply_add_instr(AluInstr *instr)
+{
+   instr->set_parent_group(this);
+   instr->pin_registers();
+   m_has_kill_op |= instr->is_kill();
+   m_has_pred_update |= instr->has_alu_flag(alu_update_exec);
+   assert(!(m_has_kill_op && m_has_pred_update));
 }
 
 bool
@@ -69,16 +42,13 @@ AluGroup::add_instruction(AluInstr *instr)
       ASSERTED auto opinfo = alu_ops.find(instr->opcode());
       assert(opinfo->second.can_channel(AluOp::t, s_chip_class));
       if (add_trans_instructions(instr)) {
-         if (is_kill(instr->opcode()))
-            m_has_kill_op = true;
+         apply_add_instr(instr);
          return true;
       }
    }
 
    if (add_vec_instructions(instr) && !instr->has_alu_flag(alu_is_trans)) {
-      instr->set_parent_group(this);
-      if (!instr->has_alu_flag(alu_is_lds) && is_kill(instr->opcode()))
-         m_has_kill_op = true;
+      apply_add_instr(instr);
       return true;
    }
 
@@ -87,9 +57,7 @@ AluGroup::add_instruction(AluInstr *instr)
 
    if (s_max_slots > 4 && opinfo->second.can_channel(AluOp::t, s_chip_class) &&
        add_trans_instructions(instr)) {
-      instr->set_parent_group(this);
-      if (is_kill(instr->opcode()))
-         m_has_kill_op = true;
+      apply_add_instr(instr);
       return true;
    }
 
@@ -100,9 +68,6 @@ bool
 AluGroup::add_trans_instructions(AluInstr *instr)
 {
    if (m_slots[4] || s_max_slots < 5)
-      return false;
-
-   if (!update_indirect_access(instr))
       return false;
 
    /* LDS instructions have to be scheduled in X */
@@ -124,22 +89,21 @@ AluGroup::add_trans_instructions(AluInstr *instr)
       if (instr->dest() && instr->dest()->pin() == pin_free) {
          int used_slot = 3;
          auto dest = instr->dest();
-         int free_mask = 0xf;
+         int possible_dest_channel_mask = m_free_slots ^ 0xf;
 
          for (auto p : dest->parents()) {
             auto alu = p->as_alu();
             if (alu)
-               free_mask &= alu->allowed_dest_chan_mask();
+               possible_dest_channel_mask &= alu->allowed_dest_chan_mask();
          }
 
          for (auto u : dest->uses()) {
-            free_mask &= u->allowed_src_chan_mask();
-            if (!free_mask)
+            possible_dest_channel_mask &= u->allowed_src_chan_mask();
+            if (!possible_dest_channel_mask)
                return false;
          }
 
-         while (used_slot >= 0 &&
-                (!m_slots[used_slot] || !(free_mask & (1 << used_slot))))
+         while (used_slot >= 0 && (!(possible_dest_channel_mask & (1 << used_slot))))
             --used_slot;
 
          // if we schedule a non-trans instr into the trans slot,
@@ -151,41 +115,46 @@ AluGroup::add_trans_instructions(AluInstr *instr)
       }
    }
 
+   if (!instr->has_alu_flag(alu_is_trans) && !m_slots[instr->dest_chan()])
+      return false;
+
    for (AluBankSwizzle i = sq_alu_scl_201; i != sq_alu_scl_unknown; ++i) {
-      AluReadportReservation readports_evaluator = m_readports_evaluator;
-      if (readports_evaluator.schedule_trans_instruction(*instr, i)) {
-         m_readports_evaluator = readports_evaluator;
+      AluReadportReservation readports_evaluator = m_readports_reserver;
+      if (readports_evaluator.schedule_trans_instruction(*instr, i) &&
+          update_indirect_access(instr)) {
+         m_readports_reserver = readports_evaluator;
          m_slots[4] = instr;
-         instr->pin_sources_to_chan();
+         m_free_slots &= ~0x10;
+
          sfn_log << SfnLog::schedule << "T: " << *instr << "\n";
 
          /* We added a vector op in the trans channel, so we have to
           * make sure the corresponding vector channel is used */
-         if (!instr->has_alu_flag(alu_is_trans) && !m_slots[instr->dest_chan()])
-            m_slots[instr->dest_chan()] = new AluInstr(op0_nop, instr->dest_chan());
+         assert(instr->has_alu_flag(alu_is_trans) || m_slots[instr->dest_chan()]);
+         m_has_kill_op |= instr->is_kill();
+         m_has_pred_update |= instr->has_alu_flag(alu_update_exec);
+
+         m_slot_assignemnt_order[m_next_slot_assignemnt++] = 4;
          return true;
       }
    }
    return false;
 }
 
-int
-AluGroup::free_slots() const
+bool
+AluGroup::require_push() const
 {
-   int free_mask = 0;
-   for (int i = 0; i < s_max_slots; ++i) {
-      if (!m_slots[i])
-         free_mask |= 1 << i;
+   for (auto& i : m_slots) {
+      if (i)
+         if (i->cf_type() == cf_alu_push_before)
+            return true;
    }
-   return free_mask;
+   return false;
 }
 
 bool
 AluGroup::add_vec_instructions(AluInstr *instr)
-{
-   if (!update_indirect_access(instr))
-      return false;
-
+{   
    int param_src = -1;
    for (auto& s : instr->sources()) {
       auto is = s->as_inline_const();
@@ -206,8 +175,9 @@ AluGroup::add_vec_instructions(AluInstr *instr)
    int preferred_chan = instr->dest_chan();
    if (!m_slots[preferred_chan]) {
       if (instr->bank_swizzle() != alu_vec_unknown) {
-         if (try_readport(instr, instr->bank_swizzle()))
+         if (try_readport(instr, instr->bank_swizzle())) {
             return true;
+         }
       } else {
          for (AluBankSwizzle i = alu_vec_012; i != alu_vec_unknown; ++i) {
             if (try_readport(instr, i))
@@ -254,14 +224,86 @@ AluGroup::add_vec_instructions(AluInstr *instr)
    return false;
 }
 
+void
+AluGroup::update_readport_reserver()
+{
+   AluReadportReservation readports_evaluator;
+
+   for (int k = 0; k < m_next_slot_assignemnt; ++k) {
+      int i = m_slot_assignemnt_order[k];
+      if (i < 4) {
+         if (!update_readport_reserver_vec(i, readports_evaluator)) {
+            sfn_log << SfnLog::err << *this << "\n";
+            UNREACHABLE("Redport reserver update failed when it shouldn't");
+         }
+      } else {
+         if (!update_readport_reserver_trans(readports_evaluator)) {
+            sfn_log << SfnLog::err << *this << "\n";
+            UNREACHABLE("Redport reserver update failed when it shouldn't");
+         }
+      }
+   }
+
+   m_readports_reserver = readports_evaluator;
+}
+
+bool
+AluGroup::update_readport_reserver_vec(int i, AluReadportReservation& readports_evaluator)
+{
+   assert(m_slots[i]);
+
+   if (m_slots[i]->bank_swizzle() != alu_vec_unknown) {
+      AluReadportReservation re = readports_evaluator;
+      if (re.schedule_vec_instruction(*m_slots[i], m_slots[i]->bank_swizzle())) {
+         readports_evaluator = re;
+      } else {
+         return false;
+      }
+   } else {
+      AluBankSwizzle bs = alu_vec_012;
+      while (bs != alu_vec_unknown) {
+         AluReadportReservation re = readports_evaluator;
+         if (re.schedule_vec_instruction(*m_slots[i], bs)) {
+            readports_evaluator = re;
+            break;
+         }
+         ++bs;
+      }
+      if (bs == alu_vec_unknown) {
+         return false;
+      }
+   }
+   return true;
+}
+
+bool
+AluGroup::update_readport_reserver_trans(AluReadportReservation& readports_evaluator)
+{
+   AluBankSwizzle bs = sq_alu_scl_201;
+   while (bs != sq_alu_scl_unknown) {
+      AluReadportReservation re = readports_evaluator;
+      if (re.schedule_trans_instruction(*m_slots[4], bs)) {
+         readports_evaluator = re;
+         break;
+      }
+      ++bs;
+   }
+   if (bs == sq_alu_scl_unknown) {
+      return false;
+   }
+   return true;
+}
+
 bool
 AluGroup::try_readport(AluInstr *instr, AluBankSwizzle cycle)
 {
    int preferred_chan = instr->dest_chan();
-   AluReadportReservation readports_evaluator = m_readports_evaluator;
-   if (readports_evaluator.schedule_vec_instruction(*instr, cycle)) {
-      m_readports_evaluator = readports_evaluator;
+   AluReadportReservation readports_evaluator = m_readports_reserver;
+   if (readports_evaluator.schedule_vec_instruction(*instr, cycle) &&
+       update_indirect_access(instr)) {
+      m_readports_reserver = readports_evaluator;
       m_slots[preferred_chan] = instr;
+      m_free_slots &= ~(1 << preferred_chan);
       m_has_lds_op |= instr->has_lds_access();
       sfn_log << SfnLog::schedule << "V: " << *instr << "\n";
       auto dest = instr->dest();
@@ -271,28 +313,94 @@ AluGroup::try_readport(AluInstr *instr, AluBankSwizzle cycle)
          else if (dest->pin() == pin_group)
             dest->set_pin(pin_chgr);
       }
-      instr->pin_sources_to_chan();
+      m_has_kill_op |= instr->is_kill();
+      m_has_pred_update |= instr->has_alu_flag(alu_update_exec);
+      m_slot_assignemnt_order[m_next_slot_assignemnt++] = preferred_chan;
       return true;
    }
    return false;
 }
 
-bool
-AluGroup::update_indirect_access(AluInstr *instr)
+bool AluGroup::replace_source(PRegister old_src, PVirtualValue new_src)
 {
-   auto [indirect_addr, for_src, is_index] = instr->indirect_addr();
+   AluReadportReservation rpr_sum;
 
-   if (indirect_addr) {
-      if (!m_addr_used) {
-         m_addr_used = indirect_addr;
-         m_addr_for_src = for_src;
-         m_addr_is_index = is_index;
-      } else if (!indirect_addr->equal_to(*m_addr_used)) {
+   // At this point we should not have anything in slot 4
+   assert(s_max_slots == 4 || !m_slots[4]);
+
+   for (int slot = 0; slot < 4; ++slot) {
+      if (!m_slots[slot])
+         continue;
+
+      assert(m_slots[slot]->alu_slots() == 1);
+
+      if (!m_slots[slot]->can_replace_source(old_src, new_src))
          return false;
+
+      auto& srcs = m_slots[slot]->sources();
+
+      std::array<PVirtualValue, 3> test_src;
+      std::transform(srcs.begin(),
+                     srcs.end(),
+                     test_src.begin(),
+                     [old_src, new_src](PVirtualValue s) {
+                        return old_src->equal_to(*s) ? new_src : s;
+                     });
+
+      if (!rpr_sum.update_from_sources(test_src, srcs.size()))
+         return false;
+   }
+
+   bool success = false;
+
+   for (int slot = 0; slot < 4; ++slot) {
+      if (!m_slots[slot])
+         continue;
+      success |= m_slots[slot]->do_replace_source(old_src, new_src);
+      for (auto& s : m_slots[slot]->sources()) {
+         if (s->pin() == pin_free)
+            s->set_pin(pin_chan);
+         else if (s->pin() == pin_group)
+               s->set_pin(pin_chgr);
       }
    }
 
+   m_readports_reserver = rpr_sum;
+   return success;
+}
+
+bool
+AluGroup::update_indirect_access(AluInstr *instr)
+{
+   auto [indirect_addr, for_dest, index_reg] = instr->indirect_addr();
+
+   if (indirect_addr) {
+      assert(!index_reg);
+      if (!m_addr_used) {
+         m_addr_used = indirect_addr;
+         m_addr_for_src = !for_dest;
+         m_addr_is_index = false;
+      } else if (!indirect_addr->equal_to(*m_addr_used) || m_addr_is_index) {
+         return false;
+      }
+   } else if (index_reg) {
+       if (!m_addr_used) {
+           m_addr_used = index_reg;
+           m_addr_is_index = true;
+       } else if (!index_reg->equal_to(*m_addr_used) || !m_addr_is_index) {
+           return false;
+       }
+   }
    return true;
+}
+
+bool AluGroup::index_mode_load()
+{
+   if (!m_slots[0] || !m_slots[0]->dest())
+      return false;
+
+   Register *dst = m_slots[0]->dest();
+   return dst->has_flag(Register::addr_or_idx) && dst->sel() > 0;
 }
 
 void
@@ -314,6 +422,8 @@ AluGroup::set_scheduled()
       if (m_slots[i])
          m_slots[i]->set_scheduled();
    }
+   if (m_origin)
+      m_origin->set_scheduled();
 }
 
 void
@@ -386,17 +496,11 @@ AluGroup::forward_set_blockid(int id, int index)
 uint32_t
 AluGroup::slots() const
 {
-   uint32_t result = (m_readports_evaluator.m_nliterals + 1) >> 1;
+   uint32_t result = (m_readports_reserver.m_nliterals + 1) >> 1;
    for (int i = 0; i < s_max_slots; ++i) {
       if (m_slots[i])
          ++result;
    }
-   if (m_addr_used) {
-      ++result;
-      if (m_addr_is_index)
-         ++result;
-   }
-
    return result;
 }
 
@@ -440,8 +544,10 @@ AluGroup::set_chipclass(r600_chip_class chip_class)
 {
    s_chip_class = chip_class;
    s_max_slots = chip_class == ISA_CC_CAYMAN ? 4 : 5;
+   s_all_slot_mask = (1 << s_max_slots) - 1;
 }
 
 int AluGroup::s_max_slots = 5;
+int AluGroup::s_all_slot_mask = 0x1f;
 r600_chip_class AluGroup::s_chip_class = ISA_CC_EVERGREEN;
 } // namespace r600

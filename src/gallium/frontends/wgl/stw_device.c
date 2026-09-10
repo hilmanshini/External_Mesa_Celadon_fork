@@ -29,7 +29,7 @@
 
 #include <windows.h>
 
-#include "glapi/glapi.h"
+#include "glapi/glapi/glapi.h"
 #include "util/u_debug.h"
 #include "util/u_math.h"
 #include "util/u_memory.h"
@@ -40,6 +40,7 @@
 #include "stw_device.h"
 #include "stw_winsys.h"
 #include "stw_pixelformat.h"
+#include "stw_gdishim.h"
 #include "gldrv.h"
 #include "stw_tls.h"
 #include "stw_framebuffer.h"
@@ -72,7 +73,8 @@ stw_get_param(struct pipe_frontend_screen *fscreen,
 static int
 get_refresh_rate(void)
 {
-   DEVMODE devModes;
+#ifndef _GAMING_XBOX
+   DEVMODE devModes = { .dmSize = sizeof(DEVMODE) };
 
    if (EnumDisplaySettings(NULL, ENUM_CURRENT_SETTINGS, &devModes)) {
       /* clamp the value, just in case we get garbage */
@@ -82,6 +84,9 @@ get_refresh_rate(void)
       /* reasonable default */
       return 60;
    }
+#else
+   return 60;
+#endif /* _GAMING_XBOX */
 }
 
 static bool
@@ -98,13 +103,18 @@ init_screen(const struct stw_winsys *stw_winsys, HDC hdc)
    stw_dev->screen = screen;
    stw_dev->zink = !memcmp(screen->get_name(screen), "zink", 4);
 
-   stw_dev->max_2d_length = screen->get_param(screen,
-                                              PIPE_CAP_MAX_TEXTURE_2D_SIZE);
+   stw_dev->max_2d_length = screen->caps.max_texture_2d_size;
    return true;
 }
 
 static const driOptionDescription gallium_driconf[] = {
    #include "pipe-loader/driinfo_gallium.h"
+
+DRI_CONF_SECTION("WGL")
+   DRI_CONF_WGL_FRAME_LATENCY(2)
+   DRI_CONF_WGL_SWAP_INTERVAL(1)
+   DRI_CONF_WGL_REQUIRE_GDI_COMPAT(false)
+DRI_CONF_SECTION_END
 };
 
 static void
@@ -112,10 +122,14 @@ init_options()
 {
    const char *driver_name = stw_dev->stw_winsys->get_name ? stw_dev->stw_winsys->get_name() : NULL;
    driParseOptionInfo(&stw_dev->option_info, gallium_driconf, ARRAY_SIZE(gallium_driconf));
-   driParseConfigFiles(&stw_dev->option_cache, &stw_dev->option_info, 0,
-      driver_name ? driver_name : "", NULL, NULL, NULL, 0, NULL, 0);
+   driParseConfigFiles(&stw_dev->option_cache, &stw_dev->option_info,
+                       &(driConfigFileParseParams) {
+                          .driverName = driver_name ? driver_name : "",
+                       });
    
    u_driconf_fill_st_options(&stw_dev->st_options, &stw_dev->option_cache);
+
+   stw_dev->swap_interval = driQueryOptioni(&stw_dev->option_cache, "wgl_swap_interval");
 }
 
 char *
@@ -124,7 +138,7 @@ stw_get_config_xml(void)
    return driGetOptionsXml(gallium_driconf, ARRAY_SIZE(gallium_driconf));
 }
 
-boolean
+bool
 stw_init(const struct stw_winsys *stw_winsys)
 {
    static struct stw_device stw_dev_storage;
@@ -156,25 +170,20 @@ stw_init(const struct stw_winsys *stw_winsys)
       goto error1;
    }
 
-   /* env var override for WGL_EXT_swap_control, useful for testing/debugging */
-   const char *s = os_get_option("WGL_SWAP_INTERVAL");
-   if (s) {
-      stw_dev->swap_interval = atoi(s);
-   }
    stw_dev->refresh_rate = get_refresh_rate();
 
    stw_dev->initialized = true;
 
-   return TRUE;
+   return true;
 
 error1:
    FREE(stw_dev->fscreen);
 
    stw_dev = NULL;
-   return FALSE;
+   return false;
 }
 
-boolean
+bool
 stw_init_screen(HDC hdc)
 {
    EnterCriticalSection(&stw_dev->screen_mutex);
@@ -199,7 +208,7 @@ stw_get_device(void)
    return stw_dev;
 }
 
-boolean
+bool
 stw_init_thread(void)
 {
    return stw_tls_init_thread();
@@ -236,6 +245,7 @@ stw_cleanup(void)
       return;
    }
 
+   free(stw_dev->st_options.force_explicit_uniform_loc_zero);
    free(stw_dev->st_options.force_gl_vendor);
    free(stw_dev->st_options.force_gl_renderer);
    free(stw_dev->st_options.mesa_extension_override);
@@ -253,7 +263,8 @@ stw_cleanup(void)
    st_screen_destroy(stw_dev->fscreen);
    FREE(stw_dev->fscreen);
 
-   stw_dev->screen->destroy(stw_dev->screen);
+   if (stw_dev->screen)
+      stw_dev->screen->destroy(stw_dev->screen);
 
    stw_tls_cleanup();
 
@@ -290,5 +301,5 @@ DrvValidateVersion(ULONG ulVersion)
     * ignore it.
     */
    (void)ulVersion;
-   return TRUE;
+   return true;
 }

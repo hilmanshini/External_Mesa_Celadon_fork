@@ -1,27 +1,7 @@
 /* -*- mesa-c++  -*-
- *
- * Copyright (c) 2022 Collabora LTD
- *
+ * Copyright 2022 Collabora LTD
  * Author: Gert Wollny <gert.wollny@collabora.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef R600_SFN_SHADER_FS_H
@@ -70,20 +50,20 @@ private:
 
    void do_print_properties(std::ostream& os) const override;
 
-   bool m_dual_source_blend;
-   unsigned m_max_color_exports;
-   unsigned m_export_highest;
-   unsigned m_num_color_exports;
-   unsigned m_color_export_mask;
-   ExportInstr *m_last_pixel_export;
+   bool m_dual_source_blend{false};
+   unsigned m_max_color_exports{0};
+   unsigned m_export_highest{0};
+   unsigned m_num_color_exports{0};
+   unsigned m_color_export_mask{0};
+   unsigned m_color_export_written_mask{0};
+   ExportInstr *m_last_pixel_export{nullptr};
 
    std::bitset<s_max_interpolators> m_interpolators_used;
    RegisterVec4 m_pos_input;
    Register *m_face_input{nullptr};
-   bool m_fs_write_all;
+   bool m_fs_write_all{false};
    bool m_uses_discard{false};
    bool m_gs_prim_id_input{false};
-   int m_ps_prim_id_input{0};
    Register *m_sample_id_reg{nullptr};
    Register *m_sample_mask_reg{nullptr};
    Register *m_helper_invocation{nullptr};

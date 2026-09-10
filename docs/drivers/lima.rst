@@ -55,6 +55,7 @@ These are some display drivers that have been tested with Lima:
 - Exynos: ``exynos``
 - Rockchip: ``rockchip``
 - Tiny DRM: ``tinydrm``
+- Xilinx ZynqMP: ``zynqmp-dpsub``
 
 Environment variables
 ---------------------
@@ -254,4 +255,4 @@ Reference
 Luc Verhaegen’s original Lima site:
 https://web.archive.org/web/20180101212947/http://limadriver.org/
 
-.. _Mesa issue: https://gitlab.freedesktop.org/mesa/mesa/-/issues?label_name%5B%5D=lima
+.. _Mesa issue: https://gitlab.freedesktop.org/mesa/mesa/-/work_items?label_name%5B%5D=lima

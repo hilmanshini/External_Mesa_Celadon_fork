@@ -29,7 +29,7 @@
 #define U_FRAMEBUFFER_H
 
 
-#include "pipe/p_compiler.h"
+#include "util/compiler.h"
 #include "pipe/p_state.h"
 
 
@@ -37,7 +37,7 @@
 extern "C" {
 #endif
 
-extern boolean
+extern bool
 util_framebuffer_state_equal(const struct pipe_framebuffer_state *dst,
                              const struct pipe_framebuffer_state *src);
 
@@ -50,7 +50,7 @@ extern void
 util_unreference_framebuffer_state(struct pipe_framebuffer_state *fb);
 
 
-extern boolean
+extern bool
 util_framebuffer_min_size(const struct pipe_framebuffer_state *fb,
                           unsigned *width,
                           unsigned *height);
@@ -68,6 +68,11 @@ extern void
 util_sample_locations_flip_y(struct pipe_screen *screen, unsigned fb_height,
                              unsigned samples, uint8_t *locations);
 
+
+/* if you see this in your driver stop using it */
+#define PIPE_FB_SURFACES \
+   struct pipe_surface *fb_cbufs[PIPE_MAX_COLOR_BUFS]; \
+   struct pipe_surface *fb_zsbuf
 
 #ifdef __cplusplus
 }

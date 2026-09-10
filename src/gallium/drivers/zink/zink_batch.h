@@ -24,7 +24,7 @@
 #ifndef ZINK_BATCH_H
 #define ZINK_BATCH_H
 
-#include <vulkan/vulkan.h>
+#include <vulkan/vulkan_core.h>
 #include "zink_types.h"
 
 #include "util/list.h"
@@ -54,75 +54,98 @@ void
 zink_batch_state_clear_resources(struct zink_screen *screen, struct zink_batch_state *bs);
 
 void
-zink_reset_batch(struct zink_context *ctx, struct zink_batch *batch);
+zink_reset_batch(struct zink_context *ctx);
 void
-zink_start_batch(struct zink_context *ctx, struct zink_batch *batch);
+zink_start_batch(struct zink_context *ctx);
 
 void
-zink_end_batch(struct zink_context *ctx, struct zink_batch *batch);
+zink_end_batch(struct zink_context *ctx);
 
 void
-zink_batch_add_wait_semaphore(struct zink_batch *batch, VkSemaphore sem);
-
-void
-zink_batch_reference_resource_rw(struct zink_batch *batch,
+zink_batch_reference_resource_rw(struct zink_context *ctx,
                                  struct zink_resource *res,
                                  bool write);
 void
-zink_batch_reference_resource(struct zink_batch *batch, struct zink_resource *res);
+zink_batch_reference_resource(struct zink_context *ctx, struct zink_resource *res);
 
 bool
-zink_batch_reference_resource_move(struct zink_batch *batch, struct zink_resource *res);
+zink_batch_reference_resource_move(struct zink_context *ctx, struct zink_resource *res);
+
+bool
+zink_batch_reference_resource_move_unsync(struct zink_context *ctx, struct zink_resource *res);
 
 void
-zink_batch_reference_program(struct zink_batch *batch,
+zink_batch_reference_program(struct zink_context *ctx,
                              struct zink_program *pg);
 
-
+void
+zink_batch_bind_db(struct zink_context *ctx);
 void
 debug_describe_zink_batch_state(char *buf, const struct zink_batch_state *ptr);
 
-static inline bool
+static ALWAYS_INLINE bool
 zink_batch_usage_is_unflushed(const struct zink_batch_usage *u)
 {
    return u && u->unflushed;
 }
 
-static inline void
+static ALWAYS_INLINE void
 zink_batch_usage_unset(struct zink_batch_usage **u, struct zink_batch_state *bs)
 {
    (void)p_atomic_cmpxchg((uintptr_t *)u, (uintptr_t)&bs->usage, (uintptr_t)NULL);
 }
 
-static inline void
+static ALWAYS_INLINE void
 zink_batch_usage_set(struct zink_batch_usage **u, struct zink_batch_state *bs)
 {
    *u = &bs->usage;
 }
 
-static inline bool
+static ALWAYS_INLINE bool
 zink_batch_usage_matches(const struct zink_batch_usage *u, const struct zink_batch_state *bs)
 {
    return u == &bs->usage;
 }
 
-static inline bool
+static ALWAYS_INLINE bool
 zink_batch_usage_exists(const struct zink_batch_usage *u)
 {
    return u && (u->usage || u->unflushed);
 }
 
+static ALWAYS_INLINE unsigned
+zink_batch_submit_count_diff(unsigned a, unsigned b)
+{
+   return llabs((int64_t)a - (int64_t)b);
+}
+
+static ALWAYS_INLINE void
+zink_batch_state_append(struct zink_batch_state **list, struct zink_batch_state **last, struct zink_batch_state *bs)
+{
+   if (*last)
+      (*last)->next = bs;
+   else
+      *list = bs;
+   *last = bs;
+   bs->next = NULL;
+}
+
 bool
 zink_screen_usage_check_completion(struct zink_screen *screen, const struct zink_batch_usage *u);
+bool
+zink_screen_usage_check_completion_fast(struct zink_screen *screen, const struct zink_batch_usage *u);
 
 bool
 zink_batch_usage_check_completion(struct zink_context *ctx, const struct zink_batch_usage *u);
 
-void
-zink_batch_usage_wait(struct zink_context *ctx, struct zink_batch_usage *u);
+bool
+zink_batch_usage_unflushed_wait(struct zink_context *ctx, struct zink_batch_usage *u, unsigned submit_count, bool trywait);
 
 void
-zink_batch_usage_try_wait(struct zink_context *ctx, struct zink_batch_usage *u);
+zink_batch_usage_wait(struct zink_context *ctx, struct zink_batch_usage *u, unsigned submit_count);
+
+void
+zink_batch_usage_try_wait(struct zink_context *ctx, struct zink_batch_usage *u, unsigned submit_count);
 
 #ifdef __cplusplus
 }

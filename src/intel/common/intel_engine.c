@@ -23,13 +23,24 @@
 
 #include <stdlib.h>
 
+#include "util/macros.h"
+
 #include "intel_engine.h"
-#include "intel_engine_i915.h"
+#include "i915/intel_engine.h"
+#include "xe/intel_engine.h"
 
 struct intel_query_engine_info *
-intel_engine_get_info(int fd)
+intel_engine_get_info(int fd, enum intel_kmd_type type)
 {
-   return i915_engine_get_info(fd);
+   switch (type) {
+   case INTEL_KMD_TYPE_I915:
+      return i915_engine_get_info(fd);
+   case INTEL_KMD_TYPE_XE:
+      return xe_engine_get_info(fd);
+   default:
+      UNREACHABLE("Missing");
+      return NULL;
+   }
 }
 
 int
@@ -63,4 +74,37 @@ intel_engines_class_to_string(enum intel_engine_class engine_class)
    default:
       return "unknown";
    }
+}
+
+static bool
+is_guc_semaphore_functional(int fd, const struct intel_device_info *info)
+{
+   switch (info->kmd_type) {
+   case INTEL_KMD_TYPE_I915:
+      return i915_engines_is_guc_semaphore_functional(fd, info);
+   case INTEL_KMD_TYPE_XE:
+      return xe_engines_is_guc_semaphore_functional(fd, info);
+   default:
+      UNREACHABLE("Missing");
+      return false;
+   }
+}
+
+int
+intel_engines_supported_count(int fd, const struct intel_device_info *info,
+                              const struct intel_query_engine_info *engine_info,
+                              enum intel_engine_class engine_class)
+{
+   bool supported;
+
+   switch (engine_class) {
+   case INTEL_ENGINE_CLASS_COMPUTE:
+      supported = is_guc_semaphore_functional(fd, info);
+      break;
+   default:
+      /* There is no restrictions or parameters for other engines */
+      supported = true;
+   }
+
+   return supported ? intel_engines_count(engine_info, engine_class) : 0;
 }

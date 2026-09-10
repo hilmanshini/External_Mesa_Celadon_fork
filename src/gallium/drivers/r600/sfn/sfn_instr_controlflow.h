@@ -1,27 +1,7 @@
 /* -*- mesa-c++  -*-
- *
- * Copyright (c) 2022 Collabora LTD
- *
+ * Copyright 2022 Collabora LTD
  * Author: Gert Wollny <gert.wollny@collabora.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef CONTROLFLOWINSTR_H
@@ -34,14 +14,23 @@ namespace r600 {
 class ControlFlowInstr : public Instr {
 public:
    enum CFType {
+      cf_none,
+      cf_alu,
+      cf_alu_push_before,
+      cf_alu_pop_after,
+      cf_alu_pop2_after,
       cf_else,
       cf_endif,
+      cf_gds,
       cf_loop_begin,
       cf_loop_end,
       cf_loop_break,
       cf_loop_continue,
-      cf_stream_write,
-      cf_wait_ack
+      cf_pop,
+      cf_push,
+      cf_tex,
+      cf_vtx,
+      cf_wait_ack,
    };
 
    ControlFlowInstr(CFType type);
@@ -53,6 +42,7 @@ public:
    void accept(ConstInstrVisitor& visitor) const override;
    void accept(InstrVisitor& visitor) override;
 
+   void promote_alu_cf(CFType new_type);
    CFType cf_type() const { return m_type; }
 
    int nesting_corr() const override;
@@ -80,13 +70,16 @@ public:
    void set_predicate(AluInstr *new_predicate);
 
    AluInstr *predicate() const { return m_predicate; }
+   AluInstr *predicate() { return m_predicate; }
+
+   uint32_t slots() const override;
 
    void accept(ConstInstrVisitor& visitor) const override;
    void accept(InstrVisitor& visitor) override;
 
    bool replace_source(PRegister old_src, PVirtualValue new_src) override;
 
-   static Instr::Pointer from_string(std::istream& is, ValueFactory& value_factory);
+   static Instr::Pointer from_string(std::istream& is, ValueFactory& value_factory, bool is_cayman);
 
    bool end_block() const override { return true; }
    int nesting_offset() const override { return 1; }

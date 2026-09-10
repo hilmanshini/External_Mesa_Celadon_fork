@@ -34,14 +34,7 @@
  */
 
 #include "pipe/p_defines.h"
-#include "pipe/p_state.h"
-#include "util/u_debug.h"
-#include "util/u_dump.h"
-#include "util/u_memory.h"
-#include "util/u_math.h"
 #include "util/format/u_format.h"
-#include "util/u_cpu_detect.h"
-#include "lp_bld_debug.h"
 #include "lp_bld_type.h"
 #include "lp_bld_const.h"
 #include "lp_bld_conv.h"
@@ -82,7 +75,7 @@ lp_build_sample_wrap_nearest_int(struct lp_build_sample_context *bld,
                                  LLVMValueRef length,
                                  LLVMValueRef stride,
                                  LLVMValueRef offset,
-                                 boolean is_pot,
+                                 bool is_pot,
                                  unsigned wrap_mode,
                                  LLVMValueRef *out_offset,
                                  LLVMValueRef *out_i)
@@ -219,7 +212,7 @@ lp_build_sample_wrap_linear_int(struct lp_build_sample_context *bld,
                                 LLVMValueRef length,
                                 LLVMValueRef stride,
                                 LLVMValueRef offset,
-                                boolean is_pot,
+                                bool is_pot,
                                 unsigned wrap_mode,
                                 LLVMValueRef *offset0,
                                 LLVMValueRef *offset1,
@@ -409,8 +402,8 @@ lp_build_sample_fetch_image_nearest(struct lp_build_sample_context *bld,
                               bld->texel_type.length,
                               bld->format_desc->block.bits,
                               fetch_type,
-                              TRUE,
-                              data_ptr, offset, TRUE);
+                              true,
+                              data_ptr, offset, true);
 
       rgba8 = LLVMBuildBitCast(builder, rgba8, u8n_vec_type, "");
    }
@@ -418,7 +411,7 @@ lp_build_sample_fetch_image_nearest(struct lp_build_sample_context *bld,
       rgba8 = lp_build_fetch_rgba_aos(bld->gallivm,
                                       bld->format_desc,
                                       u8n.type,
-                                      TRUE,
+                                      true,
                                       data_ptr, offset,
                                       x_subcoord,
                                       y_subcoord,
@@ -553,7 +546,7 @@ lp_build_sample_image_nearest(struct lp_build_sample_context *bld,
 
 /**
  * Fetch texels for image with linear sampling.
- * Return filtered color as two vectors of 16-bit fixed point values.
+ * Return filtered color as one vectors of 8-bit unorm values.
  */
 static void
 lp_build_sample_fetch_image_linear(struct lp_build_sample_context *bld,
@@ -588,7 +581,7 @@ lp_build_sample_fetch_image_linear(struct lp_build_sample_context *bld,
     *
     * where each value is between 0 and 0xff,
     *
-    * into one 16 x i20
+    * into one 16 x i8
     *
     *   s_fpart = {s0, s0, s0, s0, s1, s1, s1, s1, s2, s2, s2, s2, s3, s3, s3, s3}
     *
@@ -635,13 +628,6 @@ lp_build_sample_fetch_image_linear(struct lp_build_sample_context *bld,
     * bit cast them into 16 x u8
     *
     *   r0 g0 b0 a0 r1 g1 b1 a1 r2 g2 b2 a2 r3 g3 b3 a3
-    *
-    * unpack them into two 8 x i16:
-    *
-    *   r0 g0 b0 a0 r1 g1 b1 a1
-    *   r2 g2 b2 a2 r3 g3 b3 a3
-    *
-    * The higher 8 bits of the resulting elements will be zero.
     */
    numj = 1 + (dims >= 2);
    numk = 1 + (dims >= 3);
@@ -662,8 +648,8 @@ lp_build_sample_fetch_image_linear(struct lp_build_sample_context *bld,
                                        bld->texel_type.length,
                                        bld->format_desc->block.bits,
                                        fetch_type,
-                                       TRUE,
-                                       data_ptr, offset[k][j][i], TRUE);
+                                       true,
+                                       data_ptr, offset[k][j][i], true);
 
                rgba8 = LLVMBuildBitCast(builder, rgba8, u8n_vec_type, "");
             }
@@ -671,7 +657,7 @@ lp_build_sample_fetch_image_linear(struct lp_build_sample_context *bld,
                rgba8 = lp_build_fetch_rgba_aos(bld->gallivm,
                                                bld->format_desc,
                                                u8n.type,
-                                               TRUE,
+                                               true,
                                                data_ptr, offset[k][j][i],
                                                x_subcoord[i],
                                                y_subcoord[j],
@@ -684,7 +670,7 @@ lp_build_sample_fetch_image_linear(struct lp_build_sample_context *bld,
    }
 
    /*
-    * Linear interpolation with 8.8 fixed point.
+    * Linear interpolation with 8-bit unorm.
     */
 
    /* general 1/2/3-D lerping */
@@ -733,7 +719,7 @@ lp_build_sample_fetch_image_linear(struct lp_build_sample_context *bld,
 
 /**
  * Sample a single texture image with (bi-)(tri-)linear sampling.
- * Return filtered color as two vectors of 16-bit fixed point values.
+ * Return filtered color as a vector of 8-bit unorm values.
  */
 static void
 lp_build_sample_image_linear(struct lp_build_sample_context *bld,
@@ -1181,7 +1167,7 @@ lp_build_sample_aos(struct lp_build_sample_context *bld,
       lp_build_else(&if_ctx);
       {
          /* Use the magnification filter */
-         lp_build_sample_mipmap(bld, 
+         lp_build_sample_mipmap(bld,
                                 mag_filter, PIPE_TEX_MIPFILTER_NONE,
                                 s, t, r, offsets,
                                 ilevel0, NULL, NULL,

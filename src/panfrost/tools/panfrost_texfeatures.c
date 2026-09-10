@@ -4,8 +4,16 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <assert.h>
+#include <stdbool.h>
 #include <stdio.h>
-#include <lib/pan_device.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <xf86drm.h>
+
+#include <lib/kmod/pan_kmod.h>
+#include <lib/pan_props.h>
 
 /*
  * Mapping of texture feature bits to compressed formats on Mali-G57, other
@@ -61,11 +69,10 @@ main(void)
       exit(1);
    }
 
-   void *ctx = ralloc_context(NULL);
-   struct panfrost_device dev = {0};
-   panfrost_open_device(ctx, fd, &dev);
-
-   uint32_t supported = dev.compressed_formats;
+   struct pan_kmod_dev *dev =
+      pan_kmod_dev_create(fd, PAN_KMOD_DEV_FLAG_OWNS_FD, NULL);
+   struct pan_kmod_dev_props props = dev->props;
+   uint32_t supported = pan_query_compressed_formats(&props);
    bool all_ok = true;
 
    printf("System-on-chip compressed texture support:"
@@ -93,6 +100,5 @@ main(void)
          "Unsupported formats will be emulated at a performance and memory cost.\n");
    }
 
-   panfrost_close_device(&dev);
-   ralloc_free(ctx);
+   pan_kmod_dev_destroy(dev);
 }

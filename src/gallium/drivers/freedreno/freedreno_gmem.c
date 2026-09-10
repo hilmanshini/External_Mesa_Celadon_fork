@@ -1,39 +1,22 @@
 /*
- * Copyright (C) 2012 Rob Clark <robclark@freedesktop.org>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * Copyright © 2012 Rob Clark <robclark@freedesktop.org>
+ * SPDX-License-Identifier: MIT
  *
  * Authors:
  *    Rob Clark <robclark@freedesktop.org>
  */
 
 #include "pipe/p_state.h"
-#include "util/u_debug.h"
 #include "util/format/u_format.h"
 #include "util/hash_table.h"
+#include "util/macros.h"
+#include "util/u_debug.h"
 #include "util/u_dump.h"
 #include "util/u_inlines.h"
 #include "util/u_memory.h"
 #include "util/u_string.h"
-#include "u_tracepoints.h"
 #include "util/u_trace_gallium.h"
+#include "u_tracepoints.h"
 
 #include "freedreno_context.h"
 #include "freedreno_fence.h"
@@ -315,7 +298,6 @@ gmem_stateobj_init(struct fd_screen *screen, struct gmem_key *key)
     * performance.
     */
 
-#define div_round_up(v, a) (((v) + (a)-1) / (a))
    /* figure out number of tiles per pipe: */
    if (is_a20x(screen)) {
       /* for a20x we want to minimize the number of "pipes"
@@ -326,16 +308,16 @@ gmem_stateobj_init(struct fd_screen *screen, struct gmem_key *key)
       tpp_y = 6;
    } else {
       tpp_x = tpp_y = 1;
-      while (div_round_up(gmem->nbins_y, tpp_y) > npipes)
+      while (DIV_ROUND_UP(gmem->nbins_y, tpp_y) > npipes)
          tpp_y += 2;
-      while ((div_round_up(gmem->nbins_y, tpp_y) *
-              div_round_up(gmem->nbins_x, tpp_x)) > npipes)
+      while ((DIV_ROUND_UP(gmem->nbins_y, tpp_y) *
+              DIV_ROUND_UP(gmem->nbins_x, tpp_x)) > npipes)
          tpp_x += 1;
    }
 
-#ifdef DEBUG
+#if MESA_DEBUG
    tpp_x = debug_get_num_option("TPP_X", tpp_x);
-   tpp_y = debug_get_num_option("TPP_Y", tpp_x);
+   tpp_y = debug_get_num_option("TPP_Y", tpp_y);
 #endif
 
    gmem->maxpw = tpp_x;
@@ -399,7 +381,7 @@ gmem_stateobj_init(struct fd_screen *screen, struct gmem_key *key)
          uint32_t p;
 
          /* pipe number: */
-         p = ((i / tpp_y) * div_round_up(gmem->nbins_x, tpp_x)) + (j / tpp_x);
+         p = ((i / tpp_y) * DIV_ROUND_UP(gmem->nbins_x, tpp_x)) + (j / tpp_x);
          assert(p < gmem->num_vsc_pipes);
 
          /* clip bin width: */
@@ -435,7 +417,7 @@ gmem_stateobj_init(struct fd_screen *screen, struct gmem_key *key)
       for (i = 0; i < gmem->nbins_y; i+=2) {
          unsigned col0 = gmem->nbins_x * i;
          for (j = 0; j < gmem->nbins_x/2; j++) {
-            swap(gmem->tile[col0 + j], gmem->tile[col0 + gmem->nbins_x - j - 1]);
+            SWAP(gmem->tile[col0 + j], gmem->tile[col0 + gmem->nbins_x - j - 1]);
          }
       }
    }
@@ -473,16 +455,35 @@ gmem_key_init(struct fd_batch *batch, bool assume_zs, bool no_scis_opt)
 {
    struct fd_screen *screen = batch->ctx->screen;
    struct pipe_framebuffer_state *pfb = &batch->framebuffer;
-   bool has_zs = pfb->zsbuf &&
+   bool has_zs = pfb->zsbuf.texture &&
       !!(batch->gmem_reason & (FD_GMEM_DEPTH_ENABLED | FD_GMEM_STENCIL_ENABLED |
                                FD_GMEM_CLEARS_DEPTH_STENCIL));
    struct gmem_key *key = rzalloc(screen->gmem_cache.ht, struct gmem_key);
 
    if (has_zs || assume_zs) {
-      struct fd_resource *rsc = fd_resource(pfb->zsbuf->texture);
-      key->zsbuf_cpp[0] = rsc->layout.cpp;
+      struct fd_resource *rsc = fd_resource(pfb->zsbuf.texture);
+      key->zsbuf_cpp[0] = rsc->layout.cpp * pfb->samples;
       if (rsc->stencil)
-         key->zsbuf_cpp[1] = rsc->stencil->layout.cpp;
+         key->zsbuf_cpp[1] = rsc->stencil->layout.cpp * pfb->samples;
+
+      /* If we clear z or s but not both, and we are using z24s8 (ie.
+       * !separate_stencil) then we need to restore the other, even if
+       * batch_draw_tracking_for_dirty_bits() never saw a draw with
+       * depth or stencil enabled.
+       *
+       * This only applies to the fast-clear path, clears done with
+       * u_blitter will show up as a normal draw with depth and/or
+       * stencil enabled.
+       */
+      unsigned zsclear = batch->cleared & (FD_BUFFER_DEPTH | FD_BUFFER_STENCIL);
+      if (zsclear) {
+         const struct util_format_description *desc =
+               util_format_description(pfb->zsbuf.format);
+         if (util_format_has_depth(desc) && !(zsclear & FD_BUFFER_DEPTH))
+            batch->restore |= FD_BUFFER_DEPTH;
+         if (util_format_has_stencil(desc) && !(zsclear & FD_BUFFER_STENCIL))
+            batch->restore |= FD_BUFFER_STENCIL;
+      }
    } else {
       /* we might have a zsbuf, but it isn't used */
       batch->restore &= ~(FD_BUFFER_DEPTH | FD_BUFFER_STENCIL);
@@ -491,8 +492,8 @@ gmem_key_init(struct fd_batch *batch, bool assume_zs, bool no_scis_opt)
 
    key->nr_cbufs = pfb->nr_cbufs;
    for (unsigned i = 0; i < pfb->nr_cbufs; i++) {
-      if (pfb->cbufs[i])
-         key->cbuf_cpp[i] = util_format_get_blocksize(pfb->cbufs[i]->format);
+      if (pfb->cbufs[i].texture)
+         key->cbuf_cpp[i] = util_format_get_blocksize(pfb->cbufs[i].format);
       else
          key->cbuf_cpp[i] = 4;
       /* if MSAA, color buffers are super-sampled in GMEM: */
@@ -530,7 +531,7 @@ gmem_key_init(struct fd_batch *batch, bool assume_zs, bool no_scis_opt)
        */
       key->gmem_page_align = 8;
    } else if (is_a6xx(screen)) {
-      key->gmem_page_align = (screen->info->tile_align_w == 96) ? 3 : 1;
+      key->gmem_page_align = screen->info->num_ccu;
    } else {
       // TODO re-check this across gens.. maybe it should only
       // be a single page in some cases:
@@ -653,7 +654,11 @@ render_sysmem(struct fd_batch *batch) assert_dt
       trace_start_draw_ib(&batch->trace, batch->gmem);
    }
    /* emit IB to drawcmds: */
-   ctx->screen->emit_ib(batch->gmem, batch->draw);
+   if (ctx->emit_sysmem) {
+      ctx->emit_sysmem(batch);
+   } else {
+      ctx->screen->emit_ib(batch->gmem, batch->draw);
+   }
 
    if (!batch->nondraw) {
       trace_end_draw_ib(&batch->trace, batch->gmem);
@@ -697,26 +702,29 @@ fd_gmem_render_tiles(struct fd_batch *batch)
 
    ctx->submit_count++;
 
-   if (!batch->nondraw) {
+   /* Sometimes we need to flush a batch just to get a fence, with no
+    * clears or draws.. in this case promote to nondraw:
+    */
+   if (!(batch->cleared || batch->num_draws))
+      sysmem = true;
+
 #if HAVE_PERFETTO
-      /* For non-draw batches, we don't really have a good place to
-       * match up the api event submit-id to the on-gpu rendering,
-       * so skip this for non-draw batches.
-       */
-      fd_perfetto_submit(ctx);
+   fd_perfetto_submit(ctx);
 #endif
+
+   if (!batch->nondraw) {
       trace_flush_batch(&batch->trace, batch->gmem, batch, batch->cleared,
                         batch->gmem_reason, batch->num_draws);
       trace_framebuffer_state(&batch->trace, batch->gmem, pfb);
    }
 
-   if (ctx->emit_sysmem_prep && !batch->nondraw) {
+   if (ctx->emit_sysmem_prep && !sysmem) {
       if (fd_autotune_use_bypass(&ctx->autotune, batch) && !FD_DBG(GMEM)) {
          sysmem = true;
       }
 
       /* For ARB_framebuffer_no_attachments: */
-      if ((pfb->nr_cbufs == 0) && !pfb->zsbuf) {
+      if ((pfb->nr_cbufs == 0) && !pfb->zsbuf.texture) {
          sysmem = true;
       }
    }
@@ -726,13 +734,13 @@ fd_gmem_render_tiles(struct fd_batch *batch)
 
    /* Layered rendering always needs bypass. */
    for (unsigned i = 0; i < pfb->nr_cbufs; i++) {
-      struct pipe_surface *psurf = pfb->cbufs[i];
-      if (!psurf)
+      struct pipe_surface *psurf = &pfb->cbufs[i];
+      if (!psurf->texture)
          continue;
-      if (psurf->u.tex.first_layer < psurf->u.tex.last_layer)
+      if (psurf->first_layer < psurf->last_layer)
          sysmem = true;
    }
-   if (pfb->zsbuf && pfb->zsbuf->u.tex.first_layer < pfb->zsbuf->u.tex.last_layer)
+   if (pfb->zsbuf.texture && pfb->zsbuf.first_layer < pfb->zsbuf.last_layer)
       sysmem = true;
 
    /* Tessellation doesn't seem to support tiled rendering so fall back to
@@ -749,14 +757,17 @@ fd_gmem_render_tiles(struct fd_batch *batch)
 
    if (batch->nondraw) {
       DBG("%p: rendering non-draw", batch);
-      if (!fd_ringbuffer_empty(batch->draw))
+      if (!fd_ringbuffer_empty(batch->draw)) {
+         trace_start_nondraw(&batch->trace, batch->gmem, ctx->submit_count);
          render_sysmem(batch);
+         trace_end_nondraw(&batch->trace, batch->gmem);
+      }
       ctx->stats.batch_nondraw++;
    } else if (sysmem) {
       trace_render_sysmem(&batch->trace, batch->gmem);
       trace_start_render_pass(&batch->trace, batch->gmem,
-         ctx->submit_count, pipe_surface_format(pfb->cbufs[0]),
-         pipe_surface_format(pfb->zsbuf), pfb->width, pfb->height,
+         ctx->submit_count, pipe_surface_format(&pfb->cbufs[0]),
+         pipe_surface_format(&pfb->zsbuf), pfb->width, pfb->height,
          pfb->nr_cbufs, pfb->samples, 0, 0, 0);
       if (ctx->query_prepare)
          ctx->query_prepare(batch, 1);
@@ -769,8 +780,8 @@ fd_gmem_render_tiles(struct fd_batch *batch)
       trace_render_gmem(&batch->trace, batch->gmem, gmem->nbins_x, gmem->nbins_y,
                         gmem->bin_w, gmem->bin_h);
       trace_start_render_pass(&batch->trace, batch->gmem,
-         ctx->submit_count, pipe_surface_format(pfb->cbufs[0]),
-         pipe_surface_format(pfb->zsbuf), pfb->width, pfb->height,
+         ctx->submit_count, pipe_surface_format(&pfb->cbufs[0]),
+         pipe_surface_format(&pfb->zsbuf), pfb->width, pfb->height,
          pfb->nr_cbufs, pfb->samples, gmem->nbins_x * gmem->nbins_y,
          gmem->bin_w, gmem->bin_h);
       if (ctx->query_prepare)
@@ -788,7 +799,7 @@ fd_gmem_render_tiles(struct fd_batch *batch)
 
    flush_ring(batch);
 
-   u_trace_flush(&batch->trace, NULL, false);
+   u_trace_flush(&batch->trace, NULL, U_TRACE_FRAME_UNKNOWN, false);
 }
 
 /* Determine a worst-case estimate (ie. assuming we don't eliminate an
@@ -799,7 +810,7 @@ fd_gmem_estimate_bins_per_pipe(struct fd_batch *batch)
 {
    struct pipe_framebuffer_state *pfb = &batch->framebuffer;
    struct fd_screen *screen = batch->ctx->screen;
-   struct fd_gmem_stateobj *gmem = lookup_gmem_state(batch, !!pfb->zsbuf, true);
+   struct fd_gmem_stateobj *gmem = lookup_gmem_state(batch, !!pfb->zsbuf.texture, true);
    unsigned nbins = gmem->maxpw * gmem->maxph;
 
    fd_screen_lock(screen);

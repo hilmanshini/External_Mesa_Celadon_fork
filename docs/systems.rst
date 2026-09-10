@@ -7,30 +7,33 @@ Haiku. We're actively developing and maintaining several hardware and
 software drivers.
 
 The primary API is OpenGL but there's also support for OpenGL ES, Vulkan,
-EGL, OpenMAX, OpenCL, VDPAU and VA-API.
+EGL, OpenCL and VA-API.
 
 Hardware drivers include:
 
 -  Intel GMA, HD Graphics, Iris. See `Intel's
-   Website <https://01.org/linuxgraphics>`__
+   Website <https://www.intel.com/content/www/us/en/developer/topic-technology/open/overview.html>`__
 -  AMD Radeon series. See
-   `RadeonFeature <https://www.x.org/wiki/RadeonFeature>`__
--  NVIDIA GPUs (GeForce 5 / FX and later). See `Nouveau
-   Wiki <https://nouveau.freedesktop.org>`__
--  Qualcomm Adreno 2xx-6xx. See :doc:`Freedreno
+   `RadeonFeature <https://www.x.org/RadeonFeature>`__
+-  NVIDIA GPUs (Maxwell and later). See :doc:`NVK <drivers/nvk>`
+-  Qualcomm Adreno 2xx-8xx. See :doc:`Freedreno
    <drivers/freedreno>`
 -  Broadcom VideoCore 4 and 5. See :doc:`VC4 <drivers/vc4>` and
    :doc:`V3D <drivers/v3d>`
 -  ARM Mali Utgard. See :doc:`Lima <drivers/lima>`
 -  ARM Mali Midgard, Bifrost. See :doc:`Panfrost <drivers/panfrost>`
 -  Vivante GCxxx. See `Etnaviv
-   Wiki <https://github.com/laanwj/etna_viv/wiki>`__
+   Wiki <https://github.com/etnaviv/etna_viv>`__
+-  Older NVIDIA GPUs (GeForce 5 / FX and later). See `Nouveau
+   Wiki <https://nouveau.freedesktop.org>`__
 -  NVIDIA Tegra (K1 and later).
 
-Layered driver include:
+Layered drivers include:
 
 -  :doc:`D3D12 <drivers/d3d12>` - driver providing OpenGL on top of
    Microsoft's Direct3D 12 API.
+-  :doc:`KosmicKrisp <drivers/kosmickrisp>` - driver providing Vulkan
+   on top of Apple's Metal API.
 -  :doc:`SVGA3D <drivers/svga3d>` - driver for VMware virtual GPU
 -  :doc:`VirGL <drivers/virgl>` - project for accelerated graphics for
    QEMU guests
@@ -41,7 +44,7 @@ Software drivers include:
 
 -  :doc:`LLVMpipe <drivers/llvmpipe>` - uses LLVM for JIT code generation
    and is multi-threaded
--  Softpipe - a reference Gallium driver
+-  Softpipe - a reference Gallium driver with a shader interpreter.
 
 Additional driver information:
 
@@ -74,3 +77,4 @@ the Git repo. The list includes:
 -  Silicon Integrated Systems
 -  swrast
 -  VIA Unichrome
+-  VDPAU

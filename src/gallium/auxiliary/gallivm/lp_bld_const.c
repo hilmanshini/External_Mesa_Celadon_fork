@@ -35,8 +35,6 @@
 
 #include <float.h>
 
-#include "util/u_debug.h"
-#include "util/u_math.h"
 #include "util/half_float.h"
 
 #include "lp_bld_type.h"
@@ -230,8 +228,16 @@ LLVMValueRef
 lp_build_zero(struct gallivm_state *gallivm, struct lp_type type)
 {
    if (type.length == 1) {
-      if (type.floating)
-         return lp_build_const_float(gallivm, 0.0);
+      if (type.floating) {
+         if (type.width == 16)
+            return lp_build_const_elem(gallivm, type, 0.0);
+         else if (type.width == 32)
+            return lp_build_const_float(gallivm, 0.0);
+         else {
+            assert(type.width == 64);
+            return lp_build_const_double(gallivm, 0.0);
+         }
+      }
       else
          return LLVMConstInt(LLVMIntTypeInContext(gallivm->context, type.width), 0, 0);
    } else {
@@ -349,6 +355,24 @@ lp_build_const_int_vec(struct gallivm_state *gallivm, struct lp_type type,
    return LLVMConstVector(elems, type.length);
 }
 
+/* Returns an integer vector of [0, 1, 2, ...] */
+LLVMValueRef
+lp_build_const_channel_vec(struct gallivm_state *gallivm, struct lp_type type)
+{
+   LLVMTypeRef elem_type = lp_build_int_elem_type(gallivm, type);
+   LLVMValueRef elems[LP_MAX_VECTOR_LENGTH];
+
+   assert(type.length <= LP_MAX_VECTOR_LENGTH);
+
+   for (unsigned i = 0; i < type.length; ++i)
+      elems[i] = LLVMConstInt(elem_type, i, 0);
+
+   if (type.length == 1)
+      return elems[0];
+
+   return LLVMConstVector(elems, type.length);
+}
+
 
 LLVMValueRef
 lp_build_const_aos(struct gallivm_state *gallivm,
@@ -437,9 +461,9 @@ lp_build_const_string(struct gallivm_state *gallivm,
    unsigned len = strlen(str) + 1;
    LLVMTypeRef i8 = LLVMInt8TypeInContext(gallivm->context);
    LLVMValueRef string = LLVMAddGlobal(gallivm->module, LLVMArrayType(i8, len), "");
-   LLVMSetGlobalConstant(string, TRUE);
+   LLVMSetGlobalConstant(string, true);
    LLVMSetLinkage(string, LLVMInternalLinkage);
-   LLVMSetInitializer(string, LLVMConstStringInContext(gallivm->context, str, len, TRUE));
+   LLVMSetInitializer(string, LLVMConstStringInContext(gallivm->context, str, len, true));
    string = LLVMConstBitCast(string, LLVMPointerType(i8, 0));
    return string;
 }

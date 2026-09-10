@@ -1,26 +1,7 @@
 /*
  * Copyright © 2018 Valve Corporation
  * Copyright © 2017 Red Hat
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
- *
+ * SPDX-License-Identifier: MIT
  */
 
 #include "vtn_private.h"
@@ -30,20 +11,24 @@ bool
 vtn_handle_amd_gcn_shader_instruction(struct vtn_builder *b, SpvOp ext_opcode,
                                       const uint32_t *w, unsigned count)
 {
-   nir_ssa_def *def;
+   nir_def *def;
    switch ((enum GcnShaderAMD)ext_opcode) {
    case CubeFaceIndexAMD:
-      def = nir_cube_face_index_amd(&b->nb, vtn_get_nir_ssa(b, w[5]));
+      def = nir_channel(&b->nb, nir_cube_amd(&b->nb, vtn_get_nir_ssa(b, w[5])), 3);
       break;
-   case CubeFaceCoordAMD:
-      def = nir_cube_face_coord_amd(&b->nb, vtn_get_nir_ssa(b, w[5]));
+   case CubeFaceCoordAMD: {
+      def = nir_cube_amd(&b->nb, vtn_get_nir_ssa(b, w[5]));
+      nir_def *st = nir_swizzle(&b->nb, def, (unsigned[]){1, 0}, 2);
+      nir_def *invma = nir_frcp(&b->nb, nir_channel(&b->nb, def, 2));
+      def = nir_ffma_weak_imm2(&b->nb, st, invma, 0.5);
       break;
+   }
    case TimeAMD: {
-      def = nir_pack_64_2x32(&b->nb, nir_shader_clock(&b->nb, NIR_SCOPE_SUBGROUP));
+      def = nir_pack_64_2x32(&b->nb, nir_shader_clock(&b->nb, SCOPE_SUBGROUP));
       break;
    }
    default:
-      unreachable("Invalid opcode");
+      UNREACHABLE("Invalid opcode");
    }
 
    vtn_push_nir_ssa(b, w[2], def);
@@ -75,14 +60,14 @@ vtn_handle_amd_shader_ballot_instruction(struct vtn_builder *b, SpvOp ext_opcode
       op = nir_intrinsic_mbcnt_amd;
       break;
    default:
-      unreachable("Invalid opcode");
+      UNREACHABLE("Invalid opcode");
    }
 
    const struct glsl_type *dest_type = vtn_get_type(b, w[1])->type;
    nir_intrinsic_instr *intrin = nir_intrinsic_instr_create(b->nb.shader, op);
-   nir_ssa_dest_init_for_type(&intrin->instr, &intrin->dest, dest_type, NULL);
+   nir_def_init_for_type(&intrin->instr, &intrin->def, dest_type);
    if (nir_intrinsic_infos[op].src_components[0] == 0)
-      intrin->num_components = intrin->dest.ssa.num_components;
+      intrin->num_components = intrin->def.num_components;
 
    for (unsigned i = 0; i < num_args; i++)
       intrin->src[i] = nir_src_for_ssa(vtn_get_nir_ssa(b, w[i + 5]));
@@ -109,7 +94,7 @@ vtn_handle_amd_shader_ballot_instruction(struct vtn_builder *b, SpvOp ext_opcode
    }
 
    nir_builder_instr_insert(&b->nb, &intrin->instr);
-   vtn_push_nir_ssa(b, w[2], &intrin->dest.ssa);
+   vtn_push_nir_ssa(b, w[2], &intrin->def);
 
    return true;
 }
@@ -122,19 +107,19 @@ vtn_handle_amd_shader_trinary_minmax_instruction(struct vtn_builder *b, SpvOp ex
 
    unsigned num_inputs = count - 5;
    assert(num_inputs == 3);
-   nir_ssa_def *src[3] = { NULL, };
+   nir_def *src[3] = { NULL, };
    for (unsigned i = 0; i < num_inputs; i++)
       src[i] = vtn_get_nir_ssa(b, w[i + 5]);
 
    /* place constants at src[1-2] for easier constant-folding */
    for (unsigned i = 1; i <= 2; i++) {
       if (nir_src_as_const_value(nir_src_for_ssa(src[0]))) {
-         nir_ssa_def* tmp = src[i];
+         nir_def* tmp = src[i];
          src[i] = src[0];
          src[0] = tmp;
       }
    }
-   nir_ssa_def *def;
+   nir_def *def;
    switch ((enum ShaderTrinaryMinMaxAMD)ext_opcode) {
    case FMin3AMD:
       def = nir_fmin(nb, src[0], nir_fmin(nb, src[1], src[2]));
@@ -167,7 +152,7 @@ vtn_handle_amd_shader_trinary_minmax_instruction(struct vtn_builder *b, SpvOp ex
                      nir_imax(nb, src[1], src[2]));
       break;
    default:
-      unreachable("unknown opcode\n");
+      UNREACHABLE("unknown opcode\n");
       break;
    }
 
@@ -186,7 +171,7 @@ vtn_handle_amd_shader_explicit_vertex_parameter_instruction(struct vtn_builder *
       op = nir_intrinsic_interp_deref_at_vertex;
       break;
    default:
-      unreachable("unknown opcode");
+      UNREACHABLE("unknown opcode");
    }
 
    nir_intrinsic_instr *intrin = nir_intrinsic_instr_create(b->nb.shader, op);
@@ -208,23 +193,23 @@ vtn_handle_amd_shader_explicit_vertex_parameter_instruction(struct vtn_builder *
       vec_deref = deref;
       deref = nir_deref_instr_parent(deref);
    }
-   intrin->src[0] = nir_src_for_ssa(&deref->dest.ssa);
+   intrin->src[0] = nir_src_for_ssa(&deref->def);
    intrin->src[1] = nir_src_for_ssa(vtn_get_nir_ssa(b, w[6]));
 
    intrin->num_components = glsl_get_vector_elements(deref->type);
-   nir_ssa_dest_init(&intrin->instr, &intrin->dest,
-                     glsl_get_vector_elements(deref->type),
-                     glsl_get_bit_size(deref->type), NULL);
+   nir_def_init(&intrin->instr, &intrin->def,
+                glsl_get_vector_elements(deref->type),
+                glsl_get_bit_size(deref->type));
 
    nir_builder_instr_insert(&b->nb, &intrin->instr);
 
-   nir_ssa_def *def;
+   nir_def *def;
    if (vec_array_deref) {
       assert(vec_deref);
-      def = nir_vector_extract(&b->nb, &intrin->dest.ssa,
+      def = nir_vector_extract(&b->nb, &intrin->def,
                                vec_deref->arr.index.ssa);
    } else {
-      def = &intrin->dest.ssa;
+      def = &intrin->def;
    }
    vtn_push_nir_ssa(b, w[2], def);
 

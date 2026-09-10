@@ -1,23 +1,6 @@
 /*
  * Copyright © 2017 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include <stdio.h>
@@ -230,13 +213,14 @@ apply_blit_scissor(const struct pipe_scissor_state *scissor,
 }
 
 void
-iris_blorp_surf_for_resource(struct isl_device *isl_dev,
+iris_blorp_surf_for_resource(struct iris_batch *batch,
                              struct blorp_surf *surf,
                              struct pipe_resource *p_res,
                              enum isl_aux_usage aux_usage,
                              unsigned level,
                              bool is_dest)
 {
+   const struct isl_device *isl_dev = &batch->screen->isl_dev;
    struct iris_resource *res = (void *) p_res;
    const struct intel_device_info *devinfo = isl_dev->info;
 
@@ -245,10 +229,9 @@ iris_blorp_surf_for_resource(struct isl_device *isl_dev,
       .addr = (struct blorp_address) {
          .buffer = res->bo,
          .offset = res->offset,
-         .reloc_flags = is_dest ? EXEC_OBJECT_WRITE : 0,
+         .reloc_flags = is_dest ? IRIS_BLORP_RELOC_FLAGS_EXEC_OBJECT_WRITE : 0,
          .mocs = iris_mocs(res->bo, isl_dev,
-                           is_dest ? ISL_SURF_USAGE_RENDER_TARGET_BIT
-                                   : ISL_SURF_USAGE_TEXTURE_BIT),
+                           iris_blorp_batch_usage(batch, is_dest)),
          .local_hint = iris_bo_likely_local(res->bo),
       },
       .aux_usage = aux_usage,
@@ -259,7 +242,7 @@ iris_blorp_surf_for_resource(struct isl_device *isl_dev,
       surf->aux_addr = (struct blorp_address) {
          .buffer = res->aux.bo,
          .offset = res->aux.offset,
-         .reloc_flags = is_dest ? EXEC_OBJECT_WRITE : 0,
+         .reloc_flags = is_dest ? IRIS_BLORP_RELOC_FLAGS_EXEC_OBJECT_WRITE : 0,
          .mocs = iris_mocs(res->bo, isl_dev, 0),
          .local_hint = devinfo->has_flat_ccs ||
                        iris_bo_likely_local(res->aux.bo),
@@ -354,6 +337,46 @@ clear_color_is_fully_zero(const struct iris_resource *res)
           res->aux.clear_color.u32[3] == 0;
 }
 
+static bool
+try_hw_blitter_copy(struct iris_context *ice,
+                    const struct intel_device_info *devinfo,
+                    const struct pipe_blit_info *info)
+{
+   struct iris_resource *src_res =
+      iris_resource_for_aspect(info->src.resource, PIPE_MASK_RGBA);
+   struct iris_resource *dst_res =
+      iris_resource_for_aspect(info->dst.resource, PIPE_MASK_RGBA);
+   enum pipe_format src_pfmt =
+      pipe_format_for_aspect(info->src.format, PIPE_MASK_RGBA);
+   enum pipe_format dst_pfmt =
+      pipe_format_for_aspect(info->dst.format, PIPE_MASK_RGBA);
+   struct iris_format_info src_fmt =
+      iris_format_for_usage(devinfo, src_pfmt, ISL_SURF_USAGE_BLITTER_SRC_BIT);
+   struct iris_format_info dst_fmt =
+      iris_format_for_usage(devinfo, dst_pfmt, ISL_SURF_USAGE_BLITTER_DST_BIT);
+   enum isl_aux_usage src_aux_usage =
+      iris_resource_render_aux_usage(ice, src_res, src_fmt.fmt,
+                                     info->src.level, false);
+   enum isl_aux_usage dst_aux_usage =
+      iris_resource_render_aux_usage(ice, dst_res, dst_fmt.fmt,
+                                     info->dst.level, false);
+
+   if (!blorp_copy_supports_blitter(&ice->blorp,
+                                    &src_res->surf, &dst_res->surf,
+                                    src_aux_usage, dst_aux_usage)) {
+      return false;
+   }
+
+   assert(!info->render_condition_enable);
+   assert(util_can_blit_via_copy_region(info, false, false));
+   iris_copy_region(&ice->blorp, &ice->batches[IRIS_BATCH_BLITTER],
+                    info->dst.resource, info->dst.level,
+                    info->dst.box.x, info->dst.box.y, info->dst.box.z,
+                    info->src.resource, info->src.level,
+                    &info->src.box);
+   return true;
+}
+
 /**
  * The pipe->blit() driver hook.
  *
@@ -405,14 +428,8 @@ iris_blit(struct pipe_context *ctx, const struct pipe_blit_info *info)
    /* Do DRI PRIME blits on the hardware blitter on Gfx12+ */
    if (devinfo->ver >= 12 &&
        (info->dst.resource->bind & PIPE_BIND_PRIME_BLIT_DST)) {
-      assert(!info->render_condition_enable);
-      assert(util_can_blit_via_copy_region(info, false, false));
-      iris_copy_region(&ice->blorp, &ice->batches[IRIS_BATCH_BLITTER],
-                       info->dst.resource, info->dst.level,
-                       info->dst.box.x, info->dst.box.y, info->dst.box.z,
-                       info->src.resource, info->src.level,
-                       &info->src.box);
-      return;
+      if (try_hw_blitter_copy(ice, devinfo, info))
+         return;
    }
 
    if (abs(info->dst.box.width) == abs(info->src.box.width) &&
@@ -506,22 +523,22 @@ iris_blit(struct pipe_context *ctx, const struct pipe_blit_info *info)
          iris_format_for_usage(devinfo, dst_pfmt,
                                ISL_SURF_USAGE_RENDER_TARGET_BIT);
       enum isl_aux_usage dst_aux_usage =
-         iris_resource_render_aux_usage(ice, dst_res, info->dst.level,
-                                        dst_fmt.fmt, false);
+         iris_resource_render_aux_usage(ice, dst_res, dst_fmt.fmt,
+                                        info->dst.level, false);
 
-      struct blorp_surf src_surf, dst_surf;
-      iris_blorp_surf_for_resource(&screen->isl_dev,  &src_surf,
-                                   &src_res->base.b, src_aux_usage,
-                                   info->src.level, false);
-      iris_blorp_surf_for_resource(&screen->isl_dev, &dst_surf,
-                                   &dst_res->base.b, dst_aux_usage,
-                                   info->dst.level, true);
-
-      iris_resource_prepare_render(ice, dst_res, info->dst.level,
+      iris_resource_prepare_render(ice, dst_res, dst_fmt.fmt, info->dst.level,
                                    info->dst.box.z, info->dst.box.depth,
                                    dst_aux_usage);
       iris_emit_buffer_barrier_for(batch, dst_res->bo,
                                    IRIS_DOMAIN_RENDER_WRITE);
+
+      struct blorp_surf src_surf, dst_surf;
+      iris_blorp_surf_for_resource(batch,  &src_surf,
+                                   &src_res->base.b, src_aux_usage,
+                                   info->src.level, false);
+      iris_blorp_surf_for_resource(batch, &dst_surf,
+                                   &dst_res->base.b, dst_aux_usage,
+                                   info->dst.level, true);
 
       if (iris_batch_references(batch, src_res->bo))
          tex_cache_flush_hack(batch, src_fmt.fmt, src_res->surf.format);
@@ -563,91 +580,73 @@ iris_blit(struct pipe_context *ctx, const struct pipe_blit_info *info)
    iris_dirty_for_history(ice, (struct iris_resource *)info->dst.resource);
 }
 
-static void
-get_copy_region_aux_settings(struct iris_context *ice,
-                             const struct iris_batch *batch,
-                             struct iris_resource *res,
-                             unsigned level,
-                             enum isl_aux_usage *out_aux_usage,
-                             bool *out_clear_supported,
-                             bool is_dest)
+static enum isl_aux_usage
+copy_region_aux_usage(struct iris_context *ice,
+                      const struct iris_batch *batch,
+                      struct iris_resource *res,
+                      enum isl_format view_format,
+                      unsigned level,
+                      bool is_dest)
 {
    struct iris_screen *screen = (void *) ice->ctx.screen;
    const struct intel_device_info *devinfo = screen->devinfo;
 
-   switch (res->aux.usage) {
-   case ISL_AUX_USAGE_HIZ:
-   case ISL_AUX_USAGE_HIZ_CCS:
-   case ISL_AUX_USAGE_HIZ_CCS_WT:
-   case ISL_AUX_USAGE_STC_CCS:
+   if (batch->name == IRIS_BATCH_RENDER) {
       if (is_dest) {
-         *out_aux_usage = iris_resource_render_aux_usage(ice, res, level,
-                                                         res->surf.format,
-                                                         false);
+         return iris_resource_render_aux_usage(ice, res, view_format, level,
+                                               false);
       } else {
-         *out_aux_usage = iris_resource_texture_aux_usage(ice, res,
-                                                          res->surf.format,
-                                                          level, 1);
+         return iris_resource_texture_aux_usage(ice, res, view_format, level,
+                                                1);
       }
-      *out_clear_supported = isl_aux_usage_has_fast_clears(*out_aux_usage);
-      break;
-   case ISL_AUX_USAGE_MCS:
-   case ISL_AUX_USAGE_MCS_CCS:
-      if (!is_dest && !iris_can_sample_mcs_with_clear(devinfo, res)) {
-         *out_aux_usage = res->aux.usage;
-         *out_clear_supported = false;
-         break;
-      }
-      FALLTHROUGH;
-   case ISL_AUX_USAGE_CCS_E:
-   case ISL_AUX_USAGE_GFX12_CCS_E: {
-      /* If our source doesn't have any unresolved color, report an aux
-       * usage of ISL_AUX_USAGE_NONE.  This way, texturing won't even look
-       * at the aux surface and we can save some bandwidth.
-       */
-      if (!is_dest &&
-          !iris_has_invalid_primary(res, level, 1,
-                                    0, INTEL_REMAINING_LAYERS)) {
-         *out_aux_usage = ISL_AUX_USAGE_NONE;
-         *out_clear_supported = false;
-         break;
-      }
+   } else {
+      assert(batch->name == IRIS_BATCH_BLITTER);
 
-      /* blorp_copy may reinterpret the surface format and has limited support
-       * for adjusting the clear color, so clear support may only be enabled
-       * in some cases:
-       *
-       * - On gfx11+, the clear color is indirect and comes in two forms: a
-       *   32bpc representation used for rendering and a pixel representation
-       *   used for sampling. blorp_copy doesn't change indirect clear colors,
-       *   so clears are only supported in the sampling case.
-       *
-       * - A clear color of zeroes holds the same meaning regardless of the
-       *   format. Although it could avoid more resolves, we don't use
-       *   isl_color_value_is_zero because the surface format used by
-       *   blorp_copy isn't guaranteed to access the same components as the
-       *   original format (e.g. A8_UNORM/R8_UINT).
-       */
-      bool is_zero = clear_color_is_fully_zero(res);
+      if (is_dest) {
 
-      if (batch->name == IRIS_BATCH_BLITTER) {
-         if (devinfo->verx10 >= 125) {
-            *out_aux_usage = res->aux.usage;
-            *out_clear_supported = is_zero;
-         } else {
-            *out_aux_usage = ISL_AUX_USAGE_NONE;
-            *out_clear_supported = false;
-         }
+         /* We only blit to images created with PIPE_BIND_PRIME_BLIT_DST.
+          * These are only created with dri3_alloc_render_buffer. That
+          * function also makes them linear, so they lack compression.
+          *
+          * Note: this code block could be substituted with the one below, but
+          * this setup clarifies that no additional handling of FCV is
+          * necessary.
+          */
+         assert(res->base.b.bind & PIPE_BIND_PRIME_BLIT_DST);
+         assert(res->surf.tiling == ISL_TILING_LINEAR);
+         assert(res->aux.usage == ISL_AUX_USAGE_NONE);
+
+         return ISL_AUX_USAGE_NONE;
       } else {
-         *out_aux_usage = res->aux.usage;
-         *out_clear_supported = is_zero || (devinfo->ver >= 11 && !is_dest);
+         return devinfo->verx10 >= 125 ? res->aux.usage : ISL_AUX_USAGE_NONE;
       }
-      break;
    }
-   default:
-      *out_aux_usage = ISL_AUX_USAGE_NONE;
-      *out_clear_supported = false;
-      break;
+}
+
+static void
+prepare_copy_region(struct iris_context *ice,
+                    const struct iris_batch *batch,
+                    struct iris_resource *res,
+                    enum isl_format view_format,
+                    uint32_t level,
+                    uint32_t start_layer, uint32_t layer_count,
+                    enum isl_aux_usage aux_usage,
+                    bool is_dest)
+{
+   if (batch->name == IRIS_BATCH_RENDER) {
+      if (is_dest) {
+         iris_resource_prepare_render(ice, res, view_format, level,
+                                      start_layer, layer_count, aux_usage);
+      } else {
+         iris_resource_prepare_texture(ice, res, view_format, level, 1,
+                                       start_layer, layer_count);
+      }
+   } else {
+      assert(batch->name == IRIS_BATCH_BLITTER);
+      iris_resource_prepare_access(ice, res, level, 1,
+                                   start_layer, layer_count, aux_usage,
+                                   isl_aux_usage_has_fast_clears(aux_usage) &&
+                                   clear_color_is_fully_zero(res));
    }
 }
 
@@ -679,15 +678,22 @@ iris_copy_region(struct blorp_context *blorp,
       batch->name == IRIS_BATCH_BLITTER ? IRIS_DOMAIN_OTHER_WRITE
                                         : IRIS_DOMAIN_RENDER_WRITE;
 
-   enum isl_aux_usage src_aux_usage, dst_aux_usage;
-   bool src_clear_supported, dst_clear_supported;
-   get_copy_region_aux_settings(ice, batch, src_res, src_level,
-                                &src_aux_usage, &src_clear_supported, false);
-   get_copy_region_aux_settings(ice, batch, dst_res, dst_level,
-                                &dst_aux_usage, &dst_clear_supported, true);
+   enum isl_format src_fmt, dst_fmt;
+   blorp_copy_get_formats(&screen->isl_dev, &src_res->surf, &dst_res->surf,
+                          &src_fmt, &dst_fmt);
 
-   if (iris_batch_references(batch, src_res->bo))
-      tex_cache_flush_hack(batch, ISL_FORMAT_UNSUPPORTED, src_res->surf.format);
+   enum isl_aux_usage src_aux_usage =
+      copy_region_aux_usage(ice, batch, src_res, src_fmt, src_level, false);
+   enum isl_aux_usage dst_aux_usage =
+      copy_region_aux_usage(ice, batch, dst_res, dst_fmt, dst_level, true);
+
+   if (iris_batch_references(batch, src_res->bo)) {
+      /* blorp_copy_get_formats() is only valid for compressed surfaces. */
+      tex_cache_flush_hack(batch,
+                           src_aux_usage == ISL_AUX_USAGE_NONE ?
+                           ISL_FORMAT_UNSUPPORTED : src_fmt,
+                           src_res->surf.format);
+   }
 
    if (dst->target == PIPE_BUFFER)
       util_range_add(&dst_res->base.b, &dst_res->valid_buffer_range, dstx, dstx + src_box->width);
@@ -700,14 +706,14 @@ iris_copy_region(struct blorp_context *blorp,
       struct blorp_address src_addr = {
          .buffer = src_res->bo, .offset = src_res->offset + src_box->x,
          .mocs = iris_mocs(src_res->bo, &screen->isl_dev,
-                           ISL_SURF_USAGE_TEXTURE_BIT),
+                           iris_blorp_batch_usage(batch, false /* is_dest */)),
          .local_hint = iris_bo_likely_local(src_res->bo),
       };
       struct blorp_address dst_addr = {
          .buffer = dst_res->bo, .offset = dst_res->offset + dstx,
-         .reloc_flags = EXEC_OBJECT_WRITE,
+         .reloc_flags = IRIS_BLORP_RELOC_FLAGS_EXEC_OBJECT_WRITE,
          .mocs = iris_mocs(dst_res->bo, &screen->isl_dev,
-                           ISL_SURF_USAGE_RENDER_TARGET_BIT),
+                           iris_blorp_batch_usage(batch, true /* is_dest */)),
          .local_hint = iris_bo_likely_local(dst_res->bo),
       };
 
@@ -723,22 +729,20 @@ iris_copy_region(struct blorp_context *blorp,
    } else {
       // XXX: what about one surface being a buffer and not the other?
 
-      struct blorp_surf src_surf, dst_surf;
-      iris_blorp_surf_for_resource(&screen->isl_dev, &src_surf,
-                                   src, src_aux_usage, src_level, false);
-      iris_blorp_surf_for_resource(&screen->isl_dev, &dst_surf,
-                                   dst, dst_aux_usage, dst_level, true);
-
-      iris_resource_prepare_access(ice, src_res, src_level, 1,
-                                   src_box->z, src_box->depth,
-                                   src_aux_usage, src_clear_supported);
-      iris_resource_prepare_access(ice, dst_res, dst_level, 1,
-                                   dstz, src_box->depth,
-                                   dst_aux_usage, dst_clear_supported);
+      prepare_copy_region(ice, batch, src_res, src_fmt, src_level,
+                          src_box->z, src_box->depth, src_aux_usage, false);
+      prepare_copy_region(ice, batch, dst_res, dst_fmt, dst_level,
+                          dstz, src_box->depth, dst_aux_usage, true);
 
       iris_emit_buffer_barrier_for(batch, src_res->bo,
                                    IRIS_DOMAIN_SAMPLER_READ);
       iris_emit_buffer_barrier_for(batch, dst_res->bo, write_domain);
+
+      struct blorp_surf src_surf, dst_surf;
+      iris_blorp_surf_for_resource(batch, &src_surf, src,
+                                   src_aux_usage, src_level, false);
+      iris_blorp_surf_for_resource(batch, &dst_surf, dst,
+                                   dst_aux_usage, dst_level, true);
 
       for (int slice = 0; slice < src_box->depth; slice++) {
          iris_batch_maybe_flush(batch, 1500);
@@ -757,7 +761,7 @@ iris_copy_region(struct blorp_context *blorp,
 
    blorp_batch_finish(&blorp_batch);
 
-   tex_cache_flush_hack(batch, ISL_FORMAT_UNSUPPORTED, src_res->surf.format);
+   tex_cache_flush_hack(batch, src_fmt, src_res->surf.format);
 }
 
 /**

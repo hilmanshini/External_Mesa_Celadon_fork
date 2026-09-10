@@ -1,26 +1,7 @@
 /*
  * Copyright 2013 Advanced Micro Devices, Inc.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE.
- *
  * Authors: Marek Olšák <maraeo@gmail.com>
+ * SPDX-License-Identifier: MIT
  */
 
 /**
@@ -111,18 +92,26 @@ radeon_add_to_buffer_list_check_mem(struct r600_common_context *rctx,
 	return radeon_add_to_buffer_list(rctx, ring, rbo, usage);
 }
 
+static inline void r600_emit_reloc_packets(struct radeon_cmdbuf *cs,
+					   unsigned reloc, bool has_vm,
+					   uint32_t pkt_flags)
+{
+	if(!has_vm)
+	{
+		radeon_emit(cs, PKT3(PKT3_NOP, 0, 0) | pkt_flags);
+		radeon_emit(cs, reloc);
+	}
+}
+
 static inline void r600_emit_reloc(struct r600_common_context *rctx,
 				   struct r600_ring *ring, struct r600_resource *rbo,
-				   unsigned usage)
+				   unsigned usage,
+				   uint32_t pkt_flags)
 {
 	struct radeon_cmdbuf *cs = &ring->cs;
 	bool has_vm = ((struct r600_common_screen*)rctx->b.screen)->info.r600_has_virtual_memory;
 	unsigned reloc = radeon_add_to_buffer_list(rctx, ring, rbo, usage);
-
-	if (!has_vm) {
-		radeon_emit(cs, PKT3(PKT3_NOP, 0, 0));
-		radeon_emit(cs, reloc);
-	}
+	r600_emit_reloc_packets(cs, reloc, has_vm, pkt_flags);
 }
 
 static inline void radeon_set_config_reg_seq(struct radeon_cmdbuf *cs, unsigned reg, unsigned num)

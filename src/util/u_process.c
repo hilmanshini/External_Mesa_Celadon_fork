@@ -43,7 +43,7 @@
 #include <mach-o/dyld.h>
 #endif
 
-#if DETECT_OS_FREEBSD
+#if DETECT_OS_BSD
 #include <sys/types.h>
 #include <sys/sysctl.h>
 #endif
@@ -79,9 +79,7 @@ __getProgramName()
          if (name)
             program_name = strdup(name + 1);
       }
-      if (path) {
-         free(path);
-      }
+      free(path);
       if (!program_name) {
          program_name = strdup(arg+1);
       }
@@ -103,7 +101,7 @@ __getProgramName()
 {
    return strdup(program_invocation_short_name);
 }
-#elif defined(__FreeBSD__) || defined(__DragonFly__) || defined(__APPLE__) || defined(ANDROID) || defined(__NetBSD__)
+#elif defined(__FreeBSD__) || defined(__DragonFly__) || defined(__APPLE__) || DETECT_OS_ANDROID || defined(__NetBSD__)
 #if defined(__NetBSD__)
 #    include <sys/param.h>
 #endif
@@ -170,7 +168,7 @@ __getProgramName()
 #endif
 
 #if defined(GET_PROGRAM_NAME_NOT_AVAILABLE)
-#if defined(__OpenBSD__) || defined(__NetBSD__) || defined(__UCLIBC__) || defined(ANDROID)
+#if defined(__OpenBSD__) || defined(__NetBSD__) || defined(__UCLIBC__) || DETECT_OS_ANDROID
 /* This is a hack. It's said to work on OpenBSD, NetBSD and GNU.
  * Rogelio M.Serrano Jr. reported it's also working with UCLIBC. It's
  * used as a last resort, if there is no documented facility available. */
@@ -206,10 +204,11 @@ free_program_name(void)
 static void
 util_get_process_name_callback(void)
 {
-   program_name = __getProgramName();
-   if (program_name) {
+   const char *override_name = os_get_option("MESA_PROCESS_NAME");
+   program_name = override_name ? strdup(override_name) : __getProgramName();
+
+   if (program_name)
       atexit(free_program_name);
-   }
 }
 
 const char *
@@ -237,7 +236,7 @@ util_get_process_exec_path(char* process_path, size_t len)
    process_path[len - 1] = '\0';
 
    return len;
-#elif DETECT_OS_UNIX
+#elif DETECT_OS_POSIX
    ssize_t r;
 
    if ((r = readlink("/proc/self/exe", process_path, len)) > 0)
@@ -257,34 +256,6 @@ success:
 
 #endif
    return 0;
-}
-
-bool
-util_get_process_name_may_override(const char *env_name, char *procname, size_t size)
-{
-   const char *name;
-
-   /* First, check if the env var with env_name is set to
-    * override the normal process name query.
-    */
-   name = os_get_option(env_name);
-
-   if (!name) {
-      /* do normal query */
-      name = util_get_process_name();
-   }
-
-   assert(size > 0);
-   assert(procname);
-
-   if (name && procname && size > 0) {
-      strncpy(procname, name, size);
-      procname[size - 1] = '\0';
-      return true;
-   }
-   else {
-      return false;
-   }
 }
 
 bool
@@ -315,6 +286,32 @@ util_get_command_line(char *cmdline, size_t size)
       close(f);
       return true;
    }
+#elif DETECT_OS_BSD
+   int mib[] = {
+      CTL_KERN,
+#if DETECT_OS_NETBSD || DETECT_OS_OPENBSD
+      KERN_PROC_ARGS,
+      getpid(),
+      KERN_PROC_ARGV,
+#else
+      KERN_PROC,
+      KERN_PROC_ARGS,
+      getpid(),
+#endif
+   };
+
+   /* Like /proc/pid/cmdline each argument is separated by NUL byte */
+   if (sysctl(mib, ARRAY_SIZE(mib), cmdline, &size, NULL, 0) == -1) {
+      return false;
+   }
+
+   /* Replace NUL with space except terminating NUL */
+   for (size_t i = 0; i < (size - 1); i++) {
+      if (cmdline[i] == '\0')
+         cmdline[i] = ' ';
+   }
+
+   return true;
 #endif
 
    /* XXX to-do: implement this function for other operating systems */

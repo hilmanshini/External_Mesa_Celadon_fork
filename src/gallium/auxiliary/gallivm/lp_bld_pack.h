@@ -36,12 +36,12 @@
 #ifndef LP_BLD_PACK_H
 #define LP_BLD_PACK_H
 
+#include <stdbool.h>
 
-#include "pipe/p_compiler.h"
-
-#include "gallivm/lp_bld.h"
+#include <llvm-c/Core.h>
 
 
+struct gallivm_state;
 struct lp_type;
 
 LLVMValueRef
@@ -137,7 +137,7 @@ LLVMValueRef
 lp_build_pack(struct gallivm_state *gallivm,
               struct lp_type src_type,
               struct lp_type dst_type,
-              boolean clamped,
+              bool clamped,
               const LLVMValueRef *src, unsigned num_srcs);
 
 

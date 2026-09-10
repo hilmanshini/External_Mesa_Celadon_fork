@@ -1,24 +1,6 @@
 /*
- * Copyright (C) 2012-2018 Rob Clark <robclark@freedesktop.org>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * Copyright © 2012-2018 Rob Clark <robclark@freedesktop.org>
+ * SPDX-License-Identifier: MIT
  *
  * Authors:
  *    Rob Clark <robclark@freedesktop.org>
@@ -27,6 +9,7 @@
 #include "util/os_mman.h"
 
 #include "freedreno_drmif.h"
+#include "freedreno_drm_perfetto.h"
 #include "freedreno_priv.h"
 
 simple_mtx_t table_lock = SIMPLE_MTX_INITIALIZER;
@@ -41,15 +24,40 @@ set_name(struct fd_bo *bo, uint32_t name)
    _mesa_hash_table_insert(bo->dev->name_table, &bo->name, bo);
 }
 
+static struct fd_bo zombie;
+
 /* lookup a buffer, call w/ table_lock held: */
 static struct fd_bo *
 lookup_bo(struct hash_table *tbl, uint32_t key)
 {
    struct fd_bo *bo = NULL;
-   struct hash_entry *entry = _mesa_hash_table_search(tbl, &key);
+   struct hash_entry *entry;
+
+   simple_mtx_assert_locked(&table_lock);
+
+   entry = _mesa_hash_table_search(tbl, &key);
    if (entry) {
-      /* found, incr refcnt and return: */
-      bo = fd_bo_ref(entry->data);
+      bo = entry->data;
+
+      /* We could be racing with final unref in another thread, and won
+       * the table_lock preventing the other thread from being able to
+       * remove an object it is about to free.  Fortunately since table
+       * lookup and removal are protected by the same lock (and table
+       * removal happens before obj free) we can easily detect this by
+       * checking for refcnt==0 (ie. 1 after p_atomic_inc_return).
+       */
+      if (p_atomic_inc_return(&bo->refcnt) == 1) {
+         /* Restore the zombified reference count, so if another thread
+          * that ends up calling lookup_bo() gets the table_lock before
+          * the thread deleting the bo does, it doesn't mistakenly see
+          * that the BO is live.
+          *
+          * We are holding the table_lock here so we can't be racing
+          * with another caller of lookup_bo()
+          */
+         p_atomic_dec(&bo->refcnt);
+         return &zombie;
+      }
 
       if (!list_is_empty(&bo->node)) {
          mesa_logw("bo was in cache, size=%u, alloc_flags=0x%x\n",
@@ -80,7 +88,8 @@ fd_bo_init_common(struct fd_bo *bo, struct fd_device *dev)
    bo->max_fences = 1;
    bo->fences = &bo->_inline_fence;
 
-   VG_BO_ALLOC(bo);
+   if (!bo->map)
+      VG_BO_ALLOC(bo);
 }
 
 /* allocate a new buffer object, call w/ table_lock held */
@@ -115,10 +124,13 @@ bo_new(struct fd_device *dev, uint32_t size, uint32_t flags,
    struct fd_bo *bo = NULL;
 
    if (size < FD_BO_HEAP_BLOCK_SIZE) {
-      if ((flags == 0) && dev->default_heap)
-         return fd_bo_heap_alloc(dev->default_heap, size);
-      if ((flags == RING_FLAGS) && dev->ring_heap)
-         return fd_bo_heap_alloc(dev->ring_heap, size);
+      uint32_t alloc_flags = flags & ~_FD_BO_HINTS;
+      if ((alloc_flags == 0) && dev->default_heap)
+         bo = fd_bo_heap_alloc(dev->default_heap, size, flags);
+      else if ((flags == RING_FLAGS) && dev->ring_heap)
+         bo = fd_bo_heap_alloc(dev->ring_heap, size, flags);
+      if (bo)
+         return bo;
    }
 
    /* demote cached-coherent to WC if not supported: */
@@ -139,6 +151,8 @@ bo_new(struct fd_device *dev, uint32_t size, uint32_t flags,
    simple_mtx_unlock(&table_lock);
 
    bo->alloc_flags = flags;
+
+   fd_alloc_log(bo, FD_ALLOC_NONE, FD_ALLOC_ACTIVE);
 
    return bo;
 }
@@ -193,19 +207,36 @@ fd_bo_from_handle(struct fd_device *dev, uint32_t handle, uint32_t size)
 out_unlock:
    simple_mtx_unlock(&table_lock);
 
+   /* We've raced with the handle being closed, so the handle is no longer
+    * valid.  Friends don't let friends share handles.
+    */
+   if (bo == &zombie)
+      return NULL;
+
    return bo;
 }
 
-struct fd_bo *
-fd_bo_from_dmabuf(struct fd_device *dev, int fd)
+uint32_t
+fd_handle_from_dmabuf_drm(struct fd_device *dev, int fd)
 {
-   int ret, size;
+   uint32_t handle;
+   int ret = drmPrimeFDToHandle(dev->fd, fd, &handle);
+   if (ret)
+      return 0;
+   return handle;
+}
+
+struct fd_bo *
+fd_bo_from_dmabuf_drm(struct fd_device *dev, int fd)
+{
+   int size;
    uint32_t handle;
    struct fd_bo *bo;
 
+restart:
    simple_mtx_lock(&table_lock);
-   ret = drmPrimeFDToHandle(dev->fd, fd, &handle);
-   if (ret) {
+   handle = dev->funcs->handle_from_dmabuf(dev, fd);
+   if (!handle) {
       simple_mtx_unlock(&table_lock);
       return NULL;
    }
@@ -225,7 +256,16 @@ fd_bo_from_dmabuf(struct fd_device *dev, int fd)
 out_unlock:
    simple_mtx_unlock(&table_lock);
 
+   if (bo == &zombie)
+      goto restart;
+
    return bo;
+}
+
+struct fd_bo *
+fd_bo_from_dmabuf(struct fd_device *dev, int fd)
+{
+   return dev->funcs->bo_from_dmabuf(dev, fd);
 }
 
 struct fd_bo *
@@ -243,6 +283,7 @@ fd_bo_from_name(struct fd_device *dev, uint32_t name)
    if (bo)
       goto out_unlock;
 
+restart:
    if (drmIoctl(dev->fd, DRM_IOCTL_GEM_OPEN, &req)) {
       ERROR_MSG("gem-open failed: %s", strerror(errno));
       goto out_unlock;
@@ -261,6 +302,9 @@ fd_bo_from_name(struct fd_device *dev, uint32_t name)
 out_unlock:
    simple_mtx_unlock(&table_lock);
 
+   if (bo == &zombie)
+      goto restart;
+
    return bo;
 }
 
@@ -273,67 +317,98 @@ fd_bo_mark_for_dump(struct fd_bo *bo)
 struct fd_bo *
 fd_bo_ref(struct fd_bo *bo)
 {
-   p_atomic_inc(&bo->refcnt);
+   ref(&bo->refcnt);
    return bo;
 }
 
-static uint32_t bo_del(struct fd_bo *bo);
-static void close_handles(struct fd_device *dev, uint32_t *handles, unsigned cnt);
+static void
+bo_finalize(struct fd_bo *bo)
+{
+   if (bo->funcs->finalize)
+      bo->funcs->finalize(bo);
+}
 
-static uint32_t
-bo_del_or_recycle(struct fd_bo *bo)
+static void
+dev_flush(struct fd_device *dev)
+{
+   if (dev->funcs->flush)
+      dev->funcs->flush(dev);
+}
+
+static void
+bo_del(struct fd_bo *bo)
+{
+   bo->funcs->destroy(bo);
+}
+
+static bool
+try_recycle(struct fd_bo *bo)
 {
    struct fd_device *dev = bo->dev;
 
    /* No point in BO cache for suballocated buffers: */
-   if (!suballoc_bo(bo)) {
-      if ((bo->bo_reuse == BO_CACHE) &&
-          (fd_bo_cache_free(&dev->bo_cache, bo) == 0))
-         return 0;
+   if (suballoc_bo(bo))
+      return false;
 
-      if ((bo->bo_reuse == RING_CACHE) &&
-          (fd_bo_cache_free(&dev->ring_cache, bo) == 0))
-         return 0;
-   }
+   if (bo->bo_reuse == BO_CACHE)
+      return fd_bo_cache_free(&dev->bo_cache, bo) == 0;
 
-   return bo_del(bo);
+   if (bo->bo_reuse == RING_CACHE)
+      return fd_bo_cache_free(&dev->ring_cache, bo) == 0;
+
+   return false;
 }
 
 void
 fd_bo_del(struct fd_bo *bo)
 {
-   if (!p_atomic_dec_zero(&bo->refcnt))
+   if (!unref(&bo->refcnt))
+      return;
+
+   if (try_recycle(bo))
       return;
 
    struct fd_device *dev = bo->dev;
 
-   uint32_t handle = bo_del_or_recycle(bo);
-   if (handle)
-      close_handles(dev, &handle, 1);
+   bo_finalize(bo);
+   dev_flush(dev);
+   fd_alloc_log(bo, FD_ALLOC_ACTIVE, FD_ALLOC_NONE);
+   bo_del(bo);
 }
 
 void
-fd_bo_del_array(struct fd_bo **bos, unsigned count)
+fd_bo_del_array(struct fd_bo **bos, int count)
 {
    if (!count)
       return;
 
    struct fd_device *dev = bos[0]->dev;
-   uint32_t handles[64];
-   unsigned cnt = 0;
 
-   for (unsigned i = 0; i < count; i++) {
-      if (!p_atomic_dec_zero(&bos[i]->refcnt))
-         continue;
-      if (cnt == ARRAY_SIZE(handles)) {
-         close_handles(dev, handles, cnt);
-         cnt = 0;
+   /*
+    * First pass, remove objects from the table that either (a) still have
+    * a live reference, or (b) no longer have a reference but are released
+    * to the BO cache:
+    */
+
+   for (int i = 0; i < count; i++) {
+      if (!unref(&bos[i]->refcnt) || try_recycle(bos[i])) {
+         bos[i--] = bos[--count];
+      } else {
+         /* We are going to delete this one, so finalize it first: */
+         bo_finalize(bos[i]);
       }
-      handles[cnt] = bo_del_or_recycle(bos[i]);
-      if (handles[cnt])
-         cnt++;
    }
-   close_handles(dev, handles, cnt);
+
+   dev_flush(dev);
+
+   /*
+    * Second pass, delete all of the objects remaining after first pass.
+    */
+
+   for (int i = 0; i < count; i++) {
+      fd_alloc_log(bos[i], FD_ALLOC_ACTIVE, FD_ALLOC_NONE);
+      bo_del(bos[i]);
+   }
 }
 
 /**
@@ -348,21 +423,17 @@ fd_bo_del_list_nocache(struct list_head *list)
       return;
 
    struct fd_device *dev = first_bo(list)->dev;
-   uint32_t handles[64];
-   unsigned cnt = 0;
+
+   foreach_bo (bo, list) {
+      bo_finalize(bo);
+   }
+
+   dev_flush(dev);
 
    foreach_bo_safe (bo, list) {
       assert(bo->refcnt == 0);
-      if (cnt == ARRAY_SIZE(handles)) {
-         close_handles(dev, handles, cnt);
-         cnt = 0;
-      }
-      handles[cnt] = bo_del(bo);
-      if (handles[cnt])
-         cnt++;
+      bo_del(bo);
    }
-
-   close_handles(dev, handles, cnt);
 }
 
 void
@@ -373,6 +444,15 @@ fd_bo_fini_fences(struct fd_bo *bo)
 
    if (bo->fences != &bo->_inline_fence)
       free(bo->fences);
+}
+
+void
+fd_bo_close_handle_drm(struct fd_bo *bo)
+{
+   struct drm_gem_close req = {
+      .handle = bo->handle,
+   };
+   drmIoctl(bo->dev->fd, DRM_IOCTL_GEM_CLOSE, &req);
 }
 
 /**
@@ -398,39 +478,14 @@ fd_bo_fini_common(struct fd_bo *bo)
 
    if (handle) {
       simple_mtx_lock(&table_lock);
+      dev->funcs->bo_close_handle(bo);
       _mesa_hash_table_remove_key(dev->handle_table, &handle);
       if (bo->name)
          _mesa_hash_table_remove_key(dev->name_table, &bo->name);
       simple_mtx_unlock(&table_lock);
    }
-}
 
-/**
- * The returned handle must be closed via a call to close_handles()
- */
-static uint32_t
-bo_del(struct fd_bo *bo)
-{
-   uint32_t handle = bo->handle;
-   bo->funcs->destroy(bo);
-   return handle;
-}
-
-static void
-close_handles(struct fd_device *dev, uint32_t *handles, unsigned cnt)
-{
-   if (!cnt)
-      return;
-
-   if (dev->funcs->flush)
-      dev->funcs->flush(dev);
-
-   for (unsigned i = 0; i < cnt; i++) {
-      struct drm_gem_close req = {
-         .handle = handles[i],
-      };
-      drmIoctl(dev->fd, DRM_IOCTL_GEM_CLOSE, &req);
-   }
+   free(bo);
 }
 
 static void
@@ -446,7 +501,7 @@ bo_flush(struct fd_bo *bo)
    simple_mtx_unlock(&fence_lock);
 
    for (unsigned i = 0; i < nr; i++) {
-      fd_fence_flush(bo->fences[i]);
+      fd_fence_flush(fences[i]);
       fd_fence_del(fences[i]);
    }
 }
@@ -454,6 +509,9 @@ bo_flush(struct fd_bo *bo)
 int
 fd_bo_get_name(struct fd_bo *bo, uint32_t *name)
 {
+   if (suballoc_bo(bo))
+      return -1;
+
    if (!bo->name) {
       struct drm_gem_flink req = {
          .handle = bo->handle,
@@ -481,6 +539,8 @@ fd_bo_get_name(struct fd_bo *bo, uint32_t *name)
 uint32_t
 fd_bo_handle(struct fd_bo *bo)
 {
+   if (suballoc_bo(bo))
+      return 0;
    bo->bo_reuse = NO_CACHE;
    bo->alloc_flags |= FD_BO_SHARED;
    bo_flush(bo);
@@ -488,13 +548,28 @@ fd_bo_handle(struct fd_bo *bo)
 }
 
 int
-fd_bo_dmabuf(struct fd_bo *bo)
+fd_bo_dmabuf_drm(struct fd_bo *bo)
 {
    int ret, prime_fd;
 
    ret = drmPrimeHandleToFD(bo->dev->fd, bo->handle, DRM_CLOEXEC | DRM_RDWR,
                             &prime_fd);
-   if (ret) {
+   if (ret < 0)
+      return ret;
+
+   return prime_fd;
+}
+
+int
+fd_bo_dmabuf(struct fd_bo *bo)
+{
+   int ret;
+
+   if (suballoc_bo(bo))
+      return -1;
+
+   ret = bo->funcs->dmabuf(bo);
+   if (ret < 0) {
       ERROR_MSG("failed to get dmabuf fd: %d", ret);
       return ret;
    }
@@ -503,7 +578,7 @@ fd_bo_dmabuf(struct fd_bo *bo)
    bo->alloc_flags |= FD_BO_SHARED;
    bo_flush(bo);
 
-   return prime_fd;
+   return ret;
 }
 
 uint32_t
@@ -518,25 +593,47 @@ fd_bo_is_cached(struct fd_bo *bo)
    return !!(bo->alloc_flags & FD_BO_CACHED_COHERENT);
 }
 
-static void *
-bo_map(struct fd_bo *bo)
+void
+fd_bo_set_metadata(struct fd_bo *bo, void *metadata, uint32_t metadata_size)
+{
+   if (!bo->funcs->set_metadata)
+      return;
+   bo->funcs->set_metadata(bo, metadata, metadata_size);
+}
+
+int
+fd_bo_get_metadata(struct fd_bo *bo, void *metadata, uint32_t metadata_size)
+{
+   if (!bo->funcs->get_metadata)
+      return -ENOSYS;
+   return bo->funcs->get_metadata(bo, metadata, metadata_size);
+}
+
+void *
+fd_bo_map_os_mmap(struct fd_bo *bo)
+{
+   uint64_t offset;
+   int ret;
+   ret = bo->funcs->offset(bo, &offset);
+   if (ret) {
+      return NULL;
+   }
+   return os_mmap(0, bo->size, PROT_READ | PROT_WRITE, MAP_SHARED,
+                  bo->dev->fd, offset);
+}
+
+/* For internal use only, does not check FD_BO_NOMAP: */
+void *
+__fd_bo_map(struct fd_bo *bo)
 {
    if (!bo->map) {
-      uint64_t offset;
-      int ret;
-
-      ret = bo->funcs->offset(bo, &offset);
-      if (ret) {
-         return NULL;
-      }
-
-      bo->map = os_mmap(0, bo->size, PROT_READ | PROT_WRITE, MAP_SHARED,
-                        bo->dev->fd, offset);
+      bo->map = bo->funcs->map(bo);
       if (bo->map == MAP_FAILED) {
          ERROR_MSG("mmap failed: %s", strerror(errno));
          bo->map = NULL;
       }
    }
+
    return bo->map;
 }
 
@@ -549,7 +646,17 @@ fd_bo_map(struct fd_bo *bo)
    if (bo->alloc_flags & FD_BO_NOMAP)
       return NULL;
 
-   return bo_map(bo);
+   return __fd_bo_map(bo);
+}
+
+static void *
+fd_bo_map_for_upload(struct fd_bo *bo)
+{
+   void *addr = __fd_bo_map(bo);
+   if (bo->alloc_flags & FD_BO_NOMAP)
+      VG_BO_MAPPED(bo);
+
+   return addr;
 }
 
 void
@@ -560,7 +667,7 @@ fd_bo_upload(struct fd_bo *bo, void *src, unsigned off, unsigned len)
       return;
    }
 
-   memcpy((uint8_t *)bo_map(bo) + off, src, len);
+   memcpy((uint8_t *)fd_bo_map_for_upload(bo) + off, src, len);
 }
 
 bool
@@ -601,14 +708,44 @@ fd_bo_cpu_prep(struct fd_bo *bo, struct fd_pipe *pipe, uint32_t op)
     */
    bo_flush(bo);
 
+   /* FD_BO_PREP_FLUSH is purely a frontend flag, and is not seen/handled
+    * by backend or kernel:
+    */
    op &= ~FD_BO_PREP_FLUSH;
 
    if (!op)
       return 0;
 
-   /* FD_BO_PREP_FLUSH is purely a frontend flag, and is not seen/handled
-    * by backend or kernel:
+   /* Wait on fences.. first grab a reference under the fence lock, and then
+    * wait and drop ref.
     */
+   simple_mtx_lock(&fence_lock);
+   unsigned nr = bo->nr_fences;
+   struct fd_fence *fences[nr];
+   for (unsigned i = 0; i < nr; i++)
+      fences[i] = fd_fence_ref_locked(bo->fences[i]);
+   simple_mtx_unlock(&fence_lock);
+
+   for (unsigned i = 0; i < nr; i++) {
+      fd_fence_wait(fences[i]);
+      fd_fence_del(fences[i]);
+   }
+
+   /* expire completed fences */
+   fd_bo_state(bo);
+
+   /* None shared buffers will not have any external usage (ie. fences
+    * that we are not aware of) so nothing more to do.
+    */
+   if (!(bo->alloc_flags & FD_BO_SHARED))
+      return 0;
+
+   /* If buffer is shared, but we are using explicit sync, no need to
+    * fallback to implicit sync:
+    */
+   if (pipe && pipe->no_implicit_sync)
+      return 0;
+
    return bo->funcs->cpu_prep(bo, pipe, op);
 }
 
@@ -691,6 +828,12 @@ fd_bo_state(struct fd_bo *bo)
     */
    if (bo->alloc_flags & (FD_BO_SHARED | _FD_BO_NOSYNC))
       return FD_BO_STATE_UNKNOWN;
+
+   /* Speculatively check, if we already know we're idle, no need to acquire
+    * lock and do the cleanup_fences() dance:
+    */
+   if (!bo->nr_fences)
+      return FD_BO_STATE_IDLE;
 
    simple_mtx_lock(&fence_lock);
    cleanup_fences(bo);

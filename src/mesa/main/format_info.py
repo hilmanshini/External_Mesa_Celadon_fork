@@ -27,6 +27,8 @@ import sys
 def get_gl_base_format(fmat):
    if fmat.name == 'MESA_FORMAT_NONE':
       return 'GL_NONE'
+   elif fmat.name == 'MESA_FORMAT_NV12':
+      return 'GL_NONE'
    elif fmat.name in ['MESA_FORMAT_YCBCR', 'MESA_FORMAT_YCBCR_REV']:
       return 'GL_YCBCR_MESA'
    elif fmat.has_channel('r'):
@@ -126,7 +128,7 @@ def get_channel_bits(fmat, chan_name):
          return bits if fmat.has_channel(chan_name) else 0
       elif fmat.layout == 'atc':
          return 8 if fmat.has_channel(chan_name) else 0
-      elif fmat.layout == 'other' and ('RG_RB' in fmat.name or 'GR_BR' in fmat.name):
+      elif fmat.layout == 'other' and any(s in fmat.name for s in {'RG_RB', 'GR_BR', 'RB_RG', 'BR_GR'}):
          return 8 if fmat.has_channel(chan_name) else 0
       else:
          assert False

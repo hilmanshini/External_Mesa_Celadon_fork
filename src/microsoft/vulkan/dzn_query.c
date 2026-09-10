@@ -37,7 +37,7 @@ dzn_query_pool_get_heap_type(VkQueryType in)
    case VK_QUERY_TYPE_OCCLUSION: return D3D12_QUERY_HEAP_TYPE_OCCLUSION;
    case VK_QUERY_TYPE_PIPELINE_STATISTICS: return D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS;
    case VK_QUERY_TYPE_TIMESTAMP: return D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
-   default: unreachable("Unsupported query type");
+   default: UNREACHABLE("Unsupported query type");
    }
 }
 
@@ -51,7 +51,7 @@ dzn_query_pool_get_query_type(const struct dzn_query_pool *qpool,
              D3D12_QUERY_TYPE_OCCLUSION : D3D12_QUERY_TYPE_BINARY_OCCLUSION;
    case D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS: return D3D12_QUERY_TYPE_PIPELINE_STATISTICS;
    case D3D12_QUERY_HEAP_TYPE_TIMESTAMP: return D3D12_QUERY_TYPE_TIMESTAMP;
-   default: unreachable("Unsupported query type");
+   default: UNREACHABLE("Unsupported query type");
    }
 }
 
@@ -129,7 +129,7 @@ dzn_query_pool_create(struct dzn_device *device,
       qpool->pipeline_statistics = info->pipelineStatistics;
       qpool->query_size = sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS);
       break;
-   default: unreachable("Unsupported query type");
+   default: UNREACHABLE("Unsupported query type");
    }
 
    D3D12_HEAP_PROPERTIES hprops =
@@ -240,7 +240,7 @@ dzn_ResetQueryPool(VkDevice device,
          query->fence = NULL;
       }
    }
-   mtx_lock(&qpool->queries_lock);
+   mtx_unlock(&qpool->queries_lock);
 
    memset((uint8_t *)qpool->collect_map + dzn_query_pool_get_result_offset(qpool, firstQuery),
           0, queryCount * qpool->query_size);

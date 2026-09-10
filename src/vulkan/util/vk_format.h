@@ -33,11 +33,22 @@
 extern "C" {
 #endif
 
+extern const enum pipe_format vk_format_map[];
+
 enum pipe_format
-vk_format_to_pipe_format(enum VkFormat vkformat);
+vk_format_to_pipe_format(VkFormat vkformat);
+
+VkFormat
+vk_format_from_pipe_format(enum pipe_format format);
 
 VkImageAspectFlags
 vk_format_aspects(VkFormat format);
+
+static inline const struct util_format_description *
+vk_format_description(VkFormat format)
+{
+   return util_format_description(vk_format_to_pipe_format(format));
+}
 
 static inline bool
 vk_format_is_color(VkFormat format)
@@ -82,11 +93,62 @@ vk_format_depth_only(VkFormat format)
    }
 }
 
+static inline bool
+vk_format_has_float_depth(VkFormat format)
+{
+   switch (format) {
+   case VK_FORMAT_D32_SFLOAT:
+   case VK_FORMAT_D32_SFLOAT_S8_UINT:
+      return true;
+   default:
+      return false;
+   }
+}
+
 static inline VkFormat
 vk_format_stencil_only(VkFormat format)
 {
    assert(vk_format_has_stencil(format));
    return VK_FORMAT_S8_UINT;
+}
+
+static inline bool
+vk_format_is_color_depth_stencil_capable(VkFormat format)
+{
+   /* Defines in the Vulkan Spec for VK_KHR_maintenance8 : "Compatible Formats
+    * for Depth-Stencil to/from Color Copies"
+    */
+   switch (format) {
+   case VK_FORMAT_D32_SFLOAT:
+   case VK_FORMAT_D32_SFLOAT_S8_UINT:
+   case VK_FORMAT_R32_SFLOAT:
+   case VK_FORMAT_R32_SINT:
+   case VK_FORMAT_R32_UINT:
+      return true;
+
+   case VK_FORMAT_X8_D24_UNORM_PACK32:
+   case VK_FORMAT_D24_UNORM_S8_UINT:
+      return true;
+
+   case VK_FORMAT_D16_UNORM:
+   case VK_FORMAT_D16_UNORM_S8_UINT:
+   case VK_FORMAT_R16_SFLOAT:
+   case VK_FORMAT_R16_UNORM:
+   case VK_FORMAT_R16_SNORM:
+   case VK_FORMAT_R16_UINT:
+   case VK_FORMAT_R16_SINT:
+      return true;
+
+   case VK_FORMAT_S8_UINT:
+   case VK_FORMAT_R8_UINT:
+   case VK_FORMAT_R8_SINT:
+   case VK_FORMAT_R8_UNORM:
+   case VK_FORMAT_R8_SNORM:
+      return true;
+
+   default:
+      return false;
+   }
 }
 
 void vk_component_mapping_to_pipe_swizzle(VkComponentMapping mapping,
@@ -134,6 +196,40 @@ vk_format_is_srgb(VkFormat format)
    return util_format_is_srgb(vk_format_to_pipe_format(format));
 }
 
+static inline VkFormat
+vk_format_srgb_to_linear(VkFormat format)
+{
+   if (!vk_format_is_srgb(format))
+      return format;
+
+   return vk_format_from_pipe_format(
+      util_format_linear(vk_format_to_pipe_format(format)));
+}
+
+static inline bool vk_format_is_alpha(VkFormat format)
+{
+   return util_format_is_alpha(vk_format_to_pipe_format(format));
+}
+
+static inline bool vk_format_is_alpha_on_msb(VkFormat vk_format)
+{
+   const struct util_format_description *desc =
+      vk_format_description(vk_format);
+
+   return (desc->colorspace == UTIL_FORMAT_COLORSPACE_RGB ||
+           desc->colorspace == UTIL_FORMAT_COLORSPACE_SRGB) &&
+#if UTIL_ARCH_BIG_ENDIAN
+          desc->swizzle[3] == PIPE_SWIZZLE_X;
+#else
+          desc->swizzle[3] == PIPE_SWIZZLE_W;
+#endif
+}
+
+static inline bool vk_format_is_scaled(VkFormat vk_format)
+{
+   return util_format_is_scaled(vk_format_to_pipe_format(vk_format));
+}
+
 static inline unsigned
 vk_format_get_blocksize(VkFormat format)
 {
@@ -165,12 +261,6 @@ vk_format_is_block_compressed(VkFormat format)
    return util_format_is_compressed(vk_format_to_pipe_format(format));
 }
 
-static inline const struct util_format_description *
-vk_format_description(VkFormat format)
-{
-   return util_format_description(vk_format_to_pipe_format(format));
-}
-
 static inline unsigned
 vk_format_get_component_bits(VkFormat format, enum util_format_colorspace colorspace,
                              unsigned component)
@@ -199,16 +289,85 @@ vk_format_get_blocksizebits(VkFormat format)
 }
 
 static inline unsigned
-vk_format_get_plane_count(VkFormat format)
+vk_format_get_bpc(VkFormat format)
 {
-   return util_format_get_num_planes(vk_format_to_pipe_format(format));
+   const struct util_format_description *desc =
+      vk_format_description(format);
+   unsigned bpc = 0;
+   for (unsigned i = 0; i < desc->nr_channels; i++) {
+      if (desc->channel[i].type == UTIL_FORMAT_TYPE_VOID)
+         continue;
+
+      assert(bpc == 0 || bpc == desc->channel[i].size);
+      bpc = desc->channel[i].size;
+   }
+   return bpc;
 }
 
 VkFormat
 vk_format_get_plane_format(VkFormat format, unsigned plane_id);
 
 VkFormat
+vk_format_get_plane_aspect_format(VkFormat format, const VkImageAspectFlags aspect);
+
+VkFormat
 vk_format_get_aspect_format(VkFormat format, const VkImageAspectFlags aspect);
+
+struct vk_format_ycbcr_plane {
+   /* RGBA format for this plane */
+   VkFormat format;
+
+   /* Whether this plane contains chroma channels */
+   bool has_chroma;
+
+   /* For downscaling of YUV planes */
+   uint8_t denominator_scales[2];
+
+   /* How to map sampled ycbcr planes to a single 4 component element.
+    *
+    * We use uint8_t for compactness but it's actually VkComponentSwizzle.
+    */
+   uint8_t ycbcr_swizzle[4];
+};
+
+struct vk_format_ycbcr_info {
+   uint8_t n_planes;
+   struct vk_format_ycbcr_plane planes[3];
+};
+
+const struct vk_format_ycbcr_info *vk_format_get_ycbcr_info(VkFormat format);
+
+static inline unsigned
+vk_format_get_plane_count(VkFormat format)
+{
+   const struct vk_format_ycbcr_info *ycbcr_info =
+      vk_format_get_ycbcr_info(format);
+   return ycbcr_info ? ycbcr_info->n_planes : 1;
+}
+
+static inline unsigned
+vk_format_get_plane_width(VkFormat format, unsigned plane, unsigned width)
+{
+   const struct vk_format_ycbcr_info *ycbcr_info =
+      vk_format_get_ycbcr_info(format);
+   const uint8_t width_scale = ycbcr_info ?
+      ycbcr_info->planes[plane].denominator_scales[0] : 1;
+   return width / width_scale;
+}
+
+static inline unsigned
+vk_format_get_plane_height(VkFormat format, unsigned plane, unsigned height)
+{
+   const struct vk_format_ycbcr_info *ycbcr_info =
+      vk_format_get_ycbcr_info(format);
+   const uint8_t height_scale = ycbcr_info ?
+      ycbcr_info->planes[plane].denominator_scales[1] : 1;
+   return height / height_scale;
+}
+
+VkClearColorValue
+vk_swizzle_color_value(VkClearColorValue color,
+                       VkComponentMapping swizzle, bool is_int);
 
 #ifdef __cplusplus
 }

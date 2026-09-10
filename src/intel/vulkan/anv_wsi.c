@@ -29,6 +29,8 @@
 #include "vk_semaphore.h"
 #include "vk_util.h"
 
+#include "common/intel_debug_identifier.h"
+
 static PFN_vkVoidFunction
 anv_wsi_proc_addr(VkPhysicalDevice physicalDevice, const char *pName)
 {
@@ -46,19 +48,26 @@ anv_init_wsi(struct anv_physical_device *physical_device)
                             anv_wsi_proc_addr,
                             &physical_device->instance->vk.alloc,
                             physical_device->master_fd,
-                            &physical_device->instance->dri_options,
-                            false);
+                            &physical_device->instance->drirc.options,
+                            &(struct wsi_device_options){
+                               .sw_device = false,
+                               .emulate_24as32 = true,
+                            });
    if (result != VK_SUCCESS)
       return result;
 
-   physical_device->wsi_device.supports_modifiers = true;
-   physical_device->wsi_device.signal_semaphore_with_memory = true;
-   physical_device->wsi_device.signal_fence_with_memory = true;
+   struct wsi_device *wsi_device = &physical_device->wsi_device;
+   wsi_device->supports_modifiers = true;
+   /* Only allow protected content on display */
+   for (uint32_t i = 0; i < ARRAY_SIZE(wsi_device->supports_protected); i++) {
+      wsi_device->supports_protected[i] =
+         physical_device->has_protected_contexts &&
+         i == VK_ICD_WSI_PLATFORM_DISPLAY;
+   }
 
-   physical_device->vk.wsi_device = &physical_device->wsi_device;
+   physical_device->vk.wsi_device = wsi_device;
 
-   wsi_device_setup_syncobj_fd(&physical_device->wsi_device,
-                               physical_device->local_fd);
+   wsi_device_setup_syncobj_fd(wsi_device, physical_device->local_fd);
 
    return VK_SUCCESS;
 }
@@ -97,24 +106,16 @@ VkResult anv_QueuePresentKHR(
 
    if (device->debug_frame_desc) {
       device->debug_frame_desc->frame_id++;
-#ifdef SUPPORT_INTEL_INTEGRATED_GPUS
-      if (device->physical->memory.need_clflush) {
-         intel_clflush_range(device->debug_frame_desc,
-                           sizeof(*device->debug_frame_desc));
-      }
-#endif
    }
 
-   result = vk_queue_wait_before_present(&queue->vk, pPresentInfo);
-   if (result != VK_SUCCESS)
-      return result;
+   if (u_trace_should_process(&device->ds.trace_context))
+      anv_queue_trace(queue, NULL, true /* frame */, false /* begin */);
 
    result = wsi_common_queue_present(&device->physical->wsi_device,
-                                     anv_device_to_handle(queue->device),
-                                     _queue, 0,
-                                     pPresentInfo);
+                                     &queue->vk, pPresentInfo);
 
-   u_trace_context_process(&device->ds.trace_context, true);
+   if (u_trace_should_process(&device->ds.trace_context))
+      anv_queue_trace(queue, NULL, true /* frame */, true /* begin */);
 
    return result;
 }

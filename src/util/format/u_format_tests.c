@@ -432,6 +432,20 @@ util_format_test_cases[] =
    {PIPE_FORMAT_G8R8_G8B8_UNORM, PACKED_4x8(0xff, 0xff, 0xff, 0xff), PACKED_4x8(0x00, 0x00, 0x00, 0xff), UNPACKED_2x1(0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0)},
    {PIPE_FORMAT_G8R8_G8B8_UNORM, PACKED_4x8(0xff, 0xff, 0xff, 0xff), PACKED_4x8(0xff, 0xff, 0xff, 0xff), UNPACKED_2x1(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)},
 
+   {PIPE_FORMAT_G8B8_G8R8_UNORM, PACKED_4x8(0xff, 0xff, 0xff, 0xff), PACKED_4x8(0x00, 0x00, 0x00, 0x00), UNPACKED_2x1(0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)},
+   {PIPE_FORMAT_G8B8_G8R8_UNORM, PACKED_4x8(0xff, 0xff, 0xff, 0xff), PACKED_4x8(0xff, 0x00, 0x00, 0x00), UNPACKED_2x1(0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)},
+   {PIPE_FORMAT_G8B8_G8R8_UNORM, PACKED_4x8(0xff, 0xff, 0xff, 0xff), PACKED_4x8(0x00, 0xff, 0x00, 0x00), UNPACKED_2x1(0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0)},
+   {PIPE_FORMAT_G8B8_G8R8_UNORM, PACKED_4x8(0xff, 0xff, 0xff, 0xff), PACKED_4x8(0x00, 0x00, 0xff, 0x00), UNPACKED_2x1(0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0)},
+   {PIPE_FORMAT_G8B8_G8R8_UNORM, PACKED_4x8(0xff, 0xff, 0xff, 0xff), PACKED_4x8(0x00, 0x00, 0x00, 0xff), UNPACKED_2x1(1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0)},
+   {PIPE_FORMAT_G8B8_G8R8_UNORM, PACKED_4x8(0xff, 0xff, 0xff, 0xff), PACKED_4x8(0xff, 0xff, 0xff, 0xff), UNPACKED_2x1(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)},
+
+   {PIPE_FORMAT_B8G8_R8G8_UNORM, PACKED_4x8(0xff, 0xff, 0xff, 0xff), PACKED_4x8(0x00, 0x00, 0x00, 0x00), UNPACKED_2x1(0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)},
+   {PIPE_FORMAT_B8G8_R8G8_UNORM, PACKED_4x8(0xff, 0xff, 0xff, 0xff), PACKED_4x8(0xff, 0x00, 0x00, 0x00), UNPACKED_2x1(0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0)},
+   {PIPE_FORMAT_B8G8_R8G8_UNORM, PACKED_4x8(0xff, 0xff, 0xff, 0xff), PACKED_4x8(0x00, 0xff, 0x00, 0x00), UNPACKED_2x1(0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)},
+   {PIPE_FORMAT_B8G8_R8G8_UNORM, PACKED_4x8(0xff, 0xff, 0xff, 0xff), PACKED_4x8(0x00, 0x00, 0xff, 0x00), UNPACKED_2x1(1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0)},
+   {PIPE_FORMAT_B8G8_R8G8_UNORM, PACKED_4x8(0xff, 0xff, 0xff, 0xff), PACKED_4x8(0x00, 0x00, 0x00, 0xff), UNPACKED_2x1(0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0)},
+   {PIPE_FORMAT_B8G8_R8G8_UNORM, PACKED_4x8(0xff, 0xff, 0xff, 0xff), PACKED_4x8(0xff, 0xff, 0xff, 0xff), UNPACKED_2x1(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)},
+
    /*
     * TODO: Exercise the UV channels as well.
     */
@@ -442,6 +456,14 @@ util_format_test_cases[] =
    {PIPE_FORMAT_YUYV, PACKED_4x8(0xff, 0xff, 0xff, 0xff), PACKED_4x8(0x10, 0x80, 0x10, 0x80), UNPACKED_2x1(0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)},
    {PIPE_FORMAT_YUYV, PACKED_4x8(0xff, 0xff, 0xff, 0xff), PACKED_4x8(0xeb, 0x80, 0x10, 0x80), UNPACKED_2x1(1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0)},
    {PIPE_FORMAT_YUYV, PACKED_4x8(0xff, 0xff, 0xff, 0xff), PACKED_4x8(0x10, 0x80, 0xeb, 0x80), UNPACKED_2x1(0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0)},
+
+   {PIPE_FORMAT_YVYU, PACKED_4x8(0xff, 0xff, 0xff, 0xff), PACKED_4x8(0x10, 0x80, 0x10, 0x80), UNPACKED_2x1(0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)},
+   {PIPE_FORMAT_YVYU, PACKED_4x8(0xff, 0xff, 0xff, 0xff), PACKED_4x8(0xeb, 0x80, 0x10, 0x80), UNPACKED_2x1(1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0)},
+   {PIPE_FORMAT_YVYU, PACKED_4x8(0xff, 0xff, 0xff, 0xff), PACKED_4x8(0x10, 0x80, 0xeb, 0x80), UNPACKED_2x1(0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0)},
+
+   {PIPE_FORMAT_VYUY, PACKED_4x8(0xff, 0xff, 0xff, 0xff), PACKED_4x8(0x80, 0x10, 0x80, 0x10), UNPACKED_2x1(0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)},
+   {PIPE_FORMAT_VYUY, PACKED_4x8(0xff, 0xff, 0xff, 0xff), PACKED_4x8(0x80, 0xeb, 0x80, 0x10), UNPACKED_2x1(1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0)},
+   {PIPE_FORMAT_VYUY, PACKED_4x8(0xff, 0xff, 0xff, 0xff), PACKED_4x8(0x80, 0x10, 0x80, 0xeb), UNPACKED_2x1(0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0)},
 
    /*
     * Compressed formats
@@ -1055,6 +1077,16 @@ util_format_test_cases[] =
    {PIPE_FORMAT_B2G3R3_UNORM, PACKED_1x8(0xff), PACKED_1x8(0x03), UNPACKED_1x1(0.0, 0.0, 1.0, 1.0)},
    {PIPE_FORMAT_B2G3R3_UNORM, PACKED_1x8(0xff), PACKED_1x8(0x1c), UNPACKED_1x1(0.0, 1.0, 0.0, 1.0)},
    {PIPE_FORMAT_B2G3R3_UNORM, PACKED_1x8(0xff), PACKED_1x8(0xe0), UNPACKED_1x1(1.0, 0.0, 0.0, 1.0)},
+
+   {PIPE_FORMAT_X6R10X6G10X6B10X6A10_UNORM, PACKED_4x16(0xffc0, 0xffc0, 0xffc0, 0xffc0), PACKED_4x16(0x0000, 0x0000, 0x0000, 0x0000), UNPACKED_1x1(0.0, 0.0, 0.0, 0.0)},
+   {PIPE_FORMAT_X6R10X6G10X6B10X6A10_UNORM, PACKED_4x16(0xffc0, 0xffc0, 0xffc0, 0xffc0), PACKED_4x16(0xffc0, 0x0000, 0x0000, 0x0000), UNPACKED_1x1(1.0, 0.0, 0.0, 0.0)},
+   {PIPE_FORMAT_X6R10X6G10X6B10X6A10_UNORM, PACKED_4x16(0xffc0, 0xffc0, 0xffc0, 0xffc0), PACKED_4x16(0x0000, 0xffc0, 0x0000, 0x0000), UNPACKED_1x1(0.0, 1.0, 0.0, 0.0)},
+   {PIPE_FORMAT_X6R10X6G10X6B10X6A10_UNORM, PACKED_4x16(0xffc0, 0xffc0, 0xffc0, 0xffc0), PACKED_4x16(0x0000, 0x0000, 0xffc0, 0x0000), UNPACKED_1x1(0.0, 0.0, 1.0, 0.0)},
+   {PIPE_FORMAT_X6R10X6G10X6B10X6A10_UNORM, PACKED_4x16(0xffc0, 0xffc0, 0xffc0, 0xffc0), PACKED_4x16(0x0000, 0x0000, 0x0000, 0xffc0), UNPACKED_1x1(0.0, 0.0, 0.0, 1.0)},
+   {PIPE_FORMAT_X6R10X6G10X6B10X6A10_UNORM, PACKED_4x16(0xffc0, 0xffc0, 0xffc0, 0xffc0), PACKED_4x16(0xffc0, 0xffc0, 0xffc0, 0xffc0), UNPACKED_1x1(1.0, 1.0, 1.0, 1.0)},
+   {PIPE_FORMAT_X6R10X6G10X6B10X6A10_UNORM, PACKED_4x16(0xffc0, 0xffc0, 0xffc0, 0xffc0), PACKED_4x16(0x0040, 0x0000, 0x0000, 0x0000), UNPACKED_1x1(1.0/1023.0, 0.0, 0.0, 0.0)},
+   {PIPE_FORMAT_X6R10X6G10X6B10X6A10_UNORM, PACKED_4x16(0xffc0, 0xffc0, 0xffc0, 0xffc0), PACKED_4x16(0x8000, 0x0000, 0x0000, 0x0000), UNPACKED_1x1(512.0/1023.0, 0.0, 0.0, 0.0)},
+   {PIPE_FORMAT_X6R10X6G10X6B10X6A10_UNORM, PACKED_4x16(0xffc0, 0xffc0, 0xffc0, 0xffc0), PACKED_4x16(0x0040, 0x8000, 0x5540, 0xffc0), UNPACKED_1x1(1.0/1023.0, 512.0/1023.0, 341.0/1023.0, 1.0)},
 };
 
 

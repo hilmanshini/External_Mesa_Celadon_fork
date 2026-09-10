@@ -3,12 +3,10 @@ descriptor=[
   [ "ALPHA_BITS", "BUFFER_INT(Visual.alphaBits), extra_new_buffers" ],
   [ "BLEND", "CONTEXT_BIT0(Color.BlendEnabled), NO_EXTRA" ],
   [ "BLEND_SRC", "CONTEXT_ENUM16(Color.Blend[0].SrcRGB), NO_EXTRA" ],
-  [ "BLUE_BITS", "BUFFER_INT(Visual.blueBits), extra_new_buffers" ],
   [ "COLOR_CLEAR_VALUE", "LOC_CUSTOM, TYPE_FLOATN_4, 0, NO_EXTRA" ],
   [ "COLOR_WRITEMASK", "LOC_CUSTOM, TYPE_INT_4, 0, NO_EXTRA" ],
   [ "CULL_FACE", "CONTEXT_BOOL(Polygon.CullFlag), NO_EXTRA" ],
   [ "CULL_FACE_MODE", "CONTEXT_ENUM16(Polygon.CullFaceMode), NO_EXTRA" ],
-  [ "DEPTH_BITS", "BUFFER_INT(Visual.depthBits), extra_new_buffers" ],
   [ "DEPTH_CLEAR_VALUE", "CONTEXT_FIELD(Depth.Clear, TYPE_DOUBLEN), NO_EXTRA" ],
   [ "DEPTH_FUNC", "CONTEXT_ENUM16(Depth.Func), NO_EXTRA" ],
   [ "DEPTH_RANGE", "LOC_CUSTOM, TYPE_DOUBLEN_2, 0, NO_EXTRA" ],
@@ -16,7 +14,6 @@ descriptor=[
   [ "DEPTH_WRITEMASK", "CONTEXT_BOOL(Depth.Mask), NO_EXTRA" ],
   [ "DITHER", "CONTEXT_BOOL(Color.DitherFlag), NO_EXTRA" ],
   [ "FRONT_FACE", "CONTEXT_ENUM16(Polygon.FrontFace), NO_EXTRA" ],
-  [ "GREEN_BITS", "BUFFER_INT(Visual.greenBits), extra_new_buffers" ],
   [ "LINE_WIDTH", "CONTEXT_FLOAT(Line.Width), NO_EXTRA" ],
   [ "ALIASED_LINE_WIDTH_RANGE", "CONTEXT_FLOAT2(Const.MinLineWidth), NO_EXTRA" ],
   [ "MAX_ELEMENTS_VERTICES", "CONTEXT_INT(Const.MaxArrayLockSize), NO_EXTRA" ],
@@ -28,10 +25,8 @@ descriptor=[
   [ "POLYGON_OFFSET_FACTOR", "CONTEXT_FLOAT(Polygon.OffsetFactor ), NO_EXTRA" ],
   [ "POLYGON_OFFSET_UNITS", "CONTEXT_FLOAT(Polygon.OffsetUnits ), NO_EXTRA" ],
   [ "POLYGON_OFFSET_FILL", "CONTEXT_BOOL(Polygon.OffsetFill), NO_EXTRA" ],
-  [ "RED_BITS", "BUFFER_INT(Visual.redBits), extra_new_buffers" ],
   [ "SCISSOR_BOX", "LOC_CUSTOM, TYPE_INT_4, 0, NO_EXTRA" ],
   [ "SCISSOR_TEST", "LOC_CUSTOM, TYPE_BOOLEAN, NO_OFFSET, NO_EXTRA" ],
-  [ "STENCIL_BITS", "BUFFER_INT(Visual.stencilBits), extra_new_buffers" ],
   [ "STENCIL_CLEAR_VALUE", "CONTEXT_INT(Stencil.Clear), NO_EXTRA" ],
   [ "STENCIL_FAIL", "LOC_CUSTOM, TYPE_ENUM16, NO_OFFSET, NO_EXTRA" ],
   [ "STENCIL_FUNC", "LOC_CUSTOM, TYPE_ENUM16, NO_OFFSET, NO_EXTRA" ],
@@ -132,7 +127,7 @@ descriptor=[
   [ "DEBUG_NEXT_LOGGED_MESSAGE_LENGTH", "LOC_CUSTOM, TYPE_INT, 0, NO_EXTRA" ],
   [ "MAX_DEBUG_LOGGED_MESSAGES", "CONST(MAX_DEBUG_LOGGED_MESSAGES), NO_EXTRA" ],
   [ "MAX_DEBUG_MESSAGE_LENGTH", "CONST(MAX_DEBUG_MESSAGE_LENGTH), NO_EXTRA" ],
-  [ "MAX_LABEL_LENGTH", "CONST(MAX_LABEL_LENGTH), NO_EXTRA" ],
+  [ "MAX_LABEL_LENGTH", "CAPS_UINT(max_label_length), NO_EXTRA" ],
   [ "MAX_DEBUG_GROUP_STACK_DEPTH", "CONST(MAX_DEBUG_GROUP_STACK_DEPTH), NO_EXTRA" ],
   [ "DEBUG_GROUP_STACK_DEPTH", "LOC_CUSTOM, TYPE_INT, 0, NO_EXTRA" ],
 
@@ -263,6 +258,15 @@ descriptor=[
   [ "POINT_SIZE_ARRAY_BUFFER_BINDING_OES", "LOC_CUSTOM, TYPE_INT, 0, NO_EXTRA" ],
 ]},
 
+# Enums in legacy OpenGL and GLES
+{ "apis": ["GL", "GLES", "GLES2", "GLES3"], "params": [
+  [ "RED_BITS", "BUFFER_INT(Visual.redBits), extra_new_buffers_compat_es" ],
+  [ "GREEN_BITS", "BUFFER_INT(Visual.greenBits), extra_new_buffers_compat_es" ],
+  [ "BLUE_BITS", "BUFFER_INT(Visual.blueBits), extra_new_buffers_compat_es" ],
+  [ "DEPTH_BITS", "BUFFER_INT(Visual.depthBits), extra_new_buffers_compat_es" ],
+  [ "STENCIL_BITS", "BUFFER_INT(Visual.stencilBits), extra_new_buffers_compat_es" ],
+]},
+
 # Enums in GLES2, GLES3
 { "apis": ["GLES2", "GLES3"], "params": [
   [ "GPU_DISJOINT_EXT", "LOC_CUSTOM, TYPE_INT, 0, extra_EXT_disjoint_timer_query" ],
@@ -343,8 +347,10 @@ descriptor=[
   [ "MAX_VARYING_VECTORS", "CONTEXT_INT(Const.MaxVarying), extra_ARB_ES2_compatibility_api_es2" ],
   [ "MAX_VERTEX_UNIFORM_VECTORS", "LOC_CUSTOM, TYPE_INT, 0, extra_ARB_ES2_compatibility_api_es2" ],
   [ "MAX_FRAGMENT_UNIFORM_VECTORS", "LOC_CUSTOM, TYPE_INT, 0, extra_ARB_ES2_compatibility_api_es2" ],
-  [ "NUM_SHADER_BINARY_FORMATS", "CONST(0), extra_ARB_ES2_compatibility_api_es2" ],
-  [ "SHADER_BINARY_FORMATS", "LOC_CUSTOM, TYPE_INVALID, 0, extra_ARB_ES2_compatibility_api_es2" ],
+
+# GL_ARB_ES2_compatibility / GL_ARB_gl_spirv
+  [ "NUM_SHADER_BINARY_FORMATS", "CONTEXT_UINT(Const.NumShaderBinaryFormats), extra_ARB_gl_spirv_or_es2_compat" ],
+  [ "SHADER_BINARY_FORMATS", "LOC_CUSTOM, TYPE_INT_N, 0, extra_ARB_gl_spirv_or_es2_compat" ],
 
 # GL_ARB_get_program_binary / GL_OES_get_program_binary
   [ "NUM_PROGRAM_BINARY_FORMATS", "CONTEXT_UINT(Const.NumProgramBinaryFormats), NO_EXTRA" ],
@@ -488,6 +494,16 @@ descriptor=[
 
 # GL_EXT_framebuffer_EXT  / GLES 3.0 + EXT_sRGB_write_control
   [ "FRAMEBUFFER_SRGB_EXT", "CONTEXT_BOOL(Color.sRGBEnabled), extra_EXT_framebuffer_sRGB" ],
+
+# GL_ARB_cull_distance, GL_EXT_clip_cull_distance
+  [ "MAX_CULL_DISTANCES", "CONTEXT_INT(Const.MaxClipPlanes), extra_ARB_cull_distance" ],
+  [ "MAX_COMBINED_CLIP_AND_CULL_DISTANCES", "CONTEXT_INT(Const.MaxClipPlanes), extra_ARB_cull_distance" ],
+
+# OVR_multiview
+  [ "MAX_VIEWS_OVR", "CONST(MAX_VIEWS_OVR), extra_OVR_multiview" ],
+
+# NV_timeline_semaphore
+  [ "MAX_TIMELINE_SEMAPHORE_VALUE_DIFFERENCE_NV", "CONTEXT_INT64(Const.MaxTimelineSemaphoreValueDifference), extra_NV_timeline_semaphore" ],
 ]},
 
 { "apis": ["GLES", "GLES2"], "params": [
@@ -686,6 +702,16 @@ descriptor=[
   [ "VIEWPORT_SWIZZLE_Y_NV", "LOC_CUSTOM, TYPE_ENUM, 0, extra_NV_viewport_swizzle" ],
   [ "VIEWPORT_SWIZZLE_Z_NV", "LOC_CUSTOM, TYPE_ENUM, 0, extra_NV_viewport_swizzle" ],
   [ "VIEWPORT_SWIZZLE_W_NV", "LOC_CUSTOM, TYPE_ENUM, 0, extra_NV_viewport_swizzle" ],
+
+# GL_EXT_shader_pixel_local_storage
+  [ "MAX_SHADER_PIXEL_LOCAL_STORAGE_SIZE_EXT", "CAPS_UINT(shader_pixel_local_storage_size), extra_EXT_shader_pixel_local_storage" ],
+  [ "MAX_SHADER_PIXEL_LOCAL_STORAGE_FAST_SIZE_EXT", "CAPS_UINT(shader_pixel_local_storage_fast_size), extra_EXT_shader_pixel_local_storage" ],
+
+# GL_KHR_shader_subgroup
+  [ "SUBGROUP_SIZE_KHR", "CONTEXT_INT(Const.ShaderSubgroupSize), extra_KHR_shader_subgroup" ],
+  [ "SUBGROUP_SUPPORTED_STAGES_KHR", "CONTEXT_INT(Const.ShaderSubgroupSupportedStages), extra_KHR_shader_subgroup" ],
+  [ "SUBGROUP_SUPPORTED_FEATURES_KHR", "CONTEXT_INT(Const.ShaderSubgroupSupportedFeatures), extra_KHR_shader_subgroup" ],
+  [ "SUBGROUP_QUAD_ALL_STAGES_KHR", "CONTEXT_BOOL(Const.ShaderSubgroupQuadAllStages), extra_KHR_shader_subgroup" ],
 ]},
 
 # Enums in OpenGL and ES 3.2
@@ -695,6 +721,48 @@ descriptor=[
 
 # GL 3.0 or ES 3.2
   [ "CONTEXT_FLAGS", "CONTEXT_INT(Const.ContextFlags), extra_version_30" ],
+
+# EXT_mesh_shader
+  [ "MAX_TASK_UNIFORM_BLOCKS_EXT", "CONTEXT_INT(Const.Program[MESA_SHADER_TASK].MaxUniformBlocks), extra_EXT_mesh_shader" ],
+  [ "MAX_TASK_TEXTURE_IMAGE_UNITS_EXT", "CONTEXT_INT(Const.Program[MESA_SHADER_TASK].MaxTextureImageUnits), extra_EXT_mesh_shader" ],
+  [ "MAX_TASK_IMAGE_UNIFORMS_EXT", "CONTEXT_INT(Const.Program[MESA_SHADER_TASK].MaxImageUniforms), extra_EXT_mesh_shader" ],
+  [ "MAX_TASK_UNIFORM_COMPONENTS_EXT", "CONTEXT_INT(Const.Program[MESA_SHADER_TASK].MaxUniformComponents), extra_EXT_mesh_shader" ],
+  [ "MAX_TASK_ATOMIC_COUNTER_BUFFERS_EXT", "CONTEXT_INT(Const.Program[MESA_SHADER_TASK].MaxAtomicBuffers), extra_EXT_mesh_shader" ],
+  [ "MAX_TASK_ATOMIC_COUNTERS_EXT", "CONTEXT_INT(Const.Program[MESA_SHADER_TASK].MaxAtomicCounters), extra_EXT_mesh_shader" ],
+  [ "MAX_TASK_SHADER_STORAGE_BLOCKS_EXT", "CONTEXT_INT(Const.Program[MESA_SHADER_TASK].MaxShaderStorageBlocks), extra_EXT_mesh_shader" ],
+  [ "MAX_COMBINED_TASK_UNIFORM_COMPONENTS_EXT", "CONTEXT_INT(Const.Program[MESA_SHADER_TASK].MaxCombinedUniformComponents), extra_EXT_mesh_shader" ],
+  [ "MAX_MESH_UNIFORM_BLOCKS_EXT", "CONTEXT_INT(Const.Program[MESA_SHADER_MESH].MaxUniformBlocks), extra_EXT_mesh_shader" ],
+  [ "MAX_MESH_TEXTURE_IMAGE_UNITS_EXT", "CONTEXT_INT(Const.Program[MESA_SHADER_MESH].MaxTextureImageUnits), extra_EXT_mesh_shader" ],
+  [ "MAX_MESH_IMAGE_UNIFORMS_EXT", "CONTEXT_INT(Const.Program[MESA_SHADER_MESH].MaxImageUniforms), extra_EXT_mesh_shader" ],
+  [ "MAX_MESH_UNIFORM_COMPONENTS_EXT", "CONTEXT_INT(Const.Program[MESA_SHADER_MESH].MaxUniformComponents), extra_EXT_mesh_shader" ],
+  [ "MAX_MESH_ATOMIC_COUNTER_BUFFERS_EXT", "CONTEXT_INT(Const.Program[MESA_SHADER_MESH].MaxAtomicBuffers), extra_EXT_mesh_shader" ],
+  [ "MAX_MESH_ATOMIC_COUNTERS_EXT", "CONTEXT_INT(Const.Program[MESA_SHADER_MESH].MaxAtomicCounters), extra_EXT_mesh_shader" ],
+  [ "MAX_MESH_SHADER_STORAGE_BLOCKS_EXT", "CONTEXT_INT(Const.Program[MESA_SHADER_MESH].MaxShaderStorageBlocks), extra_EXT_mesh_shader" ],
+  [ "MAX_COMBINED_MESH_UNIFORM_COMPONENTS_EXT", "CONTEXT_INT(Const.Program[MESA_SHADER_MESH].MaxCombinedUniformComponents), extra_EXT_mesh_shader" ],
+  [ "MAX_TASK_WORK_GROUP_TOTAL_COUNT_EXT", "CAPS_UINT(mesh.max_task_work_group_total_count), extra_EXT_mesh_shader" ],
+  [ "MAX_MESH_WORK_GROUP_TOTAL_COUNT_EXT", "CAPS_UINT(mesh.max_mesh_work_group_total_count), extra_EXT_mesh_shader" ],
+  [ "MAX_MESH_WORK_GROUP_INVOCATIONS_EXT", "CAPS_UINT(mesh.max_mesh_work_group_invocations), extra_EXT_mesh_shader" ],
+  [ "MAX_TASK_WORK_GROUP_INVOCATIONS_EXT", "CAPS_UINT(mesh.max_task_work_group_invocations), extra_EXT_mesh_shader" ],
+  [ "MAX_TASK_PAYLOAD_SIZE_EXT", "CAPS_UINT(mesh.max_task_payload_size), extra_EXT_mesh_shader" ],
+  [ "MAX_TASK_SHARED_MEMORY_SIZE_EXT", "CAPS_UINT(mesh.max_task_shared_memory_size), extra_EXT_mesh_shader" ],
+  [ "MAX_MESH_SHARED_MEMORY_SIZE_EXT", "CAPS_UINT(mesh.max_mesh_shared_memory_size), extra_EXT_mesh_shader" ],
+  [ "MAX_TASK_PAYLOAD_AND_SHARED_MEMORY_SIZE_EXT", "CAPS_UINT(mesh.max_task_payload_and_shared_memory_size), extra_EXT_mesh_shader" ],
+  [ "MAX_MESH_PAYLOAD_AND_SHARED_MEMORY_SIZE_EXT", "CAPS_UINT(mesh.max_mesh_payload_and_shared_memory_size), extra_EXT_mesh_shader" ],
+  [ "MAX_MESH_OUTPUT_MEMORY_SIZE_EXT", "CAPS_UINT(mesh.max_mesh_output_memory_size), extra_EXT_mesh_shader" ],
+  [ "MAX_MESH_PAYLOAD_AND_OUTPUT_MEMORY_SIZE_EXT", "CAPS_UINT(mesh.max_mesh_payload_and_output_memory_size), extra_EXT_mesh_shader" ],
+  [ "MAX_MESH_OUTPUT_VERTICES_EXT", "CAPS_UINT(mesh.max_mesh_output_vertices), extra_EXT_mesh_shader" ],
+  [ "MAX_MESH_OUTPUT_PRIMITIVES_EXT", "CAPS_UINT(mesh.max_mesh_output_primitives), extra_EXT_mesh_shader" ],
+  [ "MAX_MESH_OUTPUT_COMPONENTS_EXT", "CAPS_UINT(mesh.max_mesh_output_components), extra_EXT_mesh_shader" ],
+  [ "MAX_MESH_OUTPUT_LAYERS_EXT", "CAPS_UINT(mesh.max_mesh_output_layers), extra_EXT_mesh_shader" ],
+  [ "MAX_MESH_MULTIVIEW_VIEW_COUNT_EXT", "CAPS_UINT(mesh.max_mesh_multiview_view_count), extra_EXT_mesh_shader" ],
+  [ "MESH_OUTPUT_PER_VERTEX_GRANULARITY_EXT", "CAPS_UINT(mesh.mesh_output_per_vertex_granularity), extra_EXT_mesh_shader" ],
+  [ "MESH_OUTPUT_PER_PRIMITIVE_GRANULARITY_EXT", "CAPS_UINT(mesh.mesh_output_per_primitive_granularity), extra_EXT_mesh_shader" ],
+  [ "MAX_PREFERRED_TASK_WORK_GROUP_INVOCATIONS_EXT", "CAPS_UINT(mesh.max_preferred_task_work_group_invocations), extra_EXT_mesh_shader" ],
+  [ "MAX_PREFERRED_MESH_WORK_GROUP_INVOCATIONS_EXT", "CAPS_UINT(mesh.max_preferred_mesh_work_group_invocations), extra_EXT_mesh_shader" ],
+  [ "MESH_PREFERS_LOCAL_INVOCATION_VERTEX_OUTPUT_EXT", "CAPS_BOOL(mesh.mesh_prefers_local_invocation_vertex_output), extra_EXT_mesh_shader" ],
+  [ "MESH_PREFERS_LOCAL_INVOCATION_PRIMITIVE_OUTPUT_EXT", "CAPS_BOOL(mesh.mesh_prefers_local_invocation_primitive_output), extra_EXT_mesh_shader" ],
+  [ "MESH_PREFERS_COMPACT_VERTEX_OUTPUT_EXT", "CAPS_BOOL(mesh.mesh_prefers_compact_vertex_output), extra_EXT_mesh_shader" ],
+  [ "MESH_PREFERS_COMPACT_PRIMITIVE_OUTPUT_EXT", "CAPS_BOOL(mesh.mesh_prefers_compact_primitive_output), extra_EXT_mesh_shader" ],
 ]},
 
 # Remaining enums are only in OpenGL
@@ -831,6 +899,9 @@ descriptor=[
   [ "EDGE_FLAG_ARRAY_STRIDE", "ARRAY_SHORT(VertexAttrib[VERT_ATTRIB_EDGEFLAG].Stride), NO_EXTRA" ],
   [ "EDGE_FLAG_ARRAY_COUNT_EXT", "CONST(0), NO_EXTRA" ],
 
+# GL_NV_representative_fragment_test
+  [ "REPRESENTATIVE_FRAGMENT_TEST_NV", "CONTEXT_BOOL(RepresentativeFragmentTest), NO_EXTRA" ],
+
 # GL_ARB_texture_compression
   [ "TEXTURE_COMPRESSION_HINT_ARB", "CONTEXT_ENUM16(Hint.TextureCompression), NO_EXTRA" ],
 
@@ -955,7 +1026,7 @@ descriptor=[
   [ "RGBA_INTEGER_MODE_EXT", "LOC_CUSTOM, TYPE_INT, 0, extra_EXT_texture_integer_and_new_buffers" ],
 
 # GL_ARB_transform_feedback3
-  [ "MAX_TRANSFORM_FEEDBACK_BUFFERS", "CONTEXT_INT(Const.MaxTransformFeedbackBuffers), extra_ARB_transform_feedback3" ],
+  [ "MAX_TRANSFORM_FEEDBACK_BUFFERS", "CONTEXT_INT(Const.MaxTransformFeedbackBuffers), extra_gl40_ARB_transform_feedback3" ],
   [ "MAX_VERTEX_STREAMS", "CONTEXT_INT(Const.MaxVertexStreams), extra_ARB_transform_feedback3_ARB_gpu_shader5" ],
 
 # GL_ARB_color_buffer_float
@@ -1002,10 +1073,6 @@ descriptor=[
   [ "GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX", "LOC_CUSTOM, TYPE_INT, NO_OFFSET, extra_NVX_gpu_memory_info" ],
   [ "GPU_MEMORY_INFO_EVICTION_COUNT_NVX", "LOC_CUSTOM, TYPE_INT, NO_OFFSET, extra_NVX_gpu_memory_info" ],
   [ "GPU_MEMORY_INFO_EVICTED_MEMORY_NVX", "LOC_CUSTOM, TYPE_INT, NO_OFFSET, extra_NVX_gpu_memory_info" ],
-
-# GL_ARB_cull_distance
-  [ "MAX_CULL_DISTANCES", "CONTEXT_INT(Const.MaxClipPlanes), extra_ARB_cull_distance" ],
-  [ "MAX_COMBINED_CLIP_AND_CULL_DISTANCES", "CONTEXT_INT(Const.MaxClipPlanes), extra_ARB_cull_distance" ],
 
 # GL_ARB_compute_variable_group_size
   [ "MAX_COMPUTE_VARIABLE_GROUP_INVOCATIONS_ARB", "CONTEXT_INT(Const.MaxComputeVariableGroupInvocations), extra_ARB_compute_variable_group_size" ],

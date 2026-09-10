@@ -28,28 +28,31 @@
 #include "dev/intel_device_info.h"
 
 #include "util/macros.h" /* Needed for MAX3 and MAX2 for format_rgb9e5 */
-#include "util/format_srgb.h"
-#include "util/format_rgb9e5.h"
-#include "util/format_r11g11b10f.h"
 
-/* Header-only format conversion include */
-#include "main/format_utils.h"
+#include "util/format/format_utils.h"
+#include "util/format_r11g11b10f.h"
+#include "util/format_rgb9e5.h"
+#include "util/format_srgb.h"
+#include "util/half_float.h"
+#include "util/rounding.h"
+#include "util/u_math.h"
 
 struct surface_format_info {
    bool exists;
-   uint8_t sampling;
-   uint8_t filtering;
-   uint8_t shadow_compare;
-   uint8_t chroma_key;
-   uint8_t render_target;
-   uint8_t alpha_blend;
-   uint8_t input_vb;
-   uint8_t streamed_output_vb;
-   uint8_t color_processing;
-   uint8_t typed_write;
-   uint8_t typed_read;
-   uint8_t typed_atomics;
-   uint8_t ccs_e;
+   /* These fields must fit the largest verx10 value. */
+   uint16_t sampling;
+   uint16_t filtering;
+   uint16_t shadow_compare;
+   uint16_t chroma_key;
+   uint16_t render_target;
+   uint16_t alpha_blend;
+   uint16_t input_vb;
+   uint16_t streamed_output_vb;
+   uint16_t color_processing;
+   uint16_t typed_write;
+   uint16_t typed_read;
+   uint16_t typed_atomics;
+   uint16_t ccs_e;
 };
 
 /* This macro allows us to write the table almost as it appears in the PRM,
@@ -59,7 +62,7 @@ struct surface_format_info {
    [ISL_FORMAT_##sf] = { true, sampl, filt, shad, ck, rt, ab, vb, so, color, tw, tr, ta, ccs_e},
 
 #define Y 0
-#define x 255
+#define x 0xFFFF
 /**
  * This is the table of support for surface (texture, renderbuffer, and vertex
  * buffer, but not depthbuffer) formats across the various hardware generations.
@@ -147,12 +150,12 @@ static const struct surface_format_info format_info[] = {
    SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R32G32_USCALED)
    SF(  x,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,    x,  R32G32_SFIXED)
    SF(  x,   x,   x,   x,   x,   x,  80,   x,   x,   x,   x,   x,   90,  R64_PASSTHRU)
-   SF(  Y,   Y,   x,   Y,   Y,   Y,   Y,   x,  60,  70,   x,  90,    x,  B8G8R8A8_UNORM)
+   SF(  Y,   Y,   x,   Y,   Y,   Y,   Y,   x,  60,  70, 125,  90,    x,  B8G8R8A8_UNORM)
    SF(  Y,   Y,   x,   x,   Y,   Y,   x,   x,   x,   x,   x, 110,    x,  B8G8R8A8_UNORM_SRGB)
 /*    smpl filt  shad  CK   RT   AB   VB   SO color TW   TR  ccs_e  TA */
-   SF(  Y,   Y,   x,   x,   Y,   Y,   Y,   x,  60,  70,   x, 110,    x,  R10G10B10A2_UNORM)
+   SF(  Y,   Y,   x,   x,   Y,   Y,   Y,   x,  60,  70, 125, 110,    x,  R10G10B10A2_UNORM)
    SF(  Y,   Y,   x,   x,   x,   x,   x,   x,  60,   x,   x, 120,    x,  R10G10B10A2_UNORM_SRGB)
-   SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70,   x, 110,    x,  R10G10B10A2_UINT)
+   SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70, 125, 110,    x,  R10G10B10A2_UINT)
    SF(  Y,   Y,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R10G10B10_SNORM_A2_UNORM)
    SF(  Y,   Y,   x,   x,   Y,   Y,   Y,   x,  60,  70, 110,  90,    x,  R8G8B8A8_UNORM)
    SF(  Y,   Y,   x,   x,   Y,   Y,   x,   x,  60,   x,   x, 110,    x,  R8G8B8A8_UNORM_SRGB)
@@ -164,10 +167,10 @@ static const struct surface_format_info format_info[] = {
    SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70,  90,  90,    x,  R16G16_SINT)
    SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70,  75,  90,    x,  R16G16_UINT)
    SF(  Y,   Y,   x,   x,   Y,   Y,   Y,   x,   x,  70,  90,  90,    x,  R16G16_FLOAT)
-   SF(  Y,   Y,   x,   x,   Y,   Y,  75,   x,  60,  70,   x, 110,    x,  B10G10R10A2_UNORM)
+   SF(  Y,   Y,   x,   x,   Y,   Y,  75,   x,  60,  70, 125, 110,    x,  B10G10R10A2_UNORM)
    SF(  Y,   Y,   x,   x,   Y,   Y,   x,   x,  60,   x,   x, 110,    x,  B10G10R10A2_UNORM_SRGB)
-   SF(  Y,   Y,   x,   x,   Y,   Y,   Y,   x,   x,  70,   x, 110,    x,  R11G11B10_FLOAT)
-   SF(120, 120,   x,   x, 120, 120,   x,   x,   x,   x,   x, 120,    x,  R10G10B10_FLOAT_A2_UNORM)
+   SF(  Y,   Y,   x,   x,   Y,   Y,   Y,   x,   x,  70, 125, 110,    x,  R11G11B10_FLOAT)
+   SF(120, 120,   x,   x, 120, 120,   x,   x,   x, 125, 125, 120,    x,  R10G10B10_FLOAT_A2_UNORM)
    SF(  Y,   x,   x,   x,   Y,   x,   Y,   Y,   x,  70,  70,  90,   70,  R32_SINT)
    SF(  Y,   x,   x,   x,   Y,   x,   Y,   Y,   x,  70,  70,  90,   70,  R32_UINT)
    SF(  Y,  50,   Y,   x,   Y,   Y,   Y,   Y,   x,  70,  70,  90,  110,  R32_FLOAT)
@@ -263,7 +266,7 @@ static const struct surface_format_info format_info[] = {
    SF( 90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  I8_SINT)
    SF( 45,  45,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  DXT1_RGB_SRGB)
    SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  R1_UNORM)
-   SF(  Y,   Y,   x,   Y,   Y,   x,   x,   x,  60,   x,   x, 120,    x,  YCRCB_NORMAL)
+   SF(  Y,   Y,   x,   Y,   Y,   x,   x,   x,  60,   x,   x,   x,    x,  YCRCB_NORMAL)
    SF(  Y,   Y,   x,   Y,   Y,   x,   x,   x,  60,   x,   x,   x,    x,  YCRCB_SWAPUVY)
    SF( 45,  45,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  P2_UNORM_PALETTE0)
    SF( 45,  45,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  P2_UNORM_PALETTE1)
@@ -277,7 +280,7 @@ static const struct surface_format_info format_info[] = {
    SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  BC3_UNORM_SRGB)
    SF(  Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  MONO8)
    SF(  Y,   Y,   x,   x,   Y,   x,   x,   x,  60,   x,   x,   x,    x,  YCRCB_SWAPUV)
-   SF(  Y,   Y,   x,   x,   Y,   x,   x,   x,  60,   x,   x, 120,    x,  YCRCB_SWAPY)
+   SF(  Y,   Y,   x,   x,   Y,   x,   x,   x,  60,   x,   x,   x,    x,  YCRCB_SWAPY)
    SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  DXT1_RGB)
 /*    smpl filt  shad  CK   RT   AB   VB   SO color TW   TR  ccs_e  TA */
    SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  FXT1)
@@ -597,6 +600,9 @@ isl_format_for_pipe_format(enum pipe_format pf)
       [PIPE_FORMAT_R32G32B32_SINT]          = ISL_FORMAT_R32G32B32_SINT,
       [PIPE_FORMAT_R32G32B32A32_SINT]       = ISL_FORMAT_R32G32B32A32_SINT,
 
+      [PIPE_FORMAT_R64_UINT]                = ISL_FORMAT_R64_PASSTHRU,
+      [PIPE_FORMAT_R64_SINT]                = ISL_FORMAT_R64_PASSTHRU,
+
       [PIPE_FORMAT_B10G10R10A2_UINT]        = ISL_FORMAT_B10G10R10A2_UINT,
 
       [PIPE_FORMAT_ETC1_RGB8]               = ISL_FORMAT_ETC1_RGB8,
@@ -682,6 +688,7 @@ isl_format_for_pipe_format(enum pipe_format pf)
       [PIPE_FORMAT_R16G16B16X16_SINT]       = ISL_FORMAT_R16G16B16A16_SINT,
       [PIPE_FORMAT_R32G32B32X32_UINT]       = ISL_FORMAT_R32G32B32A32_UINT,
       [PIPE_FORMAT_R32G32B32X32_SINT]       = ISL_FORMAT_R32G32B32A32_SINT,
+      [PIPE_FORMAT_R10G10B10X2_UNORM]       = ISL_FORMAT_R10G10B10A2_UNORM,
       [PIPE_FORMAT_R10G10B10X2_SNORM]       = ISL_FORMAT_R10G10B10A2_SNORM,
    };
    assert(pf < PIPE_FORMAT_COUNT);
@@ -703,6 +710,9 @@ isl_format_supports_rendering(const struct intel_device_info *devinfo,
    if (!format_info_exists(format))
       return false;
 
+   /* If this fails, then we need to update struct surface_format_info */
+   assert(devinfo->verx10 <
+          (1ul << (8 * sizeof(format_info[format].render_target))));
    return devinfo->verx10 >= format_info[format].render_target;
 }
 
@@ -876,16 +886,18 @@ bool
 isl_format_supports_ccs_e(const struct intel_device_info *devinfo,
                           enum isl_format format)
 {
-   /* Wa_14017353530: Disable compression on MTL until B0 */
-   if (intel_device_info_is_mtl(devinfo) && devinfo->revision < 4)
-      return false;
-
-   /* Wa_22011186057: Disable compression on ADL-P A0 */
-   if (devinfo->platform == INTEL_PLATFORM_ADL && devinfo->gt == 2 && devinfo->revision == 0)
-      return false;
-
    if (!format_info_exists(format))
       return false;
+
+   /* On Xe2+ platforms, it doesn't matter that if a format can be
+    * compressed or not. Formats are given CMF encodings as a hint
+    * to hardware to reach the best compression ratio. When the CMF
+    * value is not the one for a format in the spec or a format's CMF
+    * encoding is unknown, the compressed ratio can be less optimistic,
+    * but no corruption should happen per hardware design.
+    */
+   if (devinfo->ver >= 20)
+      return true;
 
    /* For simplicity, only report that a format supports CCS_E if blorp can
     * perform bit-for-bit copies with an image of that format while compressed.
@@ -971,7 +983,10 @@ isl_formats_have_same_bits_per_channel(enum isl_format format1,
    return fmtl1->channels.r.bits == fmtl2->channels.r.bits &&
           fmtl1->channels.g.bits == fmtl2->channels.g.bits &&
           fmtl1->channels.b.bits == fmtl2->channels.b.bits &&
-          fmtl1->channels.a.bits == fmtl2->channels.a.bits;
+          fmtl1->channels.a.bits == fmtl2->channels.a.bits &&
+          fmtl1->channels.l.bits == fmtl2->channels.l.bits &&
+          fmtl1->channels.i.bits == fmtl2->channels.i.bits &&
+          fmtl1->channels.p.bits == fmtl2->channels.p.bits;
 }
 
 /**
@@ -1073,8 +1088,7 @@ isl_format_has_color_component(enum isl_format fmt, int component)
    case 3:
       return (fmtl->channels.a.bits + intensity) > 0;
    default:
-      assert(!"Invalid color component: must be 0..3");
-      return false;
+      UNREACHABLE("Invalid color component: must be 0..3");
    }
 }
 
@@ -1098,7 +1112,7 @@ isl_format_get_depth_format(enum isl_format fmt, bool has_stencil)
 {
    switch (fmt) {
    default:
-      unreachable("bad isl depth format");
+      UNREACHABLE("bad isl depth format");
    case ISL_FORMAT_R32_FLOAT_X8X24_TYPELESS:
       assert(has_stencil);
       return 0; /* D32_FLOAT_S8X24_UINT */
@@ -1198,8 +1212,55 @@ isl_format_rgbx_to_rgba(enum isl_format rgbx)
    case ISL_FORMAT_B5G5R5X1_UNORM_SRGB:
       return ISL_FORMAT_B5G5R5A1_UNORM_SRGB;
    default:
-      assert(!"Invalid RGBX format");
-      return rgbx;
+      UNREACHABLE("Invalid RGBX format");
+   }
+}
+
+/* Xe2+ allows route of LD messages from Sampler to LSC to improve
+ * performance when the format is supported.
+ */
+bool
+isl_format_support_sampler_route_to_lsc(enum isl_format fmt)
+{
+   switch (fmt) {
+   /* Bspec 57023 (r74473)
+    */
+   case ISL_FORMAT_R8_UNORM:
+   case ISL_FORMAT_R8G8_UNORM:
+   case ISL_FORMAT_R16_UNORM:
+   case ISL_FORMAT_R16G16_UNORM:
+   case ISL_FORMAT_R16G16B16A16_UNORM:
+   case ISL_FORMAT_R16_FLOAT:
+   case ISL_FORMAT_R16G16_FLOAT:
+   case ISL_FORMAT_R16G16B16A16_FLOAT:
+   case ISL_FORMAT_R32_FLOAT:
+   case ISL_FORMAT_R32G32_FLOAT:
+   case ISL_FORMAT_R32G32B32A32_FLOAT:
+   case ISL_FORMAT_R32_UINT:
+   case ISL_FORMAT_R32G32_UINT:
+   case ISL_FORMAT_R32G32B32A32_UINT:
+   case ISL_FORMAT_R10G10B10A2_UNORM:
+   case ISL_FORMAT_R11G11B10_FLOAT:
+   case ISL_FORMAT_R10G10B10A2_UINT:
+   case ISL_FORMAT_R16G16B16A16_SINT:
+   case ISL_FORMAT_R16G16B16A16_UINT:
+   case ISL_FORMAT_R16G16_SINT:
+   case ISL_FORMAT_R16G16_UINT:
+   case ISL_FORMAT_R16_SINT:
+   case ISL_FORMAT_R16_UINT:
+   case ISL_FORMAT_R32G32B32A32_SINT:
+   case ISL_FORMAT_R32G32_SINT:
+   case ISL_FORMAT_R32_SINT:
+   case ISL_FORMAT_R8G8B8A8_SINT:
+   case ISL_FORMAT_R8G8B8A8_UINT:
+   case ISL_FORMAT_R8G8B8A8_UNORM:
+   case ISL_FORMAT_R8G8_SINT:
+   case ISL_FORMAT_R8G8_UINT:
+   case ISL_FORMAT_R8_SINT:
+   case ISL_FORMAT_R8_UINT:
+      return true;
+   default:
+      return false;
    }
 }
 
@@ -1244,12 +1305,12 @@ pack_channel(const union isl_color_value *value, unsigned i,
       packed = MIN(value->u32[i], u_uintN_max(layout->bits));
       break;
    case ISL_SINT:
-      packed = CLAMP(value->u32[i], u_intN_min(layout->bits),
+      packed = CLAMP(value->i32[i], u_intN_min(layout->bits),
                      u_intN_max(layout->bits));
       break;
 
    default:
-      unreachable("Invalid channel type");
+      UNREACHABLE("Invalid channel type");
    }
 
    unsigned dword = layout->start_bit / 32;
@@ -1348,7 +1409,7 @@ unpack_channel(union isl_color_value *value,
       break;
 
    default:
-      unreachable("Invalid channel type");
+      UNREACHABLE("Invalid channel type");
    }
 
    for (unsigned i = 0; i < count; i++)
@@ -1356,7 +1417,7 @@ unpack_channel(union isl_color_value *value,
 }
 
 /**
- * Take unpack an isl_color_value from the actual bits as specified by
+ * Unpack an isl_color_value from the actual bits as specified by
  * the isl_format.  This function is very slow for a format conversion
  * function but should be fine for a single pixel worth of data.
  */

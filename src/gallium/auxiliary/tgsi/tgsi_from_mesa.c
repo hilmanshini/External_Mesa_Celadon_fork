@@ -23,7 +23,7 @@
 
 #include "tgsi/tgsi_from_mesa.h"
 
-#include "pipe/p_compiler.h"
+#include "util/compiler.h"
 
 #include "util/compiler.h"
 
@@ -49,6 +49,9 @@ tgsi_get_generic_gl_varying_index(gl_varying_slot attr,
       assert(!needs_texcoord_semantic);
       return attr - VARYING_SLOT_TEX0;
    }
+
+   if (attr == VARYING_SLOT_CULL_PRIMITIVE)
+      return 0;
 
    assert(0);
    return 0;
@@ -145,7 +148,11 @@ tgsi_get_gl_varying_semantic(gl_varying_slot attr,
       *semantic_name = TGSI_SEMANTIC_VIEWPORT_MASK;
       *semantic_index = 0;
       break;
-
+   case VARYING_SLOT_CULL_PRIMITIVE:
+      /* mesh only, just pick something random */
+      *semantic_name = TGSI_SEMANTIC_PATCH;
+      *semantic_index = 0;
+      break;
    case VARYING_SLOT_TEX0:
    case VARYING_SLOT_TEX1:
    case VARYING_SLOT_TEX2:
@@ -289,7 +296,7 @@ tgsi_get_sysval_semantic(unsigned sysval)
       return TGSI_SEMANTIC_SUBGROUP_LT_MASK;
 
    default:
-      unreachable("Unexpected system value to TGSI");
+      UNREACHABLE("Unexpected system value to TGSI");
    }
 }
 
@@ -306,6 +313,6 @@ tgsi_get_interp_mode(enum glsl_interp_mode mode, bool color)
    case INTERP_MODE_SMOOTH:
       return TGSI_INTERPOLATE_PERSPECTIVE;
    default:
-      unreachable("unknown interpolation mode");
+      UNREACHABLE("unknown interpolation mode");
    }
 }

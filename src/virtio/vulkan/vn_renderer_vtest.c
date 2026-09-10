@@ -6,6 +6,7 @@
  * Copyright 2014, 2015 Red Hat.
  */
 
+#include "virtio/virtio-gpu/venus_hw.h"
 #include <errno.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -15,11 +16,11 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include "drm-uapi/virtgpu_drm.h"
 #include "util/os_file.h"
+#include "util/os_misc.h"
 #include "util/sparse_array.h"
 #include "util/u_process.h"
-#define VIRGL_RENDERER_UNSTABLE_APIS
-#include "virtio-gpu/virglrenderer_hw.h"
 #include "vtest/vtest_protocol.h"
 
 #include "vn_renderer_internal.h"
@@ -57,7 +58,7 @@ struct vtest {
    uint32_t max_timeline_count;
 
    struct {
-      enum virgl_renderer_capset id;
+      uint32_t id;
       uint32_t version;
       struct virgl_renderer_capset_venus data;
    } capset;
@@ -78,7 +79,8 @@ vtest_connect_socket(struct vn_instance *instance, const char *path)
 
    sock = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
    if (sock < 0) {
-      vn_log(instance, "failed to create a socket");
+      if (VN_DEBUG(INIT))
+         vn_log(instance, "failed to create a socket");
       return -1;
    }
 
@@ -87,7 +89,10 @@ vtest_connect_socket(struct vn_instance *instance, const char *path)
    memcpy(un.sun_path, path, strlen(path));
 
    if (connect(sock, (struct sockaddr *)&un, sizeof(un)) == -1) {
-      vn_log(instance, "failed to connect to %s: %s", path, strerror(errno));
+      if (VN_DEBUG(INIT)) {
+         vn_log(instance, "failed to connect to %s: %s", path,
+                strerror(errno));
+      }
       close(sock);
       return -1;
    }
@@ -98,8 +103,9 @@ vtest_connect_socket(struct vn_instance *instance, const char *path)
 static void
 vtest_read(struct vtest *vtest, void *buf, size_t size)
 {
+   char *ptr = buf;
    do {
-      const ssize_t ret = read(vtest->sock_fd, buf, size);
+      const ssize_t ret = read(vtest->sock_fd, ptr, size);
       if (unlikely(ret < 0)) {
          vn_log(vtest->instance,
                 "lost connection to rendering server on %zu read %zi %d",
@@ -107,7 +113,7 @@ vtest_read(struct vtest *vtest, void *buf, size_t size)
          abort();
       }
 
-      buf += ret;
+      ptr += ret;
       size -= ret;
    } while (size);
 }
@@ -146,8 +152,9 @@ vtest_receive_fd(struct vtest *vtest)
 static void
 vtest_write(struct vtest *vtest, const void *buf, size_t size)
 {
+   const char *ptr = buf;
    do {
-      const ssize_t ret = write(vtest->sock_fd, buf, size);
+      const ssize_t ret = write(vtest->sock_fd, ptr, size);
       if (unlikely(ret < 0)) {
          vn_log(vtest->instance,
                 "lost connection to rendering server on %zu write %zi %d",
@@ -155,7 +162,7 @@ vtest_write(struct vtest *vtest, const void *buf, size_t size)
          abort();
       }
 
-      buf += ret;
+      ptr += ret;
       size -= ret;
    } while (size);
 }
@@ -255,7 +262,7 @@ vtest_vcmd_get_param(struct vtest *vtest, enum vcmd_param param)
 
 static bool
 vtest_vcmd_get_capset(struct vtest *vtest,
-                      enum virgl_renderer_capset id,
+                      uint32_t id,
                       uint32_t version,
                       void *capset,
                       size_t capset_size)
@@ -281,7 +288,7 @@ vtest_vcmd_get_capset(struct vtest *vtest,
    size_t read_size = (vtest_hdr[VTEST_CMD_LEN] - 1) * 4;
    if (capset_size >= read_size) {
       vtest_read(vtest, capset, read_size);
-      memset(capset + read_size, 0, capset_size - read_size);
+      memset((char *)capset + read_size, 0, capset_size - read_size);
    } else {
       vtest_read(vtest, capset, capset_size);
 
@@ -298,8 +305,7 @@ vtest_vcmd_get_capset(struct vtest *vtest,
 }
 
 static void
-vtest_vcmd_context_init(struct vtest *vtest,
-                        enum virgl_renderer_capset capset_id)
+vtest_vcmd_context_init(struct vtest *vtest, uint32_t capset_id)
 {
    uint32_t vtest_hdr[VTEST_HDR_SIZE];
    uint32_t vcmd_context_init[VCMD_CONTEXT_INIT_SIZE];
@@ -481,44 +487,17 @@ vtest_vcmd_sync_wait(struct vtest *vtest,
 }
 
 static void
-submit_cmd2_sizes(const struct vn_renderer_submit *submit,
-                  size_t *header_size,
-                  size_t *cs_size,
-                  size_t *sync_size)
-{
-   if (!submit->batch_count) {
-      *header_size = 0;
-      *cs_size = 0;
-      *sync_size = 0;
-      return;
-   }
-
-   *header_size = sizeof(uint32_t) +
-                  sizeof(struct vcmd_submit_cmd2_batch) * submit->batch_count;
-
-   *cs_size = 0;
-   *sync_size = 0;
-   for (uint32_t i = 0; i < submit->batch_count; i++) {
-      const struct vn_renderer_submit_batch *batch = &submit->batches[i];
-      assert(batch->cs_size % sizeof(uint32_t) == 0);
-      *cs_size += batch->cs_size;
-      *sync_size += (sizeof(uint32_t) + sizeof(uint64_t)) * batch->sync_count;
-   }
-
-   assert(*header_size % sizeof(uint32_t) == 0);
-   assert(*cs_size % sizeof(uint32_t) == 0);
-   assert(*sync_size % sizeof(uint32_t) == 0);
-}
-
-static void
 vtest_vcmd_submit_cmd2(struct vtest *vtest,
-                       const struct vn_renderer_submit *submit)
+                       const struct vn_renderer_submit_batch *batch)
 {
-   size_t header_size;
-   size_t cs_size;
-   size_t sync_size;
-   submit_cmd2_sizes(submit, &header_size, &cs_size, &sync_size);
-   const size_t total_size = header_size + cs_size + sync_size;
+   STATIC_ASSERT(!(sizeof(struct vcmd_submit_cmd2_batch) % sizeof(uint32_t)));
+   assert(batch->cs_size % sizeof(uint32_t) == 0);
+
+   const size_t header_size =
+      sizeof(uint32_t) + sizeof(struct vcmd_submit_cmd2_batch);
+   const size_t sync_size =
+      (sizeof(uint32_t) + sizeof(uint64_t)) * batch->sync_count;
+   const size_t total_size = header_size + batch->cs_size + sync_size;
    if (!total_size)
       return;
 
@@ -528,51 +507,35 @@ vtest_vcmd_submit_cmd2(struct vtest *vtest,
    vtest_write(vtest, vtest_hdr, sizeof(vtest_hdr));
 
    /* write batch count and batch headers */
-   const uint32_t batch_count = submit->batch_count;
-   size_t cs_offset = header_size;
-   size_t sync_offset = cs_offset + cs_size;
+   const uint32_t batch_count = 1;
+   size_t sync_offset = header_size + batch->cs_size;
    vtest_write(vtest, &batch_count, sizeof(batch_count));
-   for (uint32_t i = 0; i < submit->batch_count; i++) {
-      const struct vn_renderer_submit_batch *batch = &submit->batches[i];
-      struct vcmd_submit_cmd2_batch dst = {
-         .cmd_offset = cs_offset / sizeof(uint32_t),
-         .cmd_size = batch->cs_size / sizeof(uint32_t),
-         .sync_offset = sync_offset / sizeof(uint32_t),
-         .sync_count = batch->sync_count,
-      };
-      if (vtest->base.info.supports_multiple_timelines) {
-         dst.flags = VCMD_SUBMIT_CMD2_FLAG_RING_IDX;
-         dst.ring_idx = batch->ring_idx;
-      }
-      vtest_write(vtest, &dst, sizeof(dst));
 
-      cs_offset += batch->cs_size;
-      sync_offset +=
-         (sizeof(uint32_t) + sizeof(uint64_t)) * batch->sync_count;
-   }
+   struct vcmd_submit_cmd2_batch dst = {
+      .flags = VCMD_SUBMIT_CMD2_FLAG_RING_IDX,
+      .cmd_offset = header_size / sizeof(uint32_t),
+      .cmd_size = batch->cs_size / sizeof(uint32_t),
+      .sync_offset = sync_offset / sizeof(uint32_t),
+      .sync_count = batch->sync_count,
+      .ring_idx = batch->ring_idx,
+   };
+   vtest_write(vtest, &dst, sizeof(dst));
+
+   sync_offset += (sizeof(uint32_t) + sizeof(uint64_t)) * batch->sync_count;
 
    /* write cs */
-   if (cs_size) {
-      for (uint32_t i = 0; i < submit->batch_count; i++) {
-         const struct vn_renderer_submit_batch *batch = &submit->batches[i];
-         if (batch->cs_size)
-            vtest_write(vtest, batch->cs_data, batch->cs_size);
-      }
-   }
+   if (batch->cs_size)
+      vtest_write(vtest, batch->cs_data, batch->cs_size);
 
    /* write syncs */
-   for (uint32_t i = 0; i < submit->batch_count; i++) {
-      const struct vn_renderer_submit_batch *batch = &submit->batches[i];
-
-      for (uint32_t j = 0; j < batch->sync_count; j++) {
-         const uint64_t val = batch->sync_values[j];
-         const uint32_t sync[3] = {
-            batch->syncs[j]->sync_id,
-            (uint32_t)val,
-            (uint32_t)(val >> 32),
-         };
-         vtest_write(vtest, sync, sizeof(sync));
-      }
+   for (uint32_t i = 0; i < batch->sync_count; i++) {
+      const uint64_t val = batch->sync_values[i];
+      const uint32_t sync[3] = {
+         batch->syncs[i]->sync_id,
+         (uint32_t)val,
+         (uint32_t)(val >> 32),
+      };
+      vtest_write(vtest, sync, sizeof(sync));
    }
 }
 
@@ -607,12 +570,10 @@ vtest_sync_read(struct vn_renderer *renderer,
 }
 
 static VkResult
-vtest_sync_reset(struct vn_renderer *renderer,
-                 struct vn_renderer_sync *sync,
-                 uint64_t initial_val)
+vtest_sync_reset(struct vn_renderer *renderer, struct vn_renderer_sync *sync)
 {
    /* same as write */
-   return vtest_sync_write(renderer, sync, initial_val);
+   return vtest_sync_write(renderer, sync, 0);
 }
 
 static void
@@ -632,7 +593,6 @@ vtest_sync_destroy(struct vn_renderer *renderer,
 static VkResult
 vtest_sync_create(struct vn_renderer *renderer,
                   uint64_t initial_val,
-                  uint32_t flags,
                   struct vn_renderer_sync **out_sync)
 {
    struct vtest *vtest = (struct vtest *)renderer;
@@ -668,7 +628,9 @@ vtest_bo_flush(struct vn_renderer *renderer,
 }
 
 static void *
-vtest_bo_map(struct vn_renderer *renderer, struct vn_renderer_bo *_bo)
+vtest_bo_map(struct vn_renderer *renderer,
+             struct vn_renderer_bo *_bo,
+             void *placed_addr)
 {
    struct vtest *vtest = (struct vtest *)renderer;
    struct vtest_bo *bo = (struct vtest_bo *)_bo;
@@ -682,8 +644,9 @@ vtest_bo_map(struct vn_renderer *renderer, struct vn_renderer_bo *_bo)
        * check for VCMD_PARAM_HOST_COHERENT_DMABUF_BLOB, we know vtest can
        * lie.
        */
-      void *ptr = mmap(NULL, bo->base.mmap_size, PROT_READ | PROT_WRITE,
-                       MAP_SHARED, bo->res_fd, 0);
+      void *ptr =
+         mmap(placed_addr, bo->base.mmap_size, PROT_READ | PROT_WRITE,
+              MAP_SHARED | (placed_addr ? MAP_FIXED : 0), bo->res_fd, 0);
       if (ptr == MAP_FAILED) {
          vn_log(vtest->instance, "failed to mmap %d of size %zu rw: %s",
                 bo->res_fd, bo->base.mmap_size, strerror(errno));
@@ -745,6 +708,7 @@ vtest_bo_blob_flags(VkMemoryPropertyFlags flags,
 static VkResult
 vtest_bo_create_from_device_memory(
    struct vn_renderer *renderer,
+   struct vn_renderer_submit_batch *batch,
    VkDeviceSize size,
    vn_object_id mem_id,
    VkMemoryPropertyFlags flags,
@@ -755,6 +719,9 @@ vtest_bo_create_from_device_memory(
    const uint32_t blob_flags = vtest_bo_blob_flags(flags, external_handles);
 
    mtx_lock(&vtest->sock_mutex);
+   if (batch)
+      vtest_vcmd_submit_cmd2(vtest, batch);
+
    int res_fd;
    uint32_t res_id = vtest_vcmd_resource_create_blob(
       vtest, VCMD_BLOB_TYPE_HOST3D, blob_flags, size, mem_id, &res_fd);
@@ -867,22 +834,12 @@ sync_wait_poll(int fd, int poll_timeout)
    return ret ? VK_SUCCESS : VK_TIMEOUT;
 }
 
-static int
-timeout_to_poll_timeout(uint64_t timeout)
-{
-   const uint64_t ns_per_ms = 1000000;
-   const uint64_t ms = (timeout + ns_per_ms - 1) / ns_per_ms;
-   if (!ms && timeout)
-      return -1;
-   return ms <= INT_MAX ? ms : -1;
-}
-
 static VkResult
 vtest_wait(struct vn_renderer *renderer, const struct vn_renderer_wait *wait)
 {
    struct vtest *vtest = (struct vtest *)renderer;
    const uint32_t flags = wait->wait_any ? VCMD_SYNC_WAIT_FLAG_ANY : 0;
-   const int poll_timeout = timeout_to_poll_timeout(wait->timeout);
+   const int poll_timeout = vn_timeout_to_poll_timeout(wait->timeout);
 
    /*
     * vtest_vcmd_sync_wait (and some other sync commands) is executed after
@@ -910,12 +867,12 @@ vtest_wait(struct vn_renderer *renderer, const struct vn_renderer_wait *wait)
 
 static VkResult
 vtest_submit(struct vn_renderer *renderer,
-             const struct vn_renderer_submit *submit)
+             const struct vn_renderer_submit_batch *batch)
 {
    struct vtest *vtest = (struct vtest *)renderer;
 
    mtx_lock(&vtest->sock_mutex);
-   vtest_vcmd_submit_cmd2(vtest, submit);
+   vtest_vcmd_submit_cmd2(vtest, batch);
    mtx_unlock(&vtest->sock_mutex);
 
    return VK_SUCCESS;
@@ -926,19 +883,12 @@ vtest_init_renderer_info(struct vtest *vtest)
 {
    struct vn_renderer_info *info = &vtest->base.info;
 
-   info->drm.has_primary = false;
-   info->drm.primary_major = 0;
-   info->drm.primary_minor = 0;
-   info->drm.has_render = false;
-   info->drm.render_major = 0;
-   info->drm.render_minor = 0;
-
    info->pci.vendor_id = VTEST_PCI_VENDOR_ID;
    info->pci.device_id = VTEST_PCI_DEVICE_ID;
 
    info->has_dma_buf_import = false;
-   info->has_cache_management = false;
    info->has_external_sync = false;
+   info->has_timeline_sync = !VN_PERF(NO_TIMELINE_SYNC);
    info->has_implicit_fencing = false;
 
    const struct virgl_renderer_capset_venus *capset = &vtest->capset.data;
@@ -948,7 +898,7 @@ vtest_init_renderer_info(struct vtest *vtest)
       capset->vk_ext_command_serialization_spec_version;
    info->vk_mesa_venus_protocol_spec_version =
       capset->vk_mesa_venus_protocol_spec_version;
-   info->supports_blob_id_0 = capset->supports_blob_id_0;
+   assert(capset->supports_blob_id_0);
 
    /* ensure vk_extension_mask is large enough to hold all capset masks */
    STATIC_ASSERT(sizeof(info->vk_extension_mask) >=
@@ -956,9 +906,9 @@ vtest_init_renderer_info(struct vtest *vtest)
    memcpy(info->vk_extension_mask, capset->vk_extension_mask1,
           sizeof(capset->vk_extension_mask1));
 
-   info->allow_vk_wait_syncs = capset->allow_vk_wait_syncs;
+   assert(capset->allow_vk_wait_syncs);
 
-   info->supports_multiple_timelines = capset->supports_multiple_timelines;
+   assert(capset->supports_multiple_timelines);
    info->max_timeline_count = vtest->max_timeline_count;
 }
 
@@ -985,7 +935,7 @@ vtest_destroy(struct vn_renderer *renderer,
 static VkResult
 vtest_init_capset(struct vtest *vtest)
 {
-   vtest->capset.id = VIRGL_RENDERER_CAPSET_VENUS;
+   vtest->capset.id = VIRTGPU_DRM_CAPSET_VENUS;
    vtest->capset.version = 0;
 
    if (!vtest_vcmd_get_capset(vtest, vtest->capset.id, vtest->capset.version,
@@ -1032,13 +982,20 @@ vtest_init_protocol_version(struct vtest *vtest)
 static VkResult
 vtest_init(struct vtest *vtest)
 {
+   const char *socket_name = os_get_option("VTEST_SOCKET_NAME");
+
    util_sparse_array_init(&vtest->shmem_array, sizeof(struct vtest_shmem),
                           1024);
    util_sparse_array_init(&vtest->bo_array, sizeof(struct vtest_bo), 1024);
 
    mtx_init(&vtest->sock_mutex, mtx_plain);
-   vtest->sock_fd =
-      vtest_connect_socket(vtest->instance, VTEST_DEFAULT_SOCKET_NAME);
+
+   /* disallow VTEST_DEFAULT_SOCKET_NAME on vtest fallback */
+   if (!VN_DEBUG(VTEST) && !socket_name)
+      return VK_ERROR_INITIALIZATION_FAILED;
+
+   vtest->sock_fd = vtest_connect_socket(
+      vtest->instance, socket_name ? socket_name : VTEST_DEFAULT_SOCKET_NAME);
    if (vtest->sock_fd < 0)
       return VK_ERROR_INITIALIZATION_FAILED;
 
@@ -1056,9 +1013,8 @@ vtest_init(struct vtest *vtest)
       return result;
 
    /* see virtgpu_init_shmem_blob_mem */
-   vtest->shmem_blob_mem = vtest->capset.data.supports_blob_id_0
-                              ? VCMD_BLOB_TYPE_HOST3D
-                              : VCMD_BLOB_TYPE_GUEST;
+   assert(vtest->capset.data.supports_blob_id_0);
+   vtest->shmem_blob_mem = VCMD_BLOB_TYPE_HOST3D;
 
    vn_renderer_shmem_cache_init(&vtest->shmem_cache, &vtest->base,
                                 vtest_shmem_destroy_now);
@@ -1079,6 +1035,8 @@ vtest_init(struct vtest *vtest)
    vtest->base.bo_ops.create_from_dma_buf = NULL;
    vtest->base.bo_ops.destroy = vtest_bo_destroy;
    vtest->base.bo_ops.export_dma_buf = vtest_bo_export_dma_buf;
+   vtest->base.bo_ops.export_sync_file =
+      vn_renderer_bo_export_sync_file_internal;
    vtest->base.bo_ops.map = vtest_bo_map;
    vtest->base.bo_ops.flush = vtest_bo_flush;
    vtest->base.bo_ops.invalidate = vtest_bo_invalidate;
@@ -1114,6 +1072,9 @@ vn_renderer_create_vtest(struct vn_instance *instance,
    }
 
    *renderer = &vtest->base;
+
+   if (VN_DEBUG(INIT))
+      vn_log(vtest->instance, "vtest backend initialized");
 
    return VK_SUCCESS;
 }

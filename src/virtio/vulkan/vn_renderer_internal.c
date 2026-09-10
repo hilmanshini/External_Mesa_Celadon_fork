@@ -5,8 +5,39 @@
 
 #include "vn_renderer_internal.h"
 
+#ifdef HAVE_LIBDRM
+#include <xf86drm.h>
+
+#include "drm-uapi/dma-buf.h"
+#endif
+
 /* 3 seconds */
 #define VN_RENDERER_SHMEM_CACHE_EXPIRACY (3ll * 1000 * 1000)
+
+static void
+vn_renderer_shmem_cache_dump(struct vn_renderer_shmem_cache *cache)
+{
+   simple_mtx_lock(&cache->mutex);
+
+   vn_log(NULL, "dumping renderer shmem cache");
+   vn_log(NULL, "  cache skip: %d", cache->debug.cache_skip_count);
+   vn_log(NULL, "  cache hit: %d", cache->debug.cache_hit_count);
+   vn_log(NULL, "  cache miss: %d", cache->debug.cache_miss_count);
+
+   uint32_t bucket_mask = cache->bucket_mask;
+   while (bucket_mask) {
+      const int idx = u_bit_scan(&bucket_mask);
+      const struct vn_renderer_shmem_bucket *bucket = &cache->buckets[idx];
+      uint32_t count = 0;
+      list_for_each_entry(struct vn_renderer_shmem, shmem, &bucket->shmems,
+                          cache_head)
+         count++;
+      if (count)
+         vn_log(NULL, "  buckets[%d]: %d shmems", idx, count);
+   }
+
+   simple_mtx_unlock(&cache->mutex);
+}
 
 void
 vn_renderer_shmem_cache_init(struct vn_renderer_shmem_cache *cache,
@@ -34,6 +65,9 @@ vn_renderer_shmem_cache_fini(struct vn_renderer_shmem_cache *cache)
 {
    if (!cache->initialized)
       return;
+
+   if (VN_DEBUG(CACHE))
+      vn_renderer_shmem_cache_dump(cache);
 
    while (cache->bucket_mask) {
       const int idx = u_bit_scan(&cache->bucket_mask);
@@ -153,28 +187,39 @@ vn_renderer_shmem_cache_get(struct vn_renderer_shmem_cache *cache,
    return shmem;
 }
 
-/* for debugging only */
-void
-vn_renderer_shmem_cache_debug_dump(struct vn_renderer_shmem_cache *cache)
+int
+vn_renderer_bo_export_sync_file_internal(struct vn_renderer *renderer,
+                                         struct vn_renderer_bo *bo)
 {
-   simple_mtx_lock(&cache->mutex);
+#ifdef HAVE_LIBDRM
+   /* Don't keep trying an IOCTL that doesn't exist. */
+   static bool no_dma_buf_sync_file = false;
+   if (no_dma_buf_sync_file)
+      return -1;
 
-   vn_log(NULL, "dumping shmem cache");
-   vn_log(NULL, "  cache skip: %d", cache->debug.cache_skip_count);
-   vn_log(NULL, "  cache hit: %d", cache->debug.cache_hit_count);
-   vn_log(NULL, "  cache miss: %d", cache->debug.cache_miss_count);
+   /* For simplicity, export dma-buf here and rely on the dma-buf sync file
+    * export api. On legacy kernels without the new uapi, for virtgpu backend,
+    * we do have the fallback option of doing DRM_IOCTL_VIRTGPU_WAIT instead.
+    */
+   int dma_buf_fd = vn_renderer_bo_export_dma_buf(renderer, bo);
+   if (dma_buf_fd < 0)
+      return -1;
 
-   uint32_t bucket_mask = cache->bucket_mask;
-   while (bucket_mask) {
-      const int idx = u_bit_scan(&bucket_mask);
-      const struct vn_renderer_shmem_bucket *bucket = &cache->buckets[idx];
-      uint32_t count = 0;
-      list_for_each_entry(struct vn_renderer_shmem, shmem, &bucket->shmems,
-                          cache_head)
-         count++;
-      if (count)
-         vn_log(NULL, "  buckets[%d]: %d shmems", idx, count);
+   struct dma_buf_export_sync_file export = {
+      .flags = DMA_BUF_SYNC_RW,
+      .fd = -1,
+   };
+   int ret = drmIoctl(dma_buf_fd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &export);
+
+   close(dma_buf_fd);
+
+   if (ret && (errno == ENOTTY || errno == EBADF || errno == ENOSYS)) {
+      no_dma_buf_sync_file = true;
+      return -1;
    }
 
-   simple_mtx_unlock(&cache->mutex);
+   return export.fd;
+#else  /* HAVE_LIBDRM */
+   return -1;
+#endif /* HAVE_LIBDRM */
 }

@@ -1,17 +1,21 @@
+// Copyright 2020 Red Hat.
+// SPDX-License-Identifier: MIT
+
 use rusticl_opencl_gen::*;
 
 use std::convert::TryFrom;
+use std::ffi::CStr;
 use std::os::raw::c_char;
 
-pub const CL1_0_VER: u32 = mk_cl_version(1, 0, 0);
-pub const CL1_1_VER: u32 = mk_cl_version(1, 1, 0);
-pub const CL1_2_VER: u32 = mk_cl_version(1, 2, 0);
-pub const CL2_0_VER: u32 = mk_cl_version(2, 0, 0);
-pub const CL2_1_VER: u32 = mk_cl_version(2, 1, 0);
-pub const CL2_2_VER: u32 = mk_cl_version(2, 2, 0);
-pub const CL3_0_VER: u32 = mk_cl_version(3, 0, 0);
+pub const CL1_0_VER: cl_version = mk_cl_version(1, 0, 0);
+pub const CL1_1_VER: cl_version = mk_cl_version(1, 1, 0);
+pub const CL1_2_VER: cl_version = mk_cl_version(1, 2, 0);
+pub const CL2_0_VER: cl_version = mk_cl_version(2, 0, 0);
+pub const CL2_1_VER: cl_version = mk_cl_version(2, 1, 0);
+pub const CL2_2_VER: cl_version = mk_cl_version(2, 2, 0);
+pub const CL3_0_VER: cl_version = mk_cl_version(3, 0, 0);
+pub const CL3_1_VER: cl_version = mk_cl_version(3, 1, 0);
 
-#[allow(dead_code)]
 #[repr(u32)]
 #[derive(Copy, Clone, Eq, Hash, PartialEq, PartialOrd, Ord)]
 pub enum CLVersion {
@@ -22,6 +26,7 @@ pub enum CLVersion {
     Cl2_1 = CL2_1_VER,
     Cl2_2 = CL2_2_VER,
     Cl3_0 = CL3_0_VER,
+    Cl3_1 = CL3_1_VER,
 }
 
 pub const fn mk_cl_version_ext(major: u32, minor: u32, patch: u32, ext: &str) -> cl_name_version {
@@ -47,6 +52,19 @@ pub const fn mk_cl_version(major: u32, minor: u32, patch: u32) -> u32 {
 }
 
 impl CLVersion {
+    pub fn api_cstr(&self) -> &'static CStr {
+        match self {
+            CLVersion::Cl1_0 => c"1.0",
+            CLVersion::Cl1_1 => c"1.1",
+            CLVersion::Cl1_2 => c"1.2",
+            CLVersion::Cl2_0 => c"2.0",
+            CLVersion::Cl2_1 => c"2.1",
+            CLVersion::Cl2_2 => c"2.2",
+            CLVersion::Cl3_0 => c"3.0",
+            CLVersion::Cl3_1 => c"3.1",
+        }
+    }
+
     pub fn api_str(&self) -> &'static str {
         match self {
             CLVersion::Cl1_0 => "1.0",
@@ -56,26 +74,34 @@ impl CLVersion {
             CLVersion::Cl2_1 => "2.1",
             CLVersion::Cl2_2 => "2.2",
             CLVersion::Cl3_0 => "3.0",
+            CLVersion::Cl3_1 => "3.1",
         }
     }
 
-    pub fn clc_str(&self) -> &'static str {
+    pub fn clc_str(&self) -> &'static CStr {
         match self {
-            CLVersion::Cl1_0 => "100",
-            CLVersion::Cl1_1 => "110",
-            CLVersion::Cl1_2 => "120",
-            CLVersion::Cl2_0 => "200",
-            CLVersion::Cl2_1 => "210",
-            CLVersion::Cl2_2 => "220",
-            CLVersion::Cl3_0 => "300",
+            CLVersion::Cl1_0 => c"100",
+            CLVersion::Cl1_1 => c"110",
+            CLVersion::Cl1_2 => c"120",
+            CLVersion::Cl2_0 => c"200",
+            CLVersion::Cl2_1 => c"210",
+            CLVersion::Cl2_2 => c"220",
+            CLVersion::Cl3_0 => c"300",
+            CLVersion::Cl3_1 => c"310",
         }
     }
 }
 
-impl TryFrom<u32> for CLVersion {
+impl From<CLVersion> for cl_version {
+    fn from(cl_version: CLVersion) -> Self {
+        cl_version as Self
+    }
+}
+
+impl TryFrom<cl_version> for CLVersion {
     type Error = cl_int;
 
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
+    fn try_from(value: cl_version) -> Result<Self, Self::Error> {
         Ok(match value {
             CL1_0_VER => CLVersion::Cl1_0,
             CL1_1_VER => CLVersion::Cl1_1,

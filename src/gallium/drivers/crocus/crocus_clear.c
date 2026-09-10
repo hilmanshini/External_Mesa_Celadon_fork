@@ -34,7 +34,7 @@
 #include "crocus_context.h"
 #include "crocus_resource.h"
 #include "crocus_screen.h"
-#include "intel/compiler/brw_compiler.h"
+#include "intel/compiler/elk/elk_compiler.h"
 #include "util/format_srgb.h"
 
 static bool
@@ -101,8 +101,8 @@ can_fast_clear_color(struct crocus_context *ice,
     * during resolves because the resolve operations only know about the
     * resource and not the renderbuffer.
     */
-   if (isl_format_srgb_to_linear(render_format) !=
-       isl_format_srgb_to_linear(format)) {
+   if (!crocus_render_formats_color_compatible(render_format, res->surf.format,
+                                             color)) {
       return false;
    }
 
@@ -288,11 +288,6 @@ fast_clear_color(struct crocus_context *ice,
                                 "fast clear: pre-flush",
                                 PIPE_CONTROL_RENDER_TARGET_FLUSH);
 
-   /* If we reach this point, we need to fast clear to change the state to
-    * ISL_AUX_STATE_CLEAR, or to update the fast clear color (or both).
-    */
-   blorp_flags |= color_changed ? 0 : BLORP_BATCH_NO_UPDATE_CLEAR_COLOR;
-
    struct blorp_batch blorp_batch;
    blorp_batch_init(&ice->blorp, &blorp_batch, batch, blorp_flags);
 
@@ -454,21 +449,7 @@ fast_clear_depth(struct crocus_context *ice,
                  const struct pipe_box *box,
                  float depth)
 {
-   struct pipe_resource *p_res = (void *) res;
    struct crocus_batch *batch = &ice->batches[CROCUS_BATCH_RENDER];
-
-   /* Quantize the clear value to what can be stored in the actual depth
-    * buffer.  This makes the following check more accurate because it now
-    * checks if the actual depth bits will match.  It also prevents us from
-    * getting a too-accurate depth value during depth testing or when sampling
-    * with HiZ enabled.
-    */
-   const unsigned nbits = p_res->format == PIPE_FORMAT_Z16_UNORM ? 16 : 24;
-   const uint32_t depth_max = (1 << nbits) - 1;
-   depth = p_res->format == PIPE_FORMAT_Z32_FLOAT ? depth :
-      (unsigned)(depth * depth_max) / (float)depth_max;
-
-   bool update_clear_depth = false;
 
    /* If we're clearing to a new clear value, then we need to resolve any clear
     * flags out of the HiZ buffer into the real depth buffer.
@@ -504,14 +485,13 @@ fast_clear_depth(struct crocus_context *ice,
              * value so this shouldn't happen often.
              */
             crocus_hiz_exec(ice, batch, res, res_level, layer, 1,
-                            ISL_AUX_OP_FULL_RESOLVE, false);
+                            ISL_AUX_OP_FULL_RESOLVE);
             crocus_resource_set_aux_state(ice, res, res_level, layer, 1,
                                           ISL_AUX_STATE_RESOLVED);
          }
       }
       const union isl_color_value clear_value = { .f32 = {depth, } };
       crocus_resource_set_clear_color(ice, res, clear_value);
-      update_clear_depth = true;
    }
 
    for (unsigned l = 0; l < box->depth; l++) {
@@ -519,14 +499,9 @@ fast_clear_depth(struct crocus_context *ice,
          crocus_resource_level_has_hiz(res, level) ?
          crocus_resource_get_aux_state(res, level, box->z + l) :
          ISL_AUX_STATE_AUX_INVALID;
-      if (update_clear_depth || aux_state != ISL_AUX_STATE_CLEAR) {
-         if (aux_state == ISL_AUX_STATE_CLEAR) {
-            perf_debug(&ice->dbg, "Performing HiZ clear just to update the "
-                       "depth clear value\n");
-         }
+      if (aux_state != ISL_AUX_STATE_CLEAR) {
          crocus_hiz_exec(ice, batch, res, level,
-                         box->z + l, 1, ISL_AUX_OP_FAST_CLEAR,
-                         update_clear_depth);
+                         box->z + l, 1, ISL_AUX_OP_FAST_CLEAR);
       }
    }
 
@@ -638,6 +613,8 @@ clear_depth_stencil(struct crocus_context *ice,
 static void
 crocus_clear(struct pipe_context *ctx,
              unsigned buffers,
+             uint32_t color_clear_mask,
+             uint8_t stencil_clear_mask,
              const struct pipe_scissor_state *scissor_state,
              const union pipe_color_union *p_color,
              double depth,
@@ -668,11 +645,11 @@ crocus_clear(struct pipe_context *ctx,
                             util_framebuffer_get_num_layers(cso_fb),
                             buffers & PIPE_CLEAR_DEPTHSTENCIL, p_color, depth, stencil, false);
       } else {
-         struct pipe_surface *psurf = cso_fb->zsbuf;
-         box.depth = psurf->u.tex.last_layer - psurf->u.tex.first_layer + 1;
-         box.z = psurf->u.tex.first_layer;
+         const struct pipe_surface *psurf = &cso_fb->zsbuf;
+         box.depth = psurf->last_layer - psurf->first_layer + 1;
+         box.z = psurf->first_layer;
 
-         clear_depth_stencil(ice, psurf->texture, psurf->u.tex.level, &box, true,
+         clear_depth_stencil(ice, psurf->texture, psurf->level, &box, true,
                              buffers & PIPE_CLEAR_DEPTH,
                              buffers & PIPE_CLEAR_STENCIL,
                              depth, stencil);
@@ -686,12 +663,12 @@ crocus_clear(struct pipe_context *ctx,
 
       for (unsigned i = 0; i < cso_fb->nr_cbufs; i++) {
          if (buffers & (PIPE_CLEAR_COLOR0 << i)) {
-            struct pipe_surface *psurf = cso_fb->cbufs[i];
+            struct pipe_surface *psurf = ice->state.fb_cbufs[i];
             struct crocus_surface *isurf = (void *) psurf;
-            box.depth = psurf->u.tex.last_layer - psurf->u.tex.first_layer + 1,
-            box.z = psurf->u.tex.first_layer,
+            box.depth = psurf->last_layer - psurf->first_layer + 1,
+            box.z = psurf->first_layer,
 
-            clear_color(ice, psurf->texture, psurf->u.tex.level, &box,
+            clear_color(ice, psurf->texture, psurf->level, &box,
                         true, isurf->view.format, isurf->view.swizzle,
                         *color);
          }
@@ -714,16 +691,11 @@ crocus_clear_texture(struct pipe_context *ctx,
    struct crocus_context *ice = (void *) ctx;
    struct crocus_screen *screen = (void *) ctx->screen;
    const struct intel_device_info *devinfo = &screen->devinfo;
-   struct crocus_resource *res = (void *) p_res;
 
    if (devinfo->ver < 6) {
-      util_clear_texture(ctx, p_res,
-                         level, box, data);
+      u_default_clear_texture(ctx, p_res, level, box, data);
       return;
    }
-
-   if (crocus_resource_unfinished_aux_import(res))
-      crocus_resource_finish_aux_import(ctx->screen, res);
 
    if (util_format_is_depth_or_stencil(p_res->format)) {
       const struct util_format_unpack_description *fmt_unpack =
@@ -759,7 +731,7 @@ crocus_clear_texture(struct pipe_context *ctx,
          case 96:  format = ISL_FORMAT_R32G32B32_UINT;    break;
          case 128: format = ISL_FORMAT_R32G32B32A32_UINT; break;
          default:
-            unreachable("Unknown format bpb");
+            UNREACHABLE("Unknown format bpb");
          }
 
          /* No aux surfaces for non-renderable surfaces */
@@ -791,16 +763,16 @@ crocus_clear_render_target(struct pipe_context *ctx,
    struct pipe_box box = {
       .x = dst_x,
       .y = dst_y,
-      .z = psurf->u.tex.first_layer,
+      .z = psurf->first_layer,
       .width = width,
       .height = height,
-      .depth = psurf->u.tex.last_layer - psurf->u.tex.first_layer + 1
+      .depth = psurf->last_layer - psurf->first_layer + 1
    };
 
    /* pipe_color_union and isl_color_value are interchangeable */
    union isl_color_value *color = (void *) p_color;
 
-   clear_color(ice, psurf->texture, psurf->u.tex.level, &box,
+   clear_color(ice, psurf->texture, psurf->level, &box,
                render_condition_enabled,
                isurf->view.format, isurf->view.swizzle, *color);
 }
@@ -826,10 +798,10 @@ crocus_clear_depth_stencil(struct pipe_context *ctx,
    struct pipe_box box = {
       .x = dst_x,
       .y = dst_y,
-      .z = psurf->u.tex.first_layer,
+      .z = psurf->first_layer,
       .width = width,
       .height = height,
-      .depth = psurf->u.tex.last_layer - psurf->u.tex.first_layer + 1
+      .depth = psurf->last_layer - psurf->first_layer + 1
    };
    uint32_t blit_flags = 0;
 
@@ -839,7 +811,7 @@ crocus_clear_depth_stencil(struct pipe_context *ctx,
    util_blitter_clear(ice->blitter, width, height,
                       1, flags, NULL, depth, stencil, render_condition_enabled);
 #if 0
-   clear_depth_stencil(ice, psurf->texture, psurf->u.tex.level, &box,
+   clear_depth_stencil(ice, psurf->texture, psurf->level, &box,
                        render_condition_enabled,
                        flags & PIPE_CLEAR_DEPTH, flags & PIPE_CLEAR_STENCIL,
                        depth, stencil);

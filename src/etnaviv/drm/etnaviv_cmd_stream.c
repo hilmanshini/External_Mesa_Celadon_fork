@@ -28,6 +28,7 @@
 #include <stdlib.h>
 
 #include "util/hash_table.h"
+#include "util/u_math.h"
 
 #include "etnaviv_drmif.h"
 #include "etnaviv_priv.h"
@@ -59,7 +60,7 @@ void etna_cmd_stream_realloc(struct etna_cmd_stream *stream, size_t n)
 	 * Increase the command buffer size by 4 kiB. Here we pick 4 kiB
 	 * increment to prevent it from growing too much too quickly.
 	 */
-	size = ALIGN(stream->size + n, 1024);
+	size = align_uintptr(stream->size + n, 1024);
 
 	/* Command buffer is too big for older kernel versions */
 	if (size > 0x4000)
@@ -104,7 +105,7 @@ struct etna_cmd_stream *etna_cmd_stream_new(struct etna_pipe *pipe,
 	}
 
 	/* allocate even number of 32-bit words */
-	size = ALIGN(size, 2);
+	size = align(size, 2);
 
 	stream->base.buffer = malloc(size * sizeof(uint32_t));
 	if (!stream->base.buffer) {
@@ -203,12 +204,11 @@ void etna_cmd_stream_flush(struct etna_cmd_stream *stream, int in_fence_fd,
 		int *out_fence_fd, bool is_noop)
 {
 	struct etna_cmd_stream_priv *priv = etna_cmd_stream_priv(stream);
-	int ret, id = priv->pipe->id;
 	struct etna_gpu *gpu = priv->pipe->gpu;
 
 	struct drm_etnaviv_gem_submit req = {
 		.pipe = gpu->core,
-		.exec_state = id,
+		.exec_state = priv->pipe->id,
 		.bos = VOID2U64(priv->submit.bos),
 		.nr_bos = priv->submit.nr_bos,
 		.relocs = VOID2U64(priv->submit.relocs),
@@ -219,7 +219,7 @@ void etna_cmd_stream_flush(struct etna_cmd_stream *stream, int in_fence_fd,
 		.stream_size = stream->offset * 4, /* in bytes */
 	};
 
-	if (in_fence_fd != -1) {
+	if (in_fence_fd >= 0) {
 		req.flags |= ETNA_SUBMIT_FENCE_FD_IN | ETNA_SUBMIT_NO_IMPLICIT;
 		req.fence_fd = in_fence_fd;
 	}
@@ -230,16 +230,21 @@ void etna_cmd_stream_flush(struct etna_cmd_stream *stream, int in_fence_fd,
 	if (gpu->dev->use_softpin)
 		req.flags |= ETNA_SUBMIT_SOFTPIN;
 
-	if (unlikely(is_noop))
-		ret = 0;
-	else
+	if (stream->offset == priv->offset_end_of_context_init && !out_fence_fd &&
+	    in_fence_fd < 0 && !priv->submit.nr_pmrs)
+		is_noop = true;
+
+	if (likely(!is_noop)) {
+		int ret;
+
 		ret = drmCommandWriteRead(gpu->dev->fd, DRM_ETNAVIV_GEM_SUBMIT,
 				&req, sizeof(req));
 
-	if (ret)
-		ERROR_MSG("submit failed: %d (%s)", ret, strerror(errno));
-	else
-		priv->last_timestamp = req.fence;
+		if (ret)
+			ERROR_MSG("submit failed: %d (%s)", ret, strerror(errno));
+		else
+			priv->last_timestamp = req.fence;
+	}
 
 	for (uint32_t i = 0; i < priv->nr_bos; i++)
 		etna_bo_del(priv->bos[i]);
@@ -254,6 +259,7 @@ void etna_cmd_stream_flush(struct etna_cmd_stream *stream, int in_fence_fd,
 	priv->submit.nr_relocs = 0;
 	priv->submit.nr_pmrs = 0;
 	priv->nr_bos = 0;
+	priv->offset_end_of_context_init = 0;
 }
 
 void etna_cmd_stream_reloc(struct etna_cmd_stream *stream,
@@ -282,6 +288,18 @@ void etna_cmd_stream_ref_bo(struct etna_cmd_stream *stream, struct etna_bo *bo,
 		uint32_t flags)
 {
 	bo2idx(stream, bo, flags);
+}
+
+void etna_cmd_stream_mark_end_of_context_init(struct etna_cmd_stream *stream)
+{
+   struct etna_cmd_stream_priv *priv = etna_cmd_stream_priv(stream);
+
+   /* 
+    * All commands before the end of context init are guaranteed to only alter GPU internal
+    * state and have no externally visible side effects, so we can skip the submit if the
+    * command buffer contains only context init commands.
+    */
+   priv->offset_end_of_context_init = stream->offset;
 }
 
 void etna_cmd_stream_perf(struct etna_cmd_stream *stream, const struct etna_perf *p)

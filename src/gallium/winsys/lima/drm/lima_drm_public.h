@@ -29,7 +29,10 @@
 struct pipe_screen;
 struct renderonly;
 
-struct pipe_screen *lima_drm_screen_create(int drmFD);
-struct pipe_screen *lima_drm_screen_create_renderonly(struct renderonly *ro);
+struct pipe_screen *lima_drm_screen_create(int drmFD,
+                                           const struct pipe_screen_config *config);
+struct pipe_screen *lima_drm_screen_create_renderonly(int fd,
+                                                      struct renderonly *ro,
+                                                      const struct pipe_screen_config *config);
 
 #endif /* __LIMA_DRM_PUBLIC_H__ */

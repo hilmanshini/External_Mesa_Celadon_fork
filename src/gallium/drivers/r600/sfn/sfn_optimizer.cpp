@@ -1,27 +1,7 @@
 /* -*- mesa-c++  -*-
- *
- * Copyright (c) 2022 Collabora LTD
- *
+ * Copyright 2022 Collabora LTD
  * Author: Gert Wollny <gert.wollny@collabora.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include "sfn_optimizer.h"
@@ -42,17 +22,39 @@
 
 namespace r600 {
 
-bool
-optimize(Shader& shader)
+static void
+log_shader_dump(const Shader& shader, const char *header)
 {
-   bool progress;
-
-   sfn_log << SfnLog::opt << "Shader before optimization\n";
+   sfn_log << SfnLog::opt << header;
    if (sfn_log.has_debug_flag(SfnLog::opt)) {
       std::stringstream ss;
       shader.print(ss);
       sfn_log << ss.str() << "\n\n";
    }
+}
+
+template <typename Visitor>
+static bool
+run_visitor_to_fixpoint(Shader& shader, Visitor& visitor, const char *dump_header = nullptr)
+{
+   do {
+      visitor.progress = false;
+      for (auto b : shader.func())
+         b->accept(visitor);
+   } while (visitor.progress);
+
+   if (dump_header)
+      log_shader_dump(shader, dump_header);
+
+   return visitor.progress;
+}
+
+bool
+optimize(Shader& shader)
+{
+   bool progress;
+
+   log_shader_dump(shader, "Shader before optimization\n");
 
    do {
       progress = false;
@@ -91,6 +93,11 @@ public:
    void visit(LDSReadInstr *instr) override;
    void visit(RatInstr *instr) override { (void)instr; };
 
+private:
+   template <typename T>
+   bool remove_unused_vec_dest_components(T *instr);
+
+public:
    bool progress;
 };
 
@@ -98,27 +105,7 @@ bool
 dead_code_elimination(Shader& shader)
 {
    DCEVisitor dce;
-
-   do {
-
-      sfn_log << SfnLog::opt << "start dce run\n";
-
-      dce.progress = false;
-      for (auto& b : shader.func())
-         b->accept(dce);
-
-      sfn_log << SfnLog::opt << "finished dce run\n\n";
-
-   } while (dce.progress);
-
-   sfn_log << SfnLog::opt << "Shader after DCE\n";
-   if (sfn_log.has_debug_flag(SfnLog::opt)) {
-      std::stringstream ss;
-      shader.print(ss);
-      sfn_log << ss.str() << "\n\n";
-   }
-
-   return dce.progress;
+   return run_visitor_to_fixpoint(shader, dce, "Shader after DCE\n");
 }
 
 DCEVisitor::DCEVisitor():
@@ -179,26 +166,23 @@ DCEVisitor::visit(AluGroup *instr)
 void
 DCEVisitor::visit(TexInstr *instr)
 {
-   auto& dest = instr->dst();
-
-   bool has_uses = false;
-   RegisterVec4::Swizzle swz = instr->all_dest_swizzle();
-   for (int i = 0; i < 4; ++i) {
-      if (!dest[i]->has_uses())
-         swz[i] = 7;
-      else
-         has_uses |= true;
-   }
-   instr->set_dest_swizzle(swz);
-
-   if (has_uses)
-      return;
-
-   progress |= instr->set_dead();
+   progress |= remove_unused_vec_dest_components(instr);
 }
 
 void
 DCEVisitor::visit(FetchInstr *instr)
+{
+   bool dead = remove_unused_vec_dest_components(instr);
+
+   if (dead)
+      sfn_log << SfnLog::opt << "set dead: " << *instr << "\n";
+
+   progress |= dead;
+}
+
+template <typename T>
+bool
+DCEVisitor::remove_unused_vec_dest_components(T *instr)
 {
    auto& dest = instr->dst();
 
@@ -213,11 +197,9 @@ DCEVisitor::visit(FetchInstr *instr)
    instr->set_dest_swizzle(swz);
 
    if (has_uses)
-      return;
+      return false;
 
-   sfn_log << SfnLog::opt << "set dead: " << *instr << "\n";
-
-   progress |= instr->set_dead();
+   return instr->set_dead();
 }
 
 void
@@ -261,6 +243,34 @@ public:
    void visit(LDSReadInstr *instr) override { (void)instr; };
 
    void propagate_to(RegisterVec4& src, Instr *instr);
+   bool collect_vec4_copy_candidates(const RegisterVec4& value,
+                                     AluInstr *parents[4]) const;
+   bool build_rewritten_vec4_sources(AluInstr *parents[4],
+                                     PRegister new_src[4],
+                                     int new_chan[4],
+                                     int& new_sel,
+                                     bool& is_ssa);
+   bool apply_rewritten_vec4_sources(RegisterVec4& value,
+                                     Instr *instr,
+                                     AluInstr *parents[4],
+                                     PRegister new_src[4],
+                                     int new_chan[4],
+                                     int new_sel,
+                                     bool is_ssa);
+   void log_copy_prop_visit_begin(const AluInstr& instr) const;
+   void log_copy_prop_visit_end(const AluInstr& instr) const;
+   bool can_propagate_dest_to_use(const AluInstr& move_instr,
+                                  PRegister dest,
+                                  Instr *use) const;
+   bool can_propagate_src_to_use(const AluInstr& move_instr,
+                                 PVirtualValue src,
+                                 Instr *use,
+                                 bool& move_addr_use) const;
+   bool try_propagate_alu_source(AluInstr *move_instr,
+                                 Instr *use,
+                                 PRegister dest,
+                                 PVirtualValue src,
+                                 bool move_addr_use);
    bool assigned_register_direct(PRegister reg);
 
    ValueFactory& value_factory;
@@ -289,50 +299,33 @@ public:
    void visit(LDSReadInstr *instr) override { (void)instr; };
    void visit(RatInstr *instr) override { (void)instr; };
 
+   void log_back_copy_prop_visit_begin(const AluInstr& instr) const;
+   bool can_propagate_back_dest(AluInstr *instr,
+                                PRegister& src_reg,
+                                PRegister& dest) const;
+   bool try_propagate_back_dest(AluInstr *instr,
+                                PRegister src_reg,
+                                PRegister dest);
+
    bool progress;
 };
 
 bool
 copy_propagation_fwd(Shader& shader)
 {
-   auto& root = shader.func();
    CopyPropFwdVisitor copy_prop(shader.value_factory());
-
-   do {
-      copy_prop.progress = false;
-      for (auto b : root)
-         b->accept(copy_prop);
-   } while (copy_prop.progress);
-
-   sfn_log << SfnLog::opt << "Shader after Copy Prop forward\n";
-   if (sfn_log.has_debug_flag(SfnLog::opt)) {
-      std::stringstream ss;
-      shader.print(ss);
-      sfn_log << ss.str() << "\n\n";
-   }
-
-   return copy_prop.progress;
+   return run_visitor_to_fixpoint(shader,
+                                  copy_prop,
+                                  "Shader after Copy Prop forward\n");
 }
 
 bool
 copy_propagation_backward(Shader& shader)
 {
    CopyPropBackVisitor copy_prop;
-
-   do {
-      copy_prop.progress = false;
-      for (auto b : shader.func())
-         b->accept(copy_prop);
-   } while (copy_prop.progress);
-
-   sfn_log << SfnLog::opt << "Shader after Copy Prop backwards\n";
-   if (sfn_log.has_debug_flag(SfnLog::opt)) {
-      std::stringstream ss;
-      shader.print(ss);
-      sfn_log << ss.str() << "\n\n";
-   }
-
-   return copy_prop.progress;
+   return run_visitor_to_fixpoint(shader,
+                                  copy_prop,
+                                  "Shader after Copy Prop backwards\n");
 }
 
 CopyPropFwdVisitor::CopyPropFwdVisitor(ValueFactory& vf):
@@ -344,14 +337,7 @@ CopyPropFwdVisitor::CopyPropFwdVisitor(ValueFactory& vf):
 void
 CopyPropFwdVisitor::visit(AluInstr *instr)
 {
-   sfn_log << SfnLog::opt << "CopyPropFwdVisitor:[" << instr->block_id() << ":"
-           << instr->index() << "] " << *instr << " dset=" << instr->dest() << " ";
-
-   if (instr->dest()) {
-      sfn_log << SfnLog::opt << "has uses; " << instr->dest()->uses().size();
-   }
-
-   sfn_log << SfnLog::opt << "\n";
+   log_copy_prop_visit_begin(*instr);
 
    if (!instr->can_propagate_src()) {
       return;
@@ -360,50 +346,156 @@ CopyPropFwdVisitor::visit(AluInstr *instr)
    auto src = instr->psrc(0);
    auto dest = instr->dest();
 
+   /* Don't propagate an indirect load to more than one
+    * instruction, because we may have to split the address loads
+    * creating more instructions */
+   if (dest->uses().size() > 1) {
+      auto [addr, is_for_dest, index] = instr->indirect_addr();
+      if (addr && !is_for_dest)
+         return;
+   }
+
+
    auto ii = dest->uses().begin();
    auto ie = dest->uses().end();
 
-   while(ii != ie) {
-      auto i = *ii;
+   /** libc++ seems to invalidate the end iterator too if a std::set is
+    *  made empty by an erase operation,
+    *  https://gitlab.freedesktop.org/mesa/mesa/-/issues/7931
+    */
+   while(ii != ie && !dest->uses().empty()) {
+      auto use = *ii;
+
       ++ii;
-      /* SSA can always be propagated, registers only in the same block
-       * and only if they are assigned in the same block */
-      bool can_propagate = dest->has_flag(Register::ssa);
 
-      if (!can_propagate) {
+      bool move_addr_use = false;
 
-         /* Register can propagate if the assigment was in the same
-          * block, and we don't have a second assignment coming later
-          * (e.g. helper invocation evaluation does
-          *
-          * 1: MOV R0.x, -1
-          * 2: FETCH R0.0 VPM
-          * 3: MOV SN.x, R0.x
-          *
-          * Here we can't prpagate the move in 1 to SN.x in 3 */
-         if ((instr->block_id() == i->block_id() && instr->index() < i->index())) {
-            can_propagate = true;
-            if (dest->parents().size() > 1) {
-               for (auto p : dest->parents()) {
-                  if (p->block_id() == i->block_id() && p->index() > instr->index()) {
-                     can_propagate = false;
-                     break;
-                  }
-               }
-            }
-         }
-      }
+      if (!can_propagate_dest_to_use(*instr, dest, use))
+         continue;
 
-      if (can_propagate) {
-         sfn_log << SfnLog::opt << "   Try replace in " << i->block_id() << ":"
-                 << i->index() << *i << "\n";
-         progress |= i->replace_source(dest, src);
-      }
+      if (!can_propagate_src_to_use(*instr, src, use, move_addr_use))
+         continue;
+
+      try_propagate_alu_source(instr, use, dest, src, move_addr_use);
    }
-   if (instr->dest()) {
-      sfn_log << SfnLog::opt << "has uses; " << instr->dest()->uses().size();
-   }
+   log_copy_prop_visit_end(*instr);
+}
+
+void
+CopyPropFwdVisitor::log_copy_prop_visit_begin(const AluInstr& instr) const
+{
+   sfn_log << SfnLog::opt << "CopyPropFwdVisitor:[" << instr.block_id() << ":"
+           << instr.index() << "] " << instr << " dset=" << instr.dest() << " ";
+
+   if (instr.dest())
+      sfn_log << SfnLog::opt << "has uses; " << instr.dest()->uses().size();
+
+   sfn_log << SfnLog::opt << "\n";
+}
+
+void
+CopyPropFwdVisitor::log_copy_prop_visit_end(const AluInstr& instr) const
+{
+   if (instr.dest())
+      sfn_log << SfnLog::opt << "has uses; " << instr.dest()->uses().size();
    sfn_log << SfnLog::opt << "  done\n";
+}
+
+bool
+CopyPropFwdVisitor::can_propagate_dest_to_use(const AluInstr& move_instr,
+                                              PRegister dest,
+                                              Instr *use) const
+{
+   /* SSA can always be propagated, registers only in the same block
+    * and only if they are assigned in the same block. */
+   if (dest->has_flag(Register::ssa))
+      return true;
+
+   /* Register can propagate if the assignment was in the same block, and we
+    * don't have a second assignment coming later.
+    *
+    * 1: MOV R0.x, -1
+    * 2: FETCH R0.0 VPM
+    * 3: MOV SN.x, R0.x
+    *
+    * Here we can't propagate the move in 1 to SN.x in 3. */
+   if (move_instr.block_id() != use->block_id() || move_instr.index() >= use->index())
+      return false;
+
+   if (dest->parents().size() <= 1)
+      return true;
+
+   for (auto parent : dest->parents()) {
+      if (parent->block_id() == use->block_id() && parent->index() > move_instr.index())
+         return false;
+   }
+
+   return true;
+}
+
+bool
+CopyPropFwdVisitor::can_propagate_src_to_use(const AluInstr& move_instr,
+                                             PVirtualValue src,
+                                             Instr *use,
+                                             bool& move_addr_use) const
+{
+   auto src_reg = src->as_register();
+   if (!src_reg)
+      return true;
+
+   if (src_reg->has_flag(Register::ssa))
+      return true;
+
+   if (move_instr.block_id() != use->block_id())
+      return false;
+
+   if (auto addr = src_reg->addr()) {
+      if (addr->as_register() &&
+          !addr->as_register()->has_flag(Register::addr_or_idx) &&
+          use->index() == move_instr.index() + 1) {
+         move_addr_use = true;
+      } else {
+         return false;
+      }
+   }
+
+   for (auto parent : src_reg->parents()) {
+      if (parent->block_id() == move_instr.block_id() &&
+          parent->index() > move_instr.index() &&
+          parent->index() < use->index()) {
+         return false;
+      }
+   }
+
+   return true;
+}
+
+bool
+CopyPropFwdVisitor::try_propagate_alu_source(AluInstr *move_instr,
+                                             Instr *use,
+                                             PRegister dest,
+                                             PVirtualValue src,
+                                             bool move_addr_use)
+{
+   sfn_log << SfnLog::opt << "   Try replace in " << use->block_id() << ":"
+           << use->index() << *use << "\n";
+
+   if (use->as_alu() && use->as_alu()->parent_group()) {
+      bool success = use->as_alu()->parent_group()->replace_source(dest, src);
+      progress |= success;
+      return success;
+   }
+
+   bool success = use->replace_source(dest, src);
+   if (success && move_addr_use) {
+      for (auto required : move_instr->required_instr()) {
+         std::cerr << "add " << *required << " to " << *use << "\n";
+         use->add_required_instr(required);
+      }
+   }
+   progress |= success;
+
+   return success;
 }
 
 void
@@ -445,148 +537,199 @@ static bool register_chan_is_pinned(Pin pin)
 void
 CopyPropFwdVisitor::propagate_to(RegisterVec4& value, Instr *instr)
 {
-   /* Collect parent instructions - only ALU move without modifiers
-    * and without indirect access are allowed. */
    AluInstr *parents[4] = {nullptr};
-   bool have_candidates = false;
-   for (int i = 0; i < 4; ++i) {
-      if (value[i]->chan() < 4 && value[i]->has_flag(Register::ssa)) {
-         /*  We have a pre-define value, so we can't propagate a copy */
-         if (value[i]->parents().empty())
-            return;
-
-         assert(value[i]->parents().size() == 1);
-         parents[i] = (*value[i]->parents().begin())->as_alu();
-
-			/* Parent op is not an ALU instruction, so we can't
-				copy-propagate */
-			if (!parents[i])
-				return; 
-
-         if ((parents[i]->opcode() != op1_mov) ||
-             parents[i]->has_alu_flag(alu_src0_neg) ||
-             parents[i]->has_alu_flag(alu_src0_abs) ||
-             parents[i]->has_alu_flag(alu_dst_clamp) ||
-             parents[i]->has_alu_flag(alu_src0_rel) ||
-             std::get<0>(parents[i]->indirect_addr()))
-            return;
-         have_candidates = true;
-      }
-   }
-
-   if (!have_candidates)
+   if (!collect_vec4_copy_candidates(value, parents))
       return;
-
-   /* Collect the new source registers. We may have to move all registers
-    * to a new virtual sel index. */
 
    PRegister new_src[4] = {0};
    int new_chan[4] = {0,0,0,0};
-
-   uint8_t used_chan_mask = 0;
    int new_sel = -1;
-   bool all_sel_can_change = true;
-
    bool is_ssa = true;
 
-   for (int i = 0; i < 4; ++i) {
+   if (!build_rewritten_vec4_sources(parents, new_src, new_chan, new_sel, is_ssa))
+      return;
 
-      /* No parent means we either ignore the channel or insert 0 or 1.*/
-      if (!parents[i])
+   if (apply_rewritten_vec4_sources(value, instr, parents, new_src, new_chan, new_sel, is_ssa))
+      value.validate();
+}
+
+bool
+CopyPropFwdVisitor::collect_vec4_copy_candidates(const RegisterVec4& value,
+                                                 AluInstr *parents[4]) const
+{
+   bool have_candidates = false;
+
+   for (int chan = 0; chan < 4; ++chan) {
+      auto value_comp = value[chan];
+      if (value_comp->chan() >= 4 || !value_comp->has_flag(Register::ssa))
          continue;
 
-      unsigned allowed_mask = 0xf & ~used_chan_mask;
+      /* We have a pre-defined value, so we can't propagate a copy. */
+      if (value_comp->parents().empty())
+         return false;
 
-      auto src = parents[i]->src(0).as_register();
-      if (!src)
-         return;
+      if (value_comp->uses().size() > 1)
+         return false;
+
+      assert(value_comp->parents().size() == 1);
+      auto parent = (*value_comp->parents().begin())->as_alu();
+
+      /* Parent op is not an ALU instruction, so we can't copy-propagate. */
+      if (!parent)
+         return false;
+
+      if (parent->opcode() != op1_mov ||
+          parent->has_source_mod(0, AluInstr::mod_neg) ||
+          parent->has_source_mod(0, AluInstr::mod_abs) ||
+          parent->has_alu_flag(alu_dst_clamp) ||
+          parent->has_alu_flag(alu_src0_rel)) {
+         return false;
+      }
+
+      auto [addr, dummy0, index_reg_dummy] = parent->indirect_addr();
+
+      /* Don't accept moves with indirect reads, because they are not
+       * supported with instructions that use vec4 values. */
+      if (addr || index_reg_dummy)
+         return false;
+
+      parents[chan] = parent;
+      have_candidates = true;
+   }
+
+   return have_candidates;
+}
+
+bool
+CopyPropFwdVisitor::build_rewritten_vec4_sources(AluInstr *parents[4],
+                                                 PRegister new_src[4],
+                                                 int new_chan[4],
+                                                 int& new_sel,
+                                                 bool& is_ssa)
+{
+   uint8_t used_chan_mask = 0;
+   bool all_sel_can_change = true;
+
+   for (int chan = 0; chan < 4; ++chan) {
+      /* No parent means we either ignore the channel or insert 0 or 1. */
+      auto parent = parents[chan];
+      if (!parent)
+         continue;
+
+      unsigned allowed_chan_mask = 0xf & ~used_chan_mask;
+
+      auto source_reg = parent->src(0).as_register();
+      if (!source_reg)
+         return false;
 
       /* Don't accept an array element for now, we would need extra checking
-       * that the value is not overwritten by an indirect access */
-      if (src->pin() == pin_array)
-         return;
+       * that the value is not overwritten by an indirect access. */
+      if (source_reg->pin() == pin_array)
+         return false;
 
-      /* Is this check still needed ? */
-      if (!src->has_flag(Register::ssa) &&
-          !assigned_register_direct(src)) {
-         return;
-      }
+      const bool source_is_ssa = source_reg->has_flag(Register::ssa);
+      if (!source_is_ssa && !assigned_register_direct(source_reg))
+         return false;
 
-      /* If the channel chan't switch we have to update the channel mask
+      const bool source_sel_can_change = register_sel_can_change(source_reg->pin());
+
+      /* If the channel can't switch we have to update the channel mask.
        * TODO: assign channel pinned registers first might give more
-       *  opportunities for this optimization */
-      if (register_chan_is_pinned(src->pin()))
-         allowed_mask = 1 << src->chan();
+       * opportunities for this optimization. */
+      if (register_chan_is_pinned(source_reg->pin()))
+         allowed_chan_mask = 1 << source_reg->chan();
 
-      /* Update the possible channel mask based on the sourcee's parent
-       * instruction(s) */
-      for (auto p : src->parents()) {
+      /* Update the possible channel mask based on the source's parent
+       * instruction(s). */
+      for (auto p : source_reg->parents()) {
          auto alu = p->as_alu();
          if (alu)
-            allowed_mask &= alu->allowed_dest_chan_mask();
+            allowed_chan_mask &= alu->allowed_dest_chan_mask();
       }
 
-      if (!allowed_mask)
-         return;
+      for (auto u : source_reg->uses()) {
+         auto alu = u->as_alu();
+         if (alu)
+            allowed_chan_mask &= alu->allowed_src_chan_mask();
+      }
 
-      /* Prefer keeping the channel, but if that's not possible
-       * i.e. if the sel has to change, then  pick the next free channel
-       * (see below) */
-      new_chan[i] = src->chan();
+      if (!allowed_chan_mask)
+         return false;
+
+      /* Prefer keeping the channel, but if that's not possible (i.e. if the
+       * sel has to change), then pick the next free channel. */
+      new_chan[chan] = source_reg->chan();
 
       if (new_sel < 0) {
-         new_sel = src->sel();
-         is_ssa = src->has_flag(Register::ssa);
-      } else if (new_sel != src->sel()) {
-         /* If we have to assign a new register sel index do so only
-          * if all already assigned source can get a new register index,
-          * and all registers are either SSA or registers.
-          * TODO: check whether this last restriction is required */
+         new_sel = source_reg->sel();
+         is_ssa = source_is_ssa;
+      } else if (new_sel != source_reg->sel()) {
+         /* If we have to assign a new register sel index do so only if all
+          * already assigned sources can get a new register index, and all
+          * registers are either SSA or registers.
+          * TODO: check whether this last restriction is required. */
          if (all_sel_can_change &&
-             register_sel_can_change(src->pin()) &&
-             (is_ssa == src->has_flag(Register::ssa))) {
+             source_sel_can_change &&
+             (is_ssa == source_is_ssa)) {
             new_sel = value_factory.new_register_index();
-            new_chan[i] = u_bit_scan(&allowed_mask);
-         } else /* Sources can't be combined to a vec4 so bail out */
-            return;
+            new_chan[chan] = u_bit_scan(&allowed_chan_mask);
+         } else {
+            return false;
+         }
       }
 
-      new_src[i] = src;
-      used_chan_mask |= 1 << new_chan[i];
-      if (!register_sel_can_change(src->pin()))
+      new_src[chan] = source_reg;
+      used_chan_mask |= 1 << new_chan[chan];
+      if (!source_sel_can_change)
          all_sel_can_change = false;
    }
 
-   /* Apply the changes to the vec4 source */
+   return true;
+}
+
+bool
+CopyPropFwdVisitor::apply_rewritten_vec4_sources(RegisterVec4& value,
+                                                 Instr *instr,
+                                                 AluInstr *parents[4],
+                                                 PRegister new_src[4],
+                                                 int new_chan[4],
+                                                 int new_sel,
+                                                 bool is_ssa)
+{
+   bool local_progress = false;
+
    value.del_use(instr);
-   for (int i = 0; i < 4; ++i) {
-      if (parents[i]) {
-         new_src[i]->set_sel(new_sel);
-         if (is_ssa)
-            new_src[i]->set_flag(Register::ssa);
-         new_src[i]->set_chan(new_chan[i]);
+   for (int chan = 0; chan < 4; ++chan) {
+      if (!parents[chan])
+         continue;
 
-         value.set_value(i, new_src[i]);
+      auto rewritten_reg = new_src[chan];
+      rewritten_reg->set_sel(new_sel);
+      if (is_ssa)
+         rewritten_reg->set_flag(Register::ssa);
+      rewritten_reg->set_chan(new_chan[chan]);
 
-         if (new_src[i]->pin() != pin_fully) {
-            if (new_src[i]->pin() == pin_chan)
-               new_src[i]->set_pin(pin_chgr);
-            else
-               new_src[i]->set_pin(pin_group);
-         }
-         progress |= true;
+      value.set_value(chan, rewritten_reg);
+
+      if (rewritten_reg->pin() != pin_fully && rewritten_reg->pin() != pin_chgr) {
+         if (rewritten_reg->pin() == pin_chan)
+            rewritten_reg->set_pin(pin_chgr);
+         else
+            rewritten_reg->set_pin(pin_group);
       }
+      local_progress = true;
    }
    value.add_use(instr);
-   if (progress)
-      value.validate();
+   progress |= local_progress;
+
+   return local_progress;
 }
 
 bool CopyPropFwdVisitor::assigned_register_direct(PRegister reg)
 {
    for (auto p: reg->parents()) {
       if (p->as_alu())  {
-          auto [addr, is_regoffs, is_index] = p->as_alu()->indirect_addr();
+          auto [addr, dummy, index_reg] = p->as_alu()->indirect_addr();
           if (addr)
              return false;
       }
@@ -615,49 +758,76 @@ CopyPropBackVisitor::CopyPropBackVisitor():
 void
 CopyPropBackVisitor::visit(AluInstr *instr)
 {
-   bool local_progress = false;
+   log_back_copy_prop_visit_begin(*instr);
 
-   sfn_log << SfnLog::opt << "CopyPropBackVisitor:[" << instr->block_id() << ":"
-           << instr->index() << "] " << *instr << "\n";
-
-   if (!instr->can_propagate_dest()) {
-      return;
-   }
-
-   auto src_reg = instr->psrc(0)->as_register();
-   if (!src_reg) {
-      return;
-   }
-
-   if (src_reg->uses().size() > 1)
+   PRegister src_reg;
+   PRegister dest;
+   if (!can_propagate_back_dest(instr, src_reg, dest))
       return;
 
-   auto dest = instr->dest();
-   if (!dest || !instr->has_alu_flag(alu_write)) {
-      return;
-   }
-
-   if (!dest->has_flag(Register::ssa) && dest->parents().size() > 1)
-      return;
-
-   for (auto& i : src_reg->parents()) {
-      sfn_log << SfnLog::opt << "Try replace dest in " << i->block_id() << ":"
-              << i->index() << *i << "\n";
-
-      if (i->replace_dest(dest, instr)) {
-         dest->del_parent(instr);
-         dest->add_parent(i);
-         for (auto d : instr->dependend_instr()) {
-            d->add_required_instr(i);
-         }
-         local_progress = true;
-      }
-   }
+   bool local_progress = try_propagate_back_dest(instr, src_reg, dest);
 
    if (local_progress)
       instr->set_dead();
 
    progress |= local_progress;
+}
+
+void
+CopyPropBackVisitor::log_back_copy_prop_visit_begin(const AluInstr& instr) const
+{
+   sfn_log << SfnLog::opt << "CopyPropBackVisitor:[" << instr.block_id() << ":"
+           << instr.index() << "] " << instr << "\n";
+}
+
+bool
+CopyPropBackVisitor::can_propagate_back_dest(AluInstr *instr,
+                                             PRegister& src_reg,
+                                             PRegister& dest) const
+{
+   if (!instr->can_propagate_dest())
+      return false;
+
+   src_reg = instr->psrc(0)->as_register();
+   if (!src_reg)
+      return false;
+
+   if (src_reg->uses().size() > 1)
+      return false;
+
+   dest = instr->dest();
+   if (!dest || !instr->has_alu_flag(alu_write))
+      return false;
+
+   if (!dest->has_flag(Register::ssa) && dest->parents().size() > 1)
+      return false;
+
+   return true;
+}
+
+bool
+CopyPropBackVisitor::try_propagate_back_dest(AluInstr *instr,
+                                             PRegister src_reg,
+                                             PRegister dest)
+{
+   bool local_progress = false;
+
+   for (auto& parent : src_reg->parents()) {
+      sfn_log << SfnLog::opt << "Try replace dest in " << parent->block_id() << ":"
+              << parent->index() << *parent << "\n";
+
+      if (!parent->replace_dest(dest, instr))
+         continue;
+
+      dest->del_parent(instr);
+      dest->add_parent(parent);
+      for (auto dep : instr->dependend_instr()) {
+         dep->add_required_instr(parent);
+      }
+      local_progress = true;
+   }
+
+   return local_progress;
 }
 
 void
@@ -719,6 +889,81 @@ public:
    bool progress;
 };
 
+class HasVecDestVisitor : public ConstInstrVisitor {
+public:
+   HasVecDestVisitor():
+       has_group_dest(false)
+   {
+   }
+
+   void visit(const AluInstr& instr) override { (void)instr; }
+   void visit(const AluGroup& instr) override { (void)instr; }
+   void visit(const TexInstr& instr) override  {  (void)instr; has_group_dest = true; };
+   void visit(const ExportInstr& instr) override { (void)instr; }
+   void visit(const FetchInstr& instr) override  {  (void)instr; has_group_dest = true; };
+   void visit(const Block& instr) override { (void)instr; };
+   void visit(const ControlFlowInstr& instr) override{ (void)instr; }
+   void visit(const IfInstr& instr) override{ (void)instr; }
+   void visit(const ScratchIOInstr& instr) override  { (void)instr; };
+   void visit(const StreamOutInstr& instr) override { (void)instr; }
+   void visit(const MemRingOutInstr& instr) override { (void)instr; }
+   void visit(const EmitVertexInstr& instr) override { (void)instr; }
+   void visit(const GDSInstr& instr) override { (void)instr; }
+   void visit(const WriteTFInstr& instr) override { (void)instr; };
+   void visit(const LDSAtomicInstr& instr) override { (void)instr; };
+   void visit(const LDSReadInstr& instr) override { (void)instr; };
+   void visit(const RatInstr& instr) override {  (void)instr; };
+
+   bool has_group_dest;
+};
+
+class HasVecSrcVisitor : public ConstInstrVisitor {
+public:
+   HasVecSrcVisitor():
+       has_group_src(false)
+   {
+   }
+
+   void visit(UNUSED const AluInstr& instr) override { }
+   void visit(UNUSED const AluGroup& instr) override { }
+   void visit(UNUSED const FetchInstr& instr) override  { };
+   void visit(UNUSED const Block& instr) override { };
+   void visit(UNUSED const ControlFlowInstr& instr) override{ }
+   void visit(UNUSED const IfInstr& instr) override{ }
+   void visit(UNUSED const LDSAtomicInstr& instr) override { };
+   void visit(UNUSED const LDSReadInstr& instr) override { };
+
+   void visit(const TexInstr& instr) override { check(instr.src()); }
+   void visit(const ExportInstr& instr) override { check(instr.value()); }
+   void visit(const GDSInstr& instr) override { check(instr.src()); }
+
+   // No swizzling supported, so we want to keep the register group
+   void visit(UNUSED const ScratchIOInstr& instr) override  { has_group_src = true; };
+   void visit(UNUSED const StreamOutInstr& instr) override { has_group_src = true; }
+   void visit(UNUSED const MemRingOutInstr& instr) override { has_group_src = true; }
+   void visit(UNUSED const RatInstr& instr) override { has_group_src = true; };
+
+   void visit(UNUSED const EmitVertexInstr& instr) override { }
+
+   // We always emit at least two values
+   void visit(UNUSED const WriteTFInstr& instr) override { has_group_src = true; };
+
+
+   void check(const RegisterVec4& value);
+
+   bool has_group_src;
+};
+
+void HasVecSrcVisitor::check(const RegisterVec4& value)
+{
+   int nval = 0;
+   for (int i = 0; i < 4 && nval < 2; ++i) {
+      if (value[i]->chan() < 4)
+         ++nval;
+   }
+   has_group_src = nval > 1;
+}
+
 bool
 simplify_source_vectors(Shader& sh)
 {
@@ -744,6 +989,23 @@ SimplifySourceVecVisitor::visit(TexInstr *instr)
       if (nvals == 1) {
          for (int i = 0; i < 4; ++i)
             if (src[i]->chan() < 4) {
+               HasVecDestVisitor check_dests;
+               for (auto p : src[i]->parents()) {
+                  p->accept(check_dests);
+                  if (check_dests.has_group_dest)
+                     break;
+               }
+
+               HasVecSrcVisitor check_src;
+               for (auto p : src[i]->uses()) {
+                  p->accept(check_src);
+                  if (check_src.has_group_src)
+                     break;
+               }
+
+               if (check_dests.has_group_dest || check_src.has_group_src)
+                  break;
+
                if (src[i]->pin() == pin_group)
                   src[i]->set_pin(pin_free);
                else if (src[i]->pin() == pin_chgr)
@@ -833,7 +1095,8 @@ ReplaceConstSource::visit(AluInstr *alu)
    if (alu->opcode() != op1_mov)
       return;
 
-   if (alu->has_alu_flag(alu_src0_abs) || alu->has_alu_flag(alu_src0_neg))
+   if (alu->has_source_mod(0, AluInstr::mod_abs) ||
+       alu->has_source_mod(0, AluInstr::mod_neg))
       return;
 
    auto src = alu->psrc(0);

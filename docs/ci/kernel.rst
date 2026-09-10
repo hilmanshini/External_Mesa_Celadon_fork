@@ -18,7 +18,7 @@ Linux mainline, that is why Mesa has its own kernel version which should be used
 as the base for newer kernels.
 
 So, one should base the kernel uprev from the last tag used in the Mesa CI,
-please refer to ``.gitlab-ci/container/gitlab-ci.yml`` ``KERNEL_URL`` variable.
+please refer to ``.gitlab-ci/image-tags.yml`` ``KERNEL_TAG`` variable.
 Every tag has a standard naming: ``vX.YZ-for-mesa-ci-<commit_short_SHA>``, which
 can be created via the command:
 
@@ -27,8 +27,7 @@ can be created via the command:
 Building Kernel
 ---------------
 
-When Mesa CI generates a new rootfs image, the Linux Kernel is built based on
-the script located at ``.gitlab-ci/container/build-kernel.sh``.
+The kernel files are loaded from the artifacts uploaded to S3 from gfx-ci/linux.
 
 Updating Kconfigs
 ^^^^^^^^^^^^^^^^^
@@ -41,29 +40,24 @@ defconfig* made via ``merge_config.sh`` script located at Linux Kernel tree.
 Kconfigs location
 """""""""""""""""
 
-+------------+--------------------------------------------+-------------------------------------+
-| Platform   | Mesa CI Kconfig location                   | Linux tree defconfig                |
-+============+============================================+=====================================+
-| arm        | .gitlab-ci/container/arm.config            | arch/arm/configs/multi_v7_defconfig |
-+------------+--------------------------------------------+-------------------------------------+
-| arm64      | .gitlab-ci/container/arm64.config          | arch/arm64/configs/defconfig        |
-+------------+--------------------------------------------+-------------------------------------+
-| x86-64     | .gitlab-ci/container/x86_64.config         | arch/x86/configs/x86_64_defconfig   |
-+------------+--------------------------------------------+-------------------------------------+
++------------+------------------------------------------------------+-------------------------------------+
+| Platform   | Mesa CI Kconfig location                             | Linux tree defconfig                |
++============+======================================================+=====================================+
+| arm        | kernel/configs/mesa3d-ci_arm.config\@gfx-ci/linux    | arch/arm/configs/multi_v7_defconfig |
++------------+------------------------------------------------------+-------------------------------------+
+| arm64      | kernel/configs/mesa3d-ci_arm64.config\@gfx-ci/linux  | arch/arm64/configs/defconfig        |
++------------+------------------------------------------------------+-------------------------------------+
+| x86-64     | kernel/configs/mesa3d-ci_x86_64.config\@gfx-ci/linux | arch/x86/configs/x86_64_defconfig   |
++------------+------------------------------------------------------+-------------------------------------+
 
 Updating image tags
 -------------------
 
-Every kernel uprev should update 3 image tags, located at two files.
+Every kernel uprev should update the following tag:
 
-:code:`.gitlab-ci/container/gitlab-ci.yml` tag
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-- **KERNEL_URL** for the location of the new kernel
-
-:code:`.gitlab-ci/image-tags.yml` tags
+:code:`.gitlab-ci/image-tags.yml` tag
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-- **KERNEL_ROOTFS_TAG** to rebuild rootfs with the new kernel
-- **DEBIAN_X86_TEST_GL_TAG** to ensure that the new rootfs is being used by the GitLab x86 jobs
+- **KERNEL_TAG** to use the new kernel
 
 Development routine
 -------------------
@@ -119,3 +113,24 @@ Sometimes a job may turn to red for reasons unrelated to the kernel update, e.g.
 LAVA ``tftp`` timeout, problems with the freedesktop servers etc.
 So it is important to see the reason why the job turned red, and retry it if an
 infrastructure error has happened.
+
+Try your own kernel out
+^^^^^^^^^^^^^^^^^^^^^^^
+
+Trying out your own kernel is pretty straightforward. First, take the tree you
+want to test, and cherry-pick the closest -for-mesa-ci branch from gfx-ci/linux.
+For example, if you're based against 7.1 and the newest gfx-ci kernel is 6.19,
+you'll want to cherry-pick every commit in the v6.19-for-mesa-ci branch that
+isn't in the stable kernels. These commits are a mix of adding CI pipeline
+support, and fixups required to run on our devices. Push this to your fork on
+gitlab.freedesktop.org. Push a unique tag as well, e.g. fix-gpu-reset-abc1234.
+The tag is important so that you can iterate without getting defeated by
+caching.
+
+Once your kernel is built (i.e. the pipeline in your branch has completed),
+change ``KERNEL_TAG`` and ``KERNEL_REPO`` in Mesa's
+``.gitlab-ci/image-tags.yml`` to refer to this, e.g.
+``KERNEL_TAG: "fix-gpu-reset-abc1234"`` and
+``KERNEL_REPO: "hopeless-optimist/linux"``.
+
+Push this Mesa branch, and run your pipeline as usual.

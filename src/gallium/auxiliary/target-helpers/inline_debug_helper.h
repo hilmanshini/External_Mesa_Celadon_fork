@@ -2,7 +2,7 @@
 #ifndef INLINE_DEBUG_HELPER_H
 #define INLINE_DEBUG_HELPER_H
 
-#include "pipe/p_compiler.h"
+#include "util/compiler.h"
 #include "util/u_debug.h"
 #include "util/u_tests.h"
 
@@ -15,6 +15,8 @@
 #include "driver_trace/tr_public.h"
 #include "driver_noop/noop_public.h"
 
+#include "pipe/p_screen.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -26,13 +28,14 @@ extern "C" {
 static inline struct pipe_screen *
 debug_screen_wrap(struct pipe_screen *screen)
 {
+#if HAVE_GFX_COMPUTE
    screen = ddebug_screen_create(screen);
    screen = trace_screen_create(screen);
    screen = noop_screen_create(screen);
 
-   if (debug_get_bool_option("GALLIUM_TESTS", FALSE))
+   if (debug_get_bool_option("GALLIUM_TESTS", false))
       util_run_tests(screen);
-
+#endif
    return screen;
 }
 

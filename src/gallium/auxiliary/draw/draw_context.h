@@ -39,6 +39,9 @@
 
 
 #include "pipe/p_state.h"
+#include "pipe/p_shader_tokens.h"
+#include "util/mesa-blake3.h"
+#include "nir.h"
 
 struct pipe_context;
 struct draw_context;
@@ -47,6 +50,7 @@ struct draw_vertex_shader;
 struct draw_geometry_shader;
 struct draw_tess_ctrl_shader;
 struct draw_tess_eval_shader;
+struct draw_mesh_shader;
 struct draw_fragment_shader;
 struct tgsi_sampler;
 struct tgsi_image;
@@ -68,9 +72,29 @@ struct draw_so_target {
 };
 
 
+struct draw_vertex_info {
+   struct vertex_header *verts;
+   unsigned vertex_size;
+   unsigned stride;
+   unsigned count;
+};
+
+struct draw_prim_info {
+   bool linear;
+   unsigned start;
+
+   const uint16_t *elts;
+   unsigned count;
+
+   enum mesa_prim prim;
+   unsigned flags;
+   unsigned *primitive_lengths;
+   unsigned primitive_count;
+};
+
 struct draw_context *draw_create(struct pipe_context *pipe);
 
-#ifdef DRAW_LLVM_AVAILABLE
+#if DRAW_LLVM_AVAILABLE
 struct draw_context *draw_create_with_llvm_context(struct pipe_context *pipe,
                                                    void *context);
 #endif
@@ -113,26 +137,27 @@ void draw_set_rasterize_stage(struct draw_context *draw,
 
 void draw_wide_point_threshold(struct draw_context *draw, float threshold);
 
-void draw_wide_point_sprites(struct draw_context *draw, boolean draw_sprite);
+void draw_wide_point_sprites(struct draw_context *draw, bool draw_sprite);
 
 void draw_wide_line_threshold(struct draw_context *draw, float threshold);
 
-void draw_enable_line_stipple(struct draw_context *draw, boolean enable);
+void draw_enable_line_stipple(struct draw_context *draw, bool enable);
 
-void draw_enable_point_sprites(struct draw_context *draw, boolean enable);
+void draw_enable_point_sprites(struct draw_context *draw, bool enable);
 
 void draw_set_zs_format(struct draw_context *draw, enum pipe_format format);
 
 /* for TGSI constants are 4 * sizeof(float), but for NIR they need to be sizeof(float); */
 void draw_set_constant_buffer_stride(struct draw_context *draw, unsigned num_bytes);
 
-boolean
+bool
 draw_install_aaline_stage(struct draw_context *draw, struct pipe_context *pipe);
 
-boolean
-draw_install_aapoint_stage(struct draw_context *draw, struct pipe_context *pipe);
+bool
+draw_install_aapoint_stage(struct draw_context *draw, struct pipe_context *pipe,
+                           nir_alu_type bool_type);
 
-boolean
+bool
 draw_install_pstipple_stage(struct draw_context *draw, struct pipe_context *pipe);
 
 
@@ -144,61 +169,62 @@ draw_prepare_shader_outputs(struct draw_context *draw);
 
 int
 draw_find_shader_output(const struct draw_context *draw,
-                        uint semantic_name, uint semantic_index);
+                        enum tgsi_semantic semantic_name,
+                        unsigned semantic_index);
 
-boolean
+bool
 draw_will_inject_frontface(const struct draw_context *draw);
 
-uint
+unsigned
 draw_num_shader_outputs(const struct draw_context *draw);
 
-uint
+unsigned
 draw_total_vs_outputs(const struct draw_context *draw);
 
-uint
+unsigned
 draw_total_gs_outputs(const struct draw_context *draw);
 
-uint
+unsigned
 draw_total_tcs_outputs(const struct draw_context *draw);
 
-uint
+unsigned
 draw_total_tes_outputs(const struct draw_context *draw);
 
 void
 draw_texture_sampler(struct draw_context *draw,
-                     enum pipe_shader_type shader_type,
+                     mesa_shader_stage shader_type,
                      struct tgsi_sampler *sampler);
 
 void
 draw_image(struct draw_context *draw,
-           enum pipe_shader_type shader_type,
+           mesa_shader_stage shader_type,
            struct tgsi_image *image);
 
 void
 draw_buffer(struct draw_context *draw,
-           enum pipe_shader_type shader_type,
+           mesa_shader_stage shader_type,
            struct tgsi_buffer *buffer);
 
 void
 draw_set_sampler_views(struct draw_context *draw,
-                       enum pipe_shader_type shader_stage,
+                       mesa_shader_stage shader_stage,
                        struct pipe_sampler_view **views,
                        unsigned num);
 void
 draw_set_samplers(struct draw_context *draw,
-                  enum pipe_shader_type shader_stage,
+                  mesa_shader_stage shader_stage,
                   struct pipe_sampler_state **samplers,
                   unsigned num);
 
 void
 draw_set_images(struct draw_context *draw,
-                enum pipe_shader_type shader_stage,
+                mesa_shader_stage shader_stage,
                 struct pipe_image_view *images,
                 unsigned num);
 
 void
 draw_set_mapped_texture(struct draw_context *draw,
-                        enum pipe_shader_type shader_stage,
+                        mesa_shader_stage shader_stage,
                         unsigned sview_idx,
                         uint32_t width, uint32_t height, uint32_t depth,
                         uint32_t first_level, uint32_t last_level,
@@ -211,7 +237,7 @@ draw_set_mapped_texture(struct draw_context *draw,
 
 void
 draw_set_mapped_image(struct draw_context *draw,
-                      enum pipe_shader_type shader_stage,
+                      mesa_shader_stage shader_stage,
                       unsigned idx,
                       uint32_t width, uint32_t height, uint32_t depth,
                       const void *base_ptr,
@@ -280,17 +306,30 @@ void draw_set_tess_state(struct draw_context *draw,
                          const float default_inner_level[2]);
 
 /*
+ * Mesh shader functions
+ */
+struct draw_mesh_shader *
+draw_create_mesh_shader(struct draw_context *draw,
+                        const struct pipe_shader_state *shader);
+void draw_bind_mesh_shader(struct draw_context *draw,
+                           struct draw_mesh_shader *dvs);
+void draw_delete_mesh_shader(struct draw_context *draw,
+                             struct draw_mesh_shader *dvs);
+
+/*
  * Vertex data functions
  */
 
 void draw_set_vertex_buffers(struct draw_context *draw,
-                             unsigned start_slot, unsigned count,
-                             unsigned unbind_num_trailing_slots,
+                             unsigned count,
                              const struct pipe_vertex_buffer *buffers);
 
 void draw_set_vertex_elements(struct draw_context *draw,
                               unsigned count,
                               const struct pipe_vertex_element *elements);
+
+void
+draw_set_viewmask(struct draw_context *draw, uint8_t viewmask);
 
 void draw_set_indexes(struct draw_context *draw,
                       const void *elements, unsigned elem_size,
@@ -302,14 +341,14 @@ void draw_set_mapped_vertex_buffer(struct draw_context *draw,
 
 void
 draw_set_mapped_constant_buffer(struct draw_context *draw,
-                                enum pipe_shader_type shader_type,
+                                mesa_shader_stage shader_type,
                                 unsigned slot,
                                 const void *buffer,
                                 unsigned size);
 
 void
 draw_set_mapped_shader_buffer(struct draw_context *draw,
-                              enum pipe_shader_type shader_type,
+                              mesa_shader_stage shader_type,
                               unsigned slot,
                               const void *buffer,
                               unsigned size);
@@ -332,6 +371,11 @@ void draw_vbo(struct draw_context *draw,
               unsigned num_draws,
               uint8_t patch_vertices);
 
+void
+draw_mesh(struct draw_context *draw,
+          struct draw_vertex_info *vert_info,
+          struct draw_prim_info *prim_info);
+
 
 /*******************************************************************************
  * Driver backend interface
@@ -343,17 +387,17 @@ draw_set_render(struct draw_context *draw,
 
 void
 draw_set_driver_clipping(struct draw_context *draw,
-                         boolean bypass_clip_xy,
-                         boolean bypass_clip_z,
-                         boolean guard_band_xy,
-                         boolean bypass_clip_points);
+                         bool bypass_clip_xy,
+                         bool bypass_clip_z,
+                         bool guard_band_xy,
+                         bool bypass_clip_points_lines);
 
 /*******************************************************************************
  * Draw statistics
  */
 void
 draw_collect_pipeline_statistics(struct draw_context *draw,
-                                 boolean enable);
+                                 bool enable);
 
 void
 draw_collect_primitives_generated(struct draw_context *draw,
@@ -362,19 +406,15 @@ draw_collect_primitives_generated(struct draw_context *draw,
 /*******************************************************************************
  * Draw pipeline
  */
-boolean
+bool
 draw_need_pipeline(const struct draw_context *draw,
                    const struct pipe_rasterizer_state *rasterizer,
-                   enum pipe_prim_type prim);
+                   enum mesa_prim prim);
 
-int
-draw_get_shader_param(enum pipe_shader_type shader, enum pipe_shader_cap param);
+void
+draw_init_shader_caps(struct pipe_shader_caps *caps);
 
-int
-draw_get_shader_param_no_llvm(enum pipe_shader_type shader,
-                              enum pipe_shader_cap param);
-
-boolean
+bool
 draw_get_option_use_llvm(void);
 
 
@@ -383,10 +423,10 @@ draw_set_disk_cache_callbacks(struct draw_context *draw,
                               void *data_cookie,
                               void (*find_shader)(void *cookie,
                                                   struct lp_cached_code *cache,
-                                                  unsigned char ir_sha1_cache_key[20]),
+                                                  unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN]),
                               void (*insert_shader)(void *cookie,
                                                     struct lp_cached_code *cache,
-                                                    unsigned char ir_sha1_cache_key[20]));
+                                                    unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN]));
 
 
 #endif /* DRAW_CONTEXT_H */

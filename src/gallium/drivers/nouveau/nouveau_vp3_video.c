@@ -35,6 +35,21 @@
 #include "util/u_video.h"
 #include "util/format/u_format.h"
 #include "util/u_sampler.h"
+#include "util/u_surface.h"
+
+static void
+nouveau_vp3_video_buffer_resources(struct pipe_video_buffer *buffer,
+                                   struct pipe_resource **resources)
+{
+   struct nouveau_vp3_video_buffer *buf = (struct nouveau_vp3_video_buffer *)buffer;
+   unsigned i;
+
+   assert(buf);
+
+   for (i = 0; i < buf->num_planes; ++i) {
+      resources[i] = buf->resources[i];
+   }
+}
 
 static struct pipe_sampler_view **
 nouveau_vp3_video_buffer_sampler_view_planes(struct pipe_video_buffer *buffer)
@@ -50,7 +65,7 @@ nouveau_vp3_video_buffer_sampler_view_components(struct pipe_video_buffer *buffe
    return buf->sampler_view_components;
 }
 
-static struct pipe_surface **
+static struct pipe_surface *
 nouveau_vp3_video_buffer_surfaces(struct pipe_video_buffer *buffer)
 {
    struct nouveau_vp3_video_buffer *buf = (struct nouveau_vp3_video_buffer *)buffer;
@@ -69,8 +84,6 @@ nouveau_vp3_video_buffer_destroy(struct pipe_video_buffer *buffer)
       pipe_resource_reference(&buf->resources[i], NULL);
       pipe_sampler_view_reference(&buf->sampler_view_planes[i], NULL);
       pipe_sampler_view_reference(&buf->sampler_view_components[i], NULL);
-      pipe_surface_reference(&buf->surfaces[i * 2], NULL);
-      pipe_surface_reference(&buf->surfaces[i * 2 + 1], NULL);
    }
    FREE(buffer);
 }
@@ -101,6 +114,7 @@ nouveau_vp3_video_buffer_create(struct pipe_context *pipe,
    buffer->base.destroy = nouveau_vp3_video_buffer_destroy;
    buffer->base.width = templat->width;
    buffer->base.height = templat->height;
+   buffer->base.get_resources = nouveau_vp3_video_buffer_resources;
    buffer->base.get_sampler_view_planes = nouveau_vp3_video_buffer_sampler_view_planes;
    buffer->base.get_sampler_view_components = nouveau_vp3_video_buffer_sampler_view_components;
    buffer->base.get_surfaces = nouveau_vp3_video_buffer_surfaces;
@@ -152,16 +166,12 @@ nouveau_vp3_video_buffer_create(struct pipe_context *pipe,
 
    memset(&surf_templ, 0, sizeof(surf_templ));
    for (j = 0; j < buffer->num_planes; ++j) {
-      surf_templ.format = buffer->resources[j]->format;
-      surf_templ.u.tex.first_layer = surf_templ.u.tex.last_layer = 0;
-      buffer->surfaces[j * 2] = pipe->create_surface(pipe, buffer->resources[j], &surf_templ);
-      if (!buffer->surfaces[j * 2])
-         goto error;
+      u_surface_default_template(&surf_templ, buffer->resources[j]);
+      surf_templ.first_layer = surf_templ.last_layer = 0;
+      buffer->surfaces[j * 2] = surf_templ;
 
-      surf_templ.u.tex.first_layer = surf_templ.u.tex.last_layer = 1;
-      buffer->surfaces[j * 2 + 1] = pipe->create_surface(pipe, buffer->resources[j], &surf_templ);
-      if (!buffer->surfaces[j * 2 + 1])
-         goto error;
+      surf_templ.first_layer = surf_templ.last_layer = 1;
+      buffer->surfaces[j * 2 + 1] = surf_templ;
    }
 
    return &buffer->base;
@@ -183,11 +193,12 @@ nouveau_vp3_decoder_begin_frame(struct pipe_video_codec *decoder,
 {
 }
 
-static void
+static int
 nouveau_vp3_decoder_end_frame(struct pipe_video_codec *decoder,
                               struct pipe_video_buffer *target,
                               struct pipe_picture_desc *picture)
 {
+   return 0;
 }
 
 static void
@@ -260,10 +271,6 @@ static void vp4_getpath(enum pipe_video_profile profile, char *path)
          sprintf(path, "/lib/firmware/nouveau/vuc-mpeg12-0");
          break;
       }
-      case PIPE_VIDEO_FORMAT_MPEG4: {
-         sprintf(path, "/lib/firmware/nouveau/vuc-mpeg4-0");
-         break;
-      }
       case PIPE_VIDEO_FORMAT_VC1: {
          sprintf(path, "/lib/firmware/nouveau/vuc-vc1-0");
          break;
@@ -331,11 +338,6 @@ nouveau_vp3_load_firmware(struct nouveau_vp3_decoder *dec,
          dec->fw_sizes = (0x2e0<<16) | (r - 0x2e0);
          break;
       }
-      case PIPE_VIDEO_FORMAT_MPEG4: {
-         assert((r & 0xff) == 0xe0);
-         dec->fw_sizes = (0x2e0<<16) | (r - 0x2e0);
-         break;
-      }
       case PIPE_VIDEO_FORMAT_VC1: {
          assert((r & 0xff) == 0xac);
          dec->fw_sizes = (0x3ac<<16) | (r - 0x3ac);
@@ -379,7 +381,7 @@ firmware_present(struct pipe_screen *pscreen, enum pipe_video_profile profile)
       struct nouveau_object *channel = NULL, *bsp = NULL;
       struct nv04_fifo nv04_data = {.vram = 0xbeef0201, .gart = 0xbeef0202};
       struct nvc0_fifo nvc0_args = {};
-      struct nve0_fifo nve0_args = {.engine = NVE0_FIFO_ENGINE_BSP};
+      struct nve0_fifo nve0_args = {.engine = NOUVEAU_FIFO_ENGINE_BSP};
       void *data = NULL;
       int size;
 
@@ -445,20 +447,14 @@ nouveau_vp3_screen_get_video_param(struct pipe_screen *pscreen,
    enum pipe_video_format codec = u_reduce_video_profile(profile);
    switch (param) {
    case PIPE_VIDEO_CAP_SUPPORTED:
-      /* VP3 does not support MPEG4, VP4+ do. */
       return entrypoint == PIPE_VIDEO_ENTRYPOINT_BITSTREAM &&
          profile >= PIPE_VIDEO_PROFILE_MPEG1 &&
          profile < PIPE_VIDEO_PROFILE_HEVC_MAIN &&
-         (!vp3 || codec != PIPE_VIDEO_FORMAT_MPEG4) &&
          firmware_present(pscreen, profile);
-   case PIPE_VIDEO_CAP_NPOT_TEXTURES:
-      return 1;
    case PIPE_VIDEO_CAP_MAX_WIDTH:
       switch (codec) {
       case PIPE_VIDEO_FORMAT_MPEG12:
          return vp5 ? 4032 : 2048;
-      case PIPE_VIDEO_FORMAT_MPEG4:
-         return 2048;
       case PIPE_VIDEO_FORMAT_VC1:
          return 2048;
       case PIPE_VIDEO_FORMAT_MPEG4_AVC:
@@ -477,8 +473,6 @@ nouveau_vp3_screen_get_video_param(struct pipe_screen *pscreen,
       switch (codec) {
       case PIPE_VIDEO_FORMAT_MPEG12:
          return vp5 ? 4048 : 2048;
-      case PIPE_VIDEO_FORMAT_MPEG4:
-         return 2048;
       case PIPE_VIDEO_FORMAT_VC1:
          return 2048;
       case PIPE_VIDEO_FORMAT_MPEG4_AVC:
@@ -493,45 +487,12 @@ nouveau_vp3_screen_get_video_param(struct pipe_screen *pscreen,
          debug_printf("unknown video codec: %d\n", codec);
          return 0;
       }
-   case PIPE_VIDEO_CAP_PREFERED_FORMAT:
-      return PIPE_FORMAT_NV12;
-   case PIPE_VIDEO_CAP_SUPPORTS_INTERLACED:
-   case PIPE_VIDEO_CAP_PREFERS_INTERLACED:
-      return true;
    case PIPE_VIDEO_CAP_SUPPORTS_PROGRESSIVE:
       return false;
-   case PIPE_VIDEO_CAP_MAX_LEVEL:
-      switch (profile) {
-      case PIPE_VIDEO_PROFILE_MPEG1:
-         return 0;
-      case PIPE_VIDEO_PROFILE_MPEG2_SIMPLE:
-      case PIPE_VIDEO_PROFILE_MPEG2_MAIN:
-         return 3;
-      case PIPE_VIDEO_PROFILE_MPEG4_SIMPLE:
-         return 3;
-      case PIPE_VIDEO_PROFILE_MPEG4_ADVANCED_SIMPLE:
-         return 5;
-      case PIPE_VIDEO_PROFILE_VC1_SIMPLE:
-         return 1;
-      case PIPE_VIDEO_PROFILE_VC1_MAIN:
-         return 2;
-      case PIPE_VIDEO_PROFILE_VC1_ADVANCED:
-         return 4;
-      case PIPE_VIDEO_PROFILE_MPEG4_AVC_BASELINE:
-      case PIPE_VIDEO_PROFILE_MPEG4_AVC_CONSTRAINED_BASELINE:
-      case PIPE_VIDEO_PROFILE_MPEG4_AVC_MAIN:
-      case PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH:
-         return 41;
-      default:
-         debug_printf("unknown video profile: %d\n", profile);
-         return 0;
-      }
    case PIPE_VIDEO_CAP_MAX_MACROBLOCKS:
       switch (codec) {
       case PIPE_VIDEO_FORMAT_MPEG12:
          return vp5 ? 65536 : 8192;
-      case PIPE_VIDEO_FORMAT_MPEG4:
-         return 8192;
       case PIPE_VIDEO_FORMAT_VC1:
          return 8190;
       case PIPE_VIDEO_FORMAT_MPEG4_AVC:

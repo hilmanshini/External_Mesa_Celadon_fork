@@ -1,24 +1,6 @@
 /*
  * Copyright © 2020 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef IRIS_FINE_FENCE_DOT_H
@@ -59,13 +41,6 @@ struct iris_fine_fence {
     */
    struct iris_syncobj *syncobj;
 
-#define IRIS_FENCE_BOTTOM_OF_PIPE 0x0 /**< Written by bottom-of-pipe flush */
-#define IRIS_FENCE_TOP_OF_PIPE    0x1 /**< Written by top-of-pipe flush */
-#define IRIS_FENCE_END            0x2 /**< Written at the end of a batch */
-
-   /** Information about the type of flush involved (see IRIS_FENCE_*) */
-   uint32_t flags;
-
    /**
     * Sequence number expected to be written by the flush we inserted
     * when creating this fence.  The iris_fine_fence is 'signaled' when *@map
@@ -76,7 +51,7 @@ struct iris_fine_fence {
 
 void iris_fine_fence_init(struct iris_batch *batch);
 
-struct iris_fine_fence *iris_fine_fence_new(struct iris_batch *batch, unsigned flags);
+struct iris_fine_fence *iris_fine_fence_new(struct iris_batch *batch);
 
 void iris_fine_fence_destroy(struct iris_screen *screen, struct iris_fine_fence *sq);
 

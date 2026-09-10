@@ -46,10 +46,16 @@ struct d3d12_batch {
    struct d3d12_fence *fence;
 
    struct hash_table *bos;
+   struct util_dynarray local_bos;
+   struct util_dynarray local_bo_pending;
+   struct util_dynarray bos_pending;
    struct hash_table *sampler_tables;
    struct set *sampler_views;
+#ifdef HAVE_GALLIUM_D3D12_GRAPHICS
    struct set *surfaces;
+#endif // HAVE_GALLIUM_D3D12_GRAPHICS
    struct set *objects;
+   struct set *queries;
 
    struct util_dynarray zombie_samplers;
 
@@ -60,6 +66,7 @@ struct d3d12_batch {
    bool pending_memory_barrier;
 
    uint64_t submit_id;
+   uint32_t ctx_id, ctx_index;
 };
 
 bool
@@ -98,5 +105,9 @@ d3d12_batch_reference_surface_texture(struct d3d12_batch *batch,
 void
 d3d12_batch_reference_object(struct d3d12_batch *batch,
                              ID3D12Object *object);
+
+void
+d3d12_batch_reference_query(struct d3d12_batch *batch,
+                            struct d3d12_query *query);
 
 #endif

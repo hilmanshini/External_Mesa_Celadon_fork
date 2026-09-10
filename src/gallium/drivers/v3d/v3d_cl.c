@@ -28,7 +28,7 @@
  * hw versions, so we just explicitly set the V3D_VERSION and include
  * v3dx_pack here
  */
-#define V3D_VERSION 33
+#define V3D_VERSION 42
 #include "broadcom/common/v3d_macros.h"
 #include "broadcom/cle/v3dx_pack.h"
 
@@ -50,9 +50,21 @@ v3d_cl_ensure_space(struct v3d_cl *cl, uint32_t space, uint32_t alignment)
                 cl->next = cl->base + offset;
                 return offset;
         }
+        struct v3d_device_info *devinfo = &cl->job->v3d->screen->devinfo;
+
+        /* If we are growing, double the BO allocation size to reduce the
+         * number of allocations with large command buffers, capped so that
+         * jobs recording an extreme number of draws without flushing keep
+         * adding BO handles and hit the flush thresholds in v3d_draw_vbo()
+         * instead of growing ever larger CL BOs until memory exhaustion.
+         */
+        space = align(space, devinfo->page_size);
+        if (cl->bo)
+                space = MAX2(MIN2(cl->bo->size * 2, V3D_CL_MAX_GROW_SIZE),
+                             space);
 
         v3d_bo_unreference(&cl->bo);
-        cl->bo = v3d_bo_alloc(cl->job->v3d->screen, align(space, 4096), "CL");
+        cl->bo = v3d_bo_alloc(cl->job->v3d->screen, space, "CL");
         cl->base = v3d_bo_map(cl->bo);
         cl->size = cl->bo->size;
         cl->next = cl->base;
@@ -63,14 +75,33 @@ v3d_cl_ensure_space(struct v3d_cl *cl, uint32_t space, uint32_t alignment)
 void
 v3d_cl_ensure_space_with_branch(struct v3d_cl *cl, uint32_t space)
 {
-        if (cl_offset(cl) + space + cl_packet_length(BRANCH) <= cl->size)
+        if (cl_offset(cl) + space  <= cl->size)
                 return;
 
+        /* The last V3D_CLE_READAHEAD bytes of the buffer are unusable, so we
+         * need to take them into account when allocating a new BO for the
+         * CL. We have to be sure that we have room for a BRANCH packet so we
+         * can always chain a next BO if needed. We will need to increase
+         * cl->size by the packet length before calling cl_summit to use this
+         * reserved space.
+         */
+        struct v3d_device_info *devinfo = &cl->job->v3d->screen->devinfo;
+        uint32_t unusable_size = devinfo->cle_readahead + cl_packet_length(BRANCH);
+
+        /* If we are growing, double the BO allocation size to reduce the
+         * number of allocations with large command buffers.
+         */
+        space = align(space + unusable_size, devinfo->page_size);
+        if (cl->bo)
+                space = MAX2(MIN2(cl->bo->size * 2, V3D_CL_MAX_GROW_SIZE),
+                             space);
+
         struct v3d_bo *new_bo = v3d_bo_alloc(cl->job->v3d->screen, space, "CL");
-        assert(space <= new_bo->size);
 
         /* Chain to the new BO from the old one. */
         if (cl->bo) {
+                cl->size += cl_packet_length(BRANCH);
+                assert(cl->size + devinfo->cle_readahead <= cl->bo->size);
                 cl_emit(cl, BRANCH, branch) {
                         branch.address = cl_address(new_bo, 0);
                 }
@@ -82,7 +113,11 @@ v3d_cl_ensure_space_with_branch(struct v3d_cl *cl, uint32_t space)
 
         cl->bo = new_bo;
         cl->base = v3d_bo_map(cl->bo);
-        cl->size = cl->bo->size;
+        /* Take only into account the usable size of the BO to guarantee that
+         * we never write in the last bytes of the CL buffer because of the
+         * readahead of the CLE
+         */
+        cl->size = cl->bo->size - unusable_size;
         cl->next = cl->base;
 }
 

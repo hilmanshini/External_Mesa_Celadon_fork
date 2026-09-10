@@ -1,27 +1,7 @@
 /* -*- mesa-c++  -*-
- *
- * Copyright (c) 2021 Collabora LTD
- *
+ * Copyright 2021 Collabora LTD
  * Author: Gert Wollny <gert.wollny@collabora.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef VALUEFACTORY_H
@@ -53,7 +33,8 @@ struct LiveRangeEntry {
    int m_start{-1};
    int m_end{-1};
    int m_index{-1};
-   int m_color{-1};
+   int m_color{g_registers_unused};
+   bool m_alu_clause_local{false};
    std::bitset<use_unspecified> m_use;
    Register *m_register;
 
@@ -178,6 +159,7 @@ struct register_key_hash {
 class ChannelCounts {
 public:
    void inc_count(int chan) { ++m_counts[chan]; }
+   void inc_count(int chan, int n) { m_counts[chan] += n; }
    int least_used(uint8_t mask) const
    {
       int least_used = 0;
@@ -222,28 +204,35 @@ public:
 
    int new_register_index();
 
-   bool allocate_registers(const exec_list *registers);
+   using nir_intrinsic_instr_alloc =
+      std::list<nir_intrinsic_instr *, Allocator<nir_intrinsic_instr *>>;
+
+   /* Allocate registers */
+   bool allocate_registers(const nir_intrinsic_instr_alloc& regs);
    PRegister allocate_pinned_register(int sel, int chan);
    RegisterVec4 allocate_pinned_vec4(int sel, bool is_ssa);
+   LocalArray *allocate_pinned_array(int start, int size, int channels);
 
-   void inject_value(const nir_dest& dest, int chan, PVirtualValue value);
+   /* Inject a predefined value for a given dest value
+    * (usually the result of a sysvalue load) */
+   void inject_value(const nir_def& def, int chan, PVirtualValue value);
 
-   std::vector<PRegister, Allocator<PRegister>> dest_vec(const nir_dest& dest,
+   /* Get or create a destination value of vector of values */
+   PRegister
+   dest(const nir_def& def, int chan, Pin pin_channel, uint8_t chan_mask = 0xf);
+
+   RegisterVec4 dest_vec4(const nir_def& dest, Pin pin);
+
+   std::vector<PRegister, Allocator<PRegister>> dest_vec(const nir_def& dest,
                                                          int num_components);
-   std::vector<PRegister, Allocator<PRegister>>
-   dest_vector(const nir_src& src, const std::vector<int>& components);
-
-   PRegister
-   dest(const nir_alu_dest& dest, int chan, Pin pin_channel, uint8_t chan_mask = 0xf);
-   PRegister
-   dest(const nir_dest& dest, int chan, Pin pin_channel, uint8_t chan_mask = 0xf);
-   PRegister
-   dest(const nir_ssa_def& dest, int chan, Pin pin_channel, uint8_t chan_mask = 0xf);
 
    PRegister dummy_dest(unsigned chan);
+
+
+   /* Create and get a temporary value */
    PRegister temp_register(int pinned_channel = -1, bool is_ssa = true);
    RegisterVec4 temp_vec4(Pin pin, const RegisterVec4::Swizzle& swizzle = {0, 1, 2, 3});
-   RegisterVec4 dest_vec4(const nir_dest& dest, Pin pin);
+
 
    RegisterVec4
    src_vec4(const nir_src& src, Pin pin, const RegisterVec4::Swizzle& swz = {0, 1, 2, 3});
@@ -255,10 +244,13 @@ public:
    PVirtualValue literal(uint32_t value);
    PVirtualValue uniform(nir_intrinsic_instr *load_uniform, int chan);
    PVirtualValue uniform(uint32_t index, int chan, int kcache);
+   std::vector<PVirtualValue, Allocator<PVirtualValue>> src_vec(const nir_src& src,
+                                                                int components);
+
 
    void allocate_const(nir_load_const_instr *load_const);
 
-   PRegister dest_from_string(const std::string& s);
+   PRegister dest_from_string(const std::string& s, int *dest_chan = nullptr);
    RegisterVec4 dest_vec4_from_string(const std::string& s,
                                       RegisterVec4::Swizzle& swz,
                                       Pin pin = pin_none);
@@ -267,8 +259,6 @@ public:
 
    LocalArray *array_from_string(const std::string& s);
 
-   std::vector<PVirtualValue, Allocator<PVirtualValue>> src_vec(const nir_src& src,
-                                                                int components);
 
    PInlineConstant inline_const(AluInlineConstants sel, int chan);
 
@@ -284,17 +274,15 @@ public:
    void clear_pins();
 
    int next_register_index() const { return m_next_register_index; }
+   uint32_t array_registers() const { return m_required_array_registers; }
+
+   PRegister addr();
+   PRegister idx_reg(unsigned idx);
 
 private:
-   PVirtualValue ssa_src(const nir_ssa_def& dest, int chan);
-
-   PRegister local_register(const nir_reg_dest& dest, int chan);
-   PRegister local_register(const nir_reg_src& dest, int chan);
-   PRegister
-   resolve_array(nir_register *reg, nir_src *indirect, int base_offset, int chan);
+   PVirtualValue ssa_src(const nir_def& dest, int chan);
 
    int m_next_register_index;
-   int m_next_temp_channel{0};
 
    template <typename Key, typename T>
    using unordered_map_alloc = std::unordered_map<Key,
@@ -323,9 +311,15 @@ private:
    uint32_t m_nowrite_idx;
 
    RegisterVec4 m_dummy_dest_pinned{
-      126, pin_chan, {0, 1, 2, 3}
+      g_registers_unused, true, {0, 1, 2, 3},
+        pin_chan
    };
    ChannelCounts m_channel_counts;
+   uint32_t m_required_array_registers{0};
+
+   AddressRegister *m_ar{nullptr};
+   AddressRegister *m_idx0{nullptr};
+   AddressRegister *m_idx1{nullptr};
 };
 
 } // namespace r600

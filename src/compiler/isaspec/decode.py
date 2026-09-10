@@ -27,6 +27,59 @@ import argparse
 import os
 import sys
 
+class FieldDecode(object):
+    def __init__(self, name, map_expr):
+        self.name = name
+        self.map_expr = map_expr
+
+    def get_c_name(self):
+        return self.name.lower().replace('-', '_')
+
+# State and helpers used by the template:
+class State(object):
+    def __init__(self, isa):
+        self.isa = isa
+
+    def case_name(self, bitset, name):
+        return bitset.encode.case_prefix + name.upper().replace('.', '_').replace('-', '_').replace('#', '')
+
+    # Return a list of all <map> entries for a leaf bitset, with the child
+    # bitset overriding the parent bitset's entries. Because we can't resolve
+    # which <map>s are used until we resolve which overload is used, we
+    # generate code for encoding all of these and then at runtime select which
+    # one to call based on the display.
+    def decode_fields(self, bitset):
+        if bitset.get_root().decode is None:
+            return
+
+        seen_fields = set()
+        if bitset.encode is not None:
+            for name, expr in bitset.encode.maps.items():
+                seen_fields.add(name)
+                yield FieldDecode(name, expr)
+
+        if bitset.extends is not None:
+            for field in self.decode_fields(self.isa.bitsets[bitset.extends]):
+                if field.name not in seen_fields:
+                    yield field
+
+    # A limited resolver for field type which doesn't properly account for
+    # overrides.  In particular, if a field is defined differently in multiple
+    # different cases, this just blindly picks the last one.
+    #
+    # TODO to do this properly, I don't think there is an alternative than
+    # to emit code which evaluates the case.expr
+    def resolve_simple_field(self, bitset, name):
+        field = None
+        for case in bitset.cases:
+            if name in case.fields:
+                field = case.fields[name]
+        if field is not None:
+            return field
+        if bitset.extends is not None:
+            return self.resolve_simple_field(bitset.isa.bitsets[bitset.extends], name)
+        return None
+
 template = """\
 /* Copyright (C) 2020 Google, Inc.
  *
@@ -51,6 +104,55 @@ template = """\
  */
 
 #include "${header}"
+
+#include <stdint.h>
+#include <util/bitset.h>
+
+#define BITMASK_WORDS BITSET_WORDS(${isa.bitsize})
+
+typedef struct {
+    BITSET_WORD bitset[BITMASK_WORDS];
+} bitmask_t;
+
+
+#define BITSET_FORMAT ${isa.format()}
+#define BITSET_VALUE(v) ${isa.value()}
+
+static inline void
+next_instruction(bitmask_t *instr, BITSET_WORD *start)
+{
+    %for i in range(0, int(isa.bitsize / 32)):
+    instr->bitset[${i}] = *(start + ${i});
+    %endfor
+}
+
+static inline uint64_t
+bitmask_to_uint64_t(bitmask_t mask)
+{
+%   if isa.bitsize <= 32:
+    return mask.bitset[0];
+%   else:
+    return ((uint64_t)mask.bitset[1] << 32) | mask.bitset[0];
+%   endif
+}
+
+static inline bitmask_t
+uint64_t_to_bitmask(uint64_t val)
+{
+    bitmask_t mask = {
+        .bitset[0] = val & 0xffffffff,
+%   if isa.bitsize > 32:
+        .bitset[1] = (val >> 32) & 0xffffffff,
+%   endif
+    };
+
+    return mask;
+}
+
+#include "isaspec_decode_decl.h"
+
+static uint64_t
+isa_decode_field(struct decode_scope *scope, const char *field_name);
 
 /*
  * enum tables, these don't have any link back to other tables so just
@@ -84,6 +186,22 @@ ${expr.get_c_name()}(struct decode_scope *scope)
 }
 %endfor
 
+/* forward-declarations of bitset decode functions */
+%for name, bitset in isa.all_bitsets():
+%   for df in s.decode_fields(bitset):
+static void decode_${bitset.get_c_name()}_gen_${bitset.gen_min}_${df.get_c_name()}(void *out, struct decode_scope *scope, uint64_t val);
+%   endfor
+static const struct isa_field_decode decode_${bitset.get_c_name()}_gen_${bitset.gen_min}_fields[] = {
+%   for df in s.decode_fields(bitset):
+    {
+        .name = "${df.name}",
+        .decode = decode_${bitset.get_c_name()}_gen_${bitset.gen_min}_${df.get_c_name()},
+    },
+%   endfor
+};
+static void decode_${bitset.get_c_name()}_gen_${bitset.gen_min}(void *out, struct decode_scope *scope);
+%endfor
+
 /*
  * Forward-declarations (so we don't have to figure out which order to
  * emit various tables when they have pointers to each other)
@@ -94,7 +212,7 @@ static const struct isa_bitset bitset_${bitset.get_c_name()}_gen_${bitset.gen_mi
 %endfor
 
 %for root_name, root in isa.roots.items():
-const struct isa_bitset *${root.get_c_name()}[];
+static const struct isa_bitset *${root.get_c_name()}[];
 %endfor
 
 /*
@@ -148,6 +266,9 @@ static const struct isa_case ${case.get_c_name()}_gen_${bitset.gen_min} = {
 %      if field.get_c_typename() == 'TYPE_ASSERT':
             .val.bitset = { ${', '.join(isa.split_bits(field.val, 32))} },
 %      endif
+%      if field.get_c_typename() == 'TYPE_BRANCH' or field.get_c_typename() == 'TYPE_ABSBRANCH':
+            .call = ${str(field.call).lower()},
+%      endif
           },
 %   endfor
        },
@@ -158,7 +279,7 @@ static const struct isa_bitset bitset_${bitset.get_c_name()}_gen_${bitset.gen_mi
 %   if bitset.extends is not None:
        .parent   = &bitset_${isa.bitsets[bitset.extends].get_c_name()}_gen_${isa.bitsets[bitset.extends].gen_min},
 %   endif
-       .name     = "${name}",
+       .name     = "${bitset.display_name}",
        .gen      = {
            .min  = ${bitset.get_gen_min()},
            .max  = ${bitset.get_gen_max()},
@@ -166,6 +287,9 @@ static const struct isa_bitset bitset_${bitset.get_c_name()}_gen_${bitset.gen_mi
        .match.bitset    = { ${', '.join(isa.split_bits(pattern.match, 32))} },
        .dontcare.bitset = { ${', '.join(isa.split_bits(pattern.dontcare, 32))} },
        .mask.bitset     = { ${', '.join(isa.split_bits(pattern.mask, 32))} },
+       .decode = decode_${bitset.get_c_name()}_gen_${bitset.gen_min},
+       .num_decode_fields = ARRAY_SIZE(decode_${bitset.get_c_name()}_gen_${bitset.gen_min}_fields),
+       .decode_fields = decode_${bitset.get_c_name()}_gen_${bitset.gen_min}_fields,
        .num_cases = ${len(bitset.cases)},
        .cases    = {
 %   for case in bitset.cases:
@@ -180,7 +304,7 @@ static const struct isa_bitset bitset_${bitset.get_c_name()}_gen_${bitset.gen_mi
  */
 
 %for root_name, root in isa.roots.items():
-const struct isa_bitset *${root.get_c_name()}[] = {
+static const struct isa_bitset *${root.get_c_name()}[] = {
 %   for leaf_name, leafs in isa.leafs.items():
 %      for leaf in leafs:
 %         if leaf.get_root() == root:
@@ -194,6 +318,51 @@ const struct isa_bitset *${root.get_c_name()}[] = {
 
 #include "isaspec_decode_impl.c"
 
+%for name, bitset in isa.all_bitsets():
+%   for df in s.decode_fields(bitset):
+<%  field = s.resolve_simple_field(bitset, df.name) %>
+static void decode_${bitset.get_c_name()}_gen_${bitset.gen_min}_${df.get_c_name()}(void *out, struct decode_scope *scope, uint64_t val)
+{
+%       if bitset.get_root().decode is not None and field is not None:
+    ${bitset.get_root().encode.type} src = *(${bitset.get_root().encode.type} *)out;
+%           if field.get_c_typename() == 'TYPE_BITSET':
+    isa_decode_bitset(&${df.map_expr}, ${isa.roots[field.type].get_c_name()}, scope, uint64_t_to_bitmask(val));
+%           elif field.get_c_typename() in ['TYPE_BRANCH', 'TYPE_INT', 'TYPE_OFFSET']:
+    ${df.map_expr} = util_sign_extend(val, ${field.get_size()});
+%           else:
+    ${df.map_expr} = val;
+%           endif
+    *(${bitset.get_root().encode.type} *)out = src;
+%       endif
+}
+
+%   endfor
+static void decode_${bitset.get_c_name()}_gen_${bitset.gen_min}(void *out, struct decode_scope *scope)
+{
+%   if bitset.get_root().decode is not None:
+    UNUSED ${bitset.get_root().encode.type} src;
+%       if bitset.get_root().encode.type.endswith('*') and name in isa.leafs and bitset.get_root().encode.case_prefix is not None:
+    src = ${bitset.get_root().get_c_name()}_create(${s.case_name(bitset.get_root(), bitset.name)});
+    *(${bitset.get_root().encode.type} *)out = src;
+%       endif
+%   endif
+}
+%endfor
+
+void ${prefix}_isa_disasm(void *bin, int sz, FILE *out, const struct isa_decode_options *options)
+{
+    isa_disasm(bin, sz, out, options);
+}
+
+bool ${prefix}_isa_decode(void *out, void *bin, const struct isa_decode_options *options)
+{
+    return isa_decode(out, bin, options);
+}
+
+uint32_t ${prefix}_isa_get_gpu_id(struct decode_scope *scope)
+{
+    return isa_get_gpu_id(scope);
+}
 """
 
 header = """\
@@ -222,51 +391,27 @@ header = """\
 #ifndef _${guard}_
 #define _${guard}_
 
-#include <stdint.h>
-#include <util/bitset.h>
+#include "compiler/isaspec/isaspec.h"
 
-#define BITMASK_WORDS BITSET_WORDS(${isa.bitsize})
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-typedef struct {
-    BITSET_WORD bitset[BITMASK_WORDS];
-} bitmask_t;
+void ${prefix}_isa_disasm(void *bin, int sz, FILE *out, const struct isa_decode_options *options);
+bool ${prefix}_isa_decode(void *out, void *bin, const struct isa_decode_options *options);
 
+struct decode_scope;
 
-#define BITSET_FORMAT ${isa.format()}
-#define BITSET_VALUE(v) ${isa.value()}
+uint32_t ${prefix}_isa_get_gpu_id(struct decode_scope *scope);
 
-static inline void
-next_instruction(bitmask_t *instr, BITSET_WORD *start)
-{
-    %for i in range(0, int(isa.bitsize / 32)):
-    instr->bitset[${i}] = *(start + ${i});
-    %endfor
+/**
+ * Allows to use gpu_id in expr functions
+ */
+#define ISA_GPU_ID() ${prefix}_isa_get_gpu_id(scope)
+
+#ifdef __cplusplus
 }
-
-static inline uint64_t
-bitmask_to_uint64_t(bitmask_t mask)
-{
-%   if isa.bitsize <= 32:
-    return mask.bitset[0];
-%   else:
-    return ((uint64_t)mask.bitset[1] << 32) | mask.bitset[0];
-%   endif
-}
-
-static inline bitmask_t
-uint64_t_to_bitmask(uint64_t val)
-{
-    bitmask_t mask = {
-        .bitset[0] = val & 0xffffffff,
-%   if isa.bitsize > 32:
-        .bitset[1] = (val >> 32) & 0xffffffff,
-%   endif
-    };
-
-    return mask;
-}
-
-#include "isaspec_decode_decl.h"
+#endif
 
 #endif /* _${guard}_ */
 
@@ -274,6 +419,9 @@ uint64_t_to_bitmask(uint64_t val)
 
 def guard(p):
     return os.path.basename(p).upper().replace("-", "_").replace(".", "_")
+
+def prefix(p):
+    return os.path.basename(p).lower().replace("-", "_").replace(".", "_").split('_')[0]
 
 def main():
     parser = argparse.ArgumentParser()
@@ -283,14 +431,15 @@ def main():
     args = parser.parse_args()
 
     isa = ISA(args.xml)
+    s = State(isa)
 
     try:
-        with open(args.out_c, 'w') as f:
+        with open(args.out_c, 'w', encoding='utf-8') as f:
             out_h_basename = os.path.basename(args.out_h)
-            f.write(Template(template).render(isa=isa, header=out_h_basename))
+            f.write(Template(template).render(isa=isa, s=s, header=out_h_basename, prefix=prefix(args.out_h)))
 
-        with open(args.out_h, 'w') as f:
-            f.write(Template(header).render(isa=isa, guard=guard(args.out_h)))
+        with open(args.out_h, 'w', encoding='utf-8') as f:
+            f.write(Template(header).render(isa=isa, guard=guard(args.out_h), prefix=prefix(args.out_h)))
 
     except Exception:
         # In the event there's an error, this imports some helpers from mako

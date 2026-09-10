@@ -36,90 +36,8 @@
 #include "context.h"
 #include "debug_output.h"
 #include "util/detect_os.h"
+#include "util/log.h"
 #include "api_exec_decl.h"
-
-#if DETECT_OS_ANDROID
-#  include <log/log.h>
-#endif
-#if DETECT_OS_WINDOWS
-#  include <windows.h>
-#endif
-
-static FILE *LogFile = NULL;
-
-
-static void
-output_if_debug(const char *prefixString, const char *outputString,
-                GLboolean newline)
-{
-   static int debug = -1;
-
-   /* Init the local 'debug' var once.
-    * Note: the _mesa_init_debug() function should have been called
-    * by now so MESA_DEBUG_FLAGS will be initialized.
-    */
-   if (debug == -1) {
-      /* If MESA_LOG_FILE env var is set, log Mesa errors, warnings,
-       * etc to the named file.  Otherwise, output to stderr.
-       */
-      const char *logFile = getenv("MESA_LOG_FILE");
-      if (logFile)
-         LogFile = fopen(logFile, "w");
-      if (!LogFile)
-         LogFile = stderr;
-#ifndef NDEBUG
-      /* in debug builds, print messages unless MESA_DEBUG="silent" */
-      if (MESA_DEBUG_FLAGS & DEBUG_SILENT)
-         debug = 0;
-      else
-         debug = 1;
-#else
-      const char *env = getenv("MESA_DEBUG");
-      debug = env && strstr(env, "silent") == NULL;
-#endif
-   }
-
-   /* Now only print the string if we're required to do so. */
-   if (debug) {
-      if (prefixString)
-         fprintf(LogFile, "%s: %s", prefixString, outputString);
-      else
-         fprintf(LogFile, "%s", outputString);
-      if (newline)
-         fprintf(LogFile, "\n");
-      fflush(LogFile);
-
-#if defined(_WIN32)
-      /* stderr from windows applications without console is not usually
-       * visible, so communicate with the debugger instead */
-      {
-         char buf[4096];
-         if (prefixString)
-            snprintf(buf, sizeof(buf), "%s: %s%s", prefixString, outputString, newline ? "\n" : "");
-         else
-            snprintf(buf, sizeof(buf), "%s%s", outputString, newline ? "\n" : "");
-         OutputDebugStringA(buf);
-      }
-#endif
-
-#if DETECT_OS_ANDROID
-      LOG_PRI(ANDROID_LOG_ERROR, prefixString ? prefixString : "MESA", "%s%s", outputString, newline ? "\n" : "");
-#endif
-   }
-}
-
-
-/**
- * Return the file handle to use for debug/logging.  Defaults to stderr
- * unless MESA_LOG_FILE is defined.
- */
-FILE *
-_mesa_get_log_file(void)
-{
-   assert(LogFile);
-   return LogFile;
-}
-
 
 /**
  * When a new type of error is recorded, print a message describing
@@ -135,7 +53,7 @@ flush_delayed_errors( struct gl_context *ctx )
                      ctx->ErrorDebugCount,
                      _mesa_enum_to_string(ctx->ErrorValue));
 
-      output_if_debug("Mesa", s, GL_TRUE);
+      mesa_log_if_debug(MESA_LOG_ERROR, s);
 
       ctx->ErrorDebugCount = 0;
    }
@@ -144,7 +62,7 @@ flush_delayed_errors( struct gl_context *ctx )
 
 /**
  * Report a warning (a recoverable error condition) to stderr if
- * either DEBUG is defined or the MESA_DEBUG env var is set.
+ * either MESA_DEBUG is defined to 1 or the MESA_DEBUG env var is set.
  *
  * \param ctx GL context.
  * \param fmtString printf()-like format string.
@@ -161,7 +79,7 @@ _mesa_warning( struct gl_context *ctx, const char *fmtString, ... )
    if (ctx)
       flush_delayed_errors( ctx );
 
-   output_if_debug("Mesa warning", str, GL_TRUE);
+   mesa_log_if_debug(MESA_LOG_WARN, str);
 }
 
 
@@ -189,7 +107,7 @@ _mesa_problem( const struct gl_context *ctx, const char *fmtString, ... )
       va_end( args );
       fprintf(stderr, "Mesa " PACKAGE_VERSION " implementation error: %s\n",
               str);
-      fprintf(stderr, "Please report at " PACKAGE_BUGREPORT "\n");
+      fprintf(stderr, "Please report at https://gitlab.freedesktop.org/mesa/mesa/-/issues\n");
    }
 }
 
@@ -202,7 +120,7 @@ should_output(struct gl_context *ctx, GLenum error, const char *fmtString)
    /* Check debug environment variable only once:
     */
    if (debug == -1) {
-      const char *debugEnv = getenv("MESA_DEBUG");
+      const char *debugEnv = os_get_option("MESA_DEBUG");
 
 #ifndef NDEBUG
       if (debugEnv && strstr(debugEnv, "silent"))
@@ -300,7 +218,7 @@ _mesa_gl_debug(struct gl_context *ctx,
  * Record an OpenGL state error.  These usually occur when the user
  * passes invalid parameters to a GL function.
  *
- * If debugging is enabled (either at compile-time via the DEBUG macro, or
+ * If debugging is enabled (either at compile-time via the MESA_DEBUG macro, or
  * run-time via the MESA_DEBUG environment variable), report the error with
  * _mesa_debug().
  *
@@ -361,7 +279,7 @@ _mesa_error( struct gl_context *ctx, GLenum error, const char *fmtString, ... )
 
       /* Print the error to stderr if needed. */
       if (do_output) {
-         output_if_debug("Mesa: User error", s2, GL_TRUE);
+         mesa_log_if_debug(MESA_LOG_ERROR, s2);
       }
 
       /* Log the error via ARB_debug_output if needed.*/
@@ -384,8 +302,8 @@ _mesa_error_no_memory(const char *caller)
 }
 
 /**
- * Report debug information.  Print error message to stderr via fprintf().
- * No-op if DEBUG mode not enabled.
+ * Report debug information.  Print error message to stderr via fprintf()
+ * when debug mode is enabled by NDEBUG; otherwise no-op.
  *
  * \param ctx GL context.
  * \param fmtString printf()-style format string, followed by optional args.
@@ -399,28 +317,10 @@ _mesa_debug( const struct gl_context *ctx, const char *fmtString, ... )
    va_start(args, fmtString);
    vsnprintf(s, MAX_DEBUG_MESSAGE_LENGTH, fmtString, args);
    va_end(args);
-   output_if_debug("Mesa", s, GL_FALSE);
-#endif /* DEBUG */
+   mesa_log_if_debug(MESA_LOG_DEBUG, s);
+#endif /* !NDEBUG */
    (void) ctx;
    (void) fmtString;
-}
-
-
-void
-_mesa_log(const char *fmtString, ...)
-{
-   char s[MAX_DEBUG_MESSAGE_LENGTH];
-   va_list args;
-   va_start(args, fmtString);
-   vsnprintf(s, MAX_DEBUG_MESSAGE_LENGTH, fmtString, args);
-   va_end(args);
-   output_if_debug(NULL, s, GL_FALSE);
-}
-
-void
-_mesa_log_direct(const char *string)
-{
-   output_if_debug(NULL, string, GL_TRUE);
 }
 
 /**

@@ -1,25 +1,8 @@
 /*
  * Copyright 2008 Corbin Simpson <MostAwesomeDude@gmail.com>
  * Copyright 2010 Marek Olšák <maraeo@gmail.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ * SPDX-License-Identifier: MIT
+ */
 
 /* Always include headers in the reverse order!! ~ M. */
 #include "r300_texture.h"
@@ -42,16 +25,17 @@
  * The swizzles must be set exactly like their non-swapped counterparts,
  * because byte-swapping is what reverses the component order, not swizzling.
  *
- * This function returns the format that must be used to program CB and TX
- * swizzles.
+ * This function returns the format that must be used to handle component order
+ * for r300 byte-swapped array formats.
  */
-static enum pipe_format r300_unbyteswap_array_format(enum pipe_format format)
+enum pipe_format r300_unbyteswap_array_format(enum pipe_format format)
 {
+#if !UTIL_ARCH_BIG_ENDIAN
     /* FIXME: Disabled on little endian because of a reported regression:
-     * https://bugs.freedesktop.org/show_bug.cgi?id=98869 */
-    if (PIPE_ENDIAN_NATIVE != PIPE_ENDIAN_BIG)
-        return format;
-
+     * https://bugs.freedesktop.org/show_bug.cgi?id=98869
+     */
+    return format;
+#else
     /* Only BGRA 8888 array formats are supported for simplicity of
      * the implementation. */
     switch (format) {
@@ -66,18 +50,60 @@ static enum pipe_format r300_unbyteswap_array_format(enum pipe_format format)
     default:
         return format;
     }
+#endif
 }
 
-static unsigned r300_get_endian_swap(enum pipe_format format)
+static unsigned r300_get_endian_swap(enum pipe_format format,
+                                     struct r300_resource *tex)
 {
+#if !UTIL_ARCH_BIG_ENDIAN
+    (void)format;
+    (void)tex;
+    return R300_SURF_NO_SWAP;
+#else
     const struct util_format_description *desc;
     unsigned swap_size;
 
+    if (util_format_is_depth_or_stencil(tex->b.format)) {
+        switch (format) {
+        case PIPE_FORMAT_B8G8R8A8_UNORM:
+        case PIPE_FORMAT_B8G8R8X8_UNORM:
+        case PIPE_FORMAT_R8G8B8A8_UNORM:
+        case PIPE_FORMAT_R8G8B8X8_UNORM:
+            /* Depth/stencil transfer blits can alias 32-bit ZS storage as
+             * RGBA8. Keep the alias on the ZS dword endian convention instead
+             * of the 8-bit array convention.
+             */
+            return R300_SURF_DWORD_SWAP;
+        default:
+            break;
+        }
+    }
+
+    if ((tex->b.bind & (PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW)) ==
+        (PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW) &&
+        !(tex->b.flags & R300_RESOURCE_FLAG_TRANSFER) &&
+        !util_format_is_srgb(tex->b.format)) {
+        /* Normal BE 8888 array formats use DWORD_SWAP so CPU-visible bytes
+         * follow Gallium component order. Render-to-texture resources need one
+         * GPU convention for both RB3D writes and sampler reads; otherwise a
+         * VRAM-rendered glamor pixmap sampled after migration to GTT gets
+         * channel-swapped. Keep transfer staging, sRGB, and pure render
+         * targets on the normal policy.
+         */
+        switch (format) {
+        case PIPE_FORMAT_A8R8G8B8_UNORM:
+        case PIPE_FORMAT_X8R8G8B8_UNORM:
+        case PIPE_FORMAT_B8G8R8A8_UNORM:
+        case PIPE_FORMAT_B8G8R8X8_UNORM:
+            return R300_SURF_NO_SWAP;
+        default:
+            break;
+        }
+    }
+
     if (r300_unbyteswap_array_format(format) != format)
         return R300_SURF_DWORD_SWAP;
-
-    if (PIPE_ENDIAN_NATIVE != PIPE_ENDIAN_BIG)
-        return R300_SURF_NO_SWAP;
 
     desc = util_format_description(format);
 
@@ -96,11 +122,12 @@ static unsigned r300_get_endian_swap(enum pipe_format format)
     case 32:
         return R300_SURF_DWORD_SWAP;
     }
+#endif
 }
 
 unsigned r300_get_swizzle_combined(const unsigned char *swizzle_format,
                                    const unsigned char *swizzle_view,
-                                   boolean dxtc_swizzle)
+                                   bool dxtc_swizzle)
 {
     unsigned i;
     unsigned char swizzle[4];
@@ -164,13 +191,13 @@ unsigned r300_get_swizzle_combined(const unsigned char *swizzle_format,
  * makes available X, Y, Z, W, ZERO, and ONE for swizzling. */
 uint32_t r300_translate_texformat(enum pipe_format format,
                                   const unsigned char *swizzle_view,
-                                  boolean is_r500,
-                                  boolean dxtc_swizzle)
+                                  bool is_r500,
+                                  bool dxtc_swizzle)
 {
     uint32_t result = 0;
     const struct util_format_description *desc;
     int i;
-    boolean uniform = TRUE;
+    bool uniform = true;
     const uint32_t sign_bit[4] = {
         R300_TX_FORMAT_SIGNED_W,
         R300_TX_FORMAT_SIGNED_Z,
@@ -241,10 +268,10 @@ uint32_t r300_translate_texformat(enum pipe_format format,
         format != PIPE_FORMAT_LATC1_UNORM &&
         format != PIPE_FORMAT_LATC1_SNORM) {
         result |= r300_get_swizzle_combined(desc->swizzle, swizzle_view,
-                                            TRUE);
+                                            true);
     } else {
         result |= r300_get_swizzle_combined(desc->swizzle, swizzle_view,
-                                            FALSE);
+                                            false);
     }
 
     /* S3TC formats. */
@@ -296,6 +323,18 @@ uint32_t r300_translate_texformat(enum pipe_format format,
     if (format == PIPE_FORMAT_R8G8Bx_SNORM) {
         return R300_TX_FORMAT_CxV8U8 | result;
     }
+
+#if UTIL_ARCH_BIG_ENDIAN
+    /* Match the sampler lanes to RB3D's BE 1555 write convention. */
+    switch (format) {
+    case PIPE_FORMAT_B5G5R5A1_UNORM:
+        return R300_EASY_TX_FORMAT(X, Y, Z, W, W1Z5Y5X5);
+    case PIPE_FORMAT_B5G5R5X1_UNORM:
+        return R300_EASY_TX_FORMAT(X, Y, Z, ONE, W1Z5Y5X5);
+    default:
+        break;
+    }
+#endif
 
     /* Integer and fixed-point 16.16 textures are not supported. */
     for (i = 0; i < 4; i++) {
@@ -494,6 +533,10 @@ static uint32_t r300_translate_colorformat(enum pipe_format format)
 
         case PIPE_FORMAT_B5G5R5A1_UNORM:
         case PIPE_FORMAT_B5G5R5X1_UNORM:
+#if UTIL_ARCH_BIG_ENDIAN
+        case PIPE_FORMAT_A1B5G5R5_UNORM:
+        case PIPE_FORMAT_X1B5G5R5_UNORM:
+#endif
             return R300_COLOR_FORMAT_ARGB1555;
 
         case PIPE_FORMAT_B4G4R4A4_UNORM:
@@ -587,7 +630,7 @@ static uint32_t r300_translate_out_fmt(enum pipe_format format)
     uint32_t modifier = 0;
     int i;
     const struct util_format_description *desc;
-    boolean uniform_sign;
+    bool uniform_sign;
 
     format = r300_unbyteswap_array_format(format);
     desc = util_format_description(format);
@@ -659,10 +702,10 @@ static uint32_t r300_translate_out_fmt(enum pipe_format format)
     }
 
     /* Add sign. */
-    uniform_sign = TRUE;
+    uniform_sign = true;
     for (i = 0; i < desc->nr_channels; i++)
         if (desc->channel[i].type != UTIL_FORMAT_TYPE_SIGNED)
-            uniform_sign = FALSE;
+            uniform_sign = false;
 
     if (uniform_sign)
         modifier |= R300_OUT_SIGN(0xf);
@@ -702,8 +745,20 @@ static uint32_t r300_translate_out_fmt(enum pipe_format format)
 
         /*** Generic cases (standard channel mapping) ***/
 
-        /* BGRA outputs. */
+#if UTIL_ARCH_BIG_ENDIAN
+        /* BE RGB565/1555 aliases need RGB lane order, not BGRA. */
         case PIPE_FORMAT_B5G6R5_UNORM:
+        case PIPE_FORMAT_A1B5G5R5_UNORM:
+        case PIPE_FORMAT_X1B5G5R5_UNORM:
+            return modifier |
+                R300_C0_SEL_R | R300_C1_SEL_G |
+                R300_C2_SEL_B | R300_C3_SEL_A;
+#endif
+
+        /* BGRA outputs. */
+#if !UTIL_ARCH_BIG_ENDIAN
+        case PIPE_FORMAT_B5G6R5_UNORM:
+#endif
         case PIPE_FORMAT_B5G5R5A1_UNORM:
         case PIPE_FORMAT_B5G5R5X1_UNORM:
         case PIPE_FORMAT_B4G4R4A4_UNORM:
@@ -824,6 +879,18 @@ static uint32_t r300_translate_colormask_swizzle(enum pipe_format format)
     case PIPE_FORMAT_R32G32_FLOAT:
         return COLORMASK_GRRG;
 
+#if UTIL_ARCH_BIG_ENDIAN
+    /* Match BE RGB565 colormasks to RGB output lanes; no alpha. */
+    case PIPE_FORMAT_B5G6R5_UNORM:
+        return COLORMASK_RGBX;
+
+    case PIPE_FORMAT_X1B5G5R5_UNORM:
+        return COLORMASK_RGBX;
+
+    case PIPE_FORMAT_A1B5G5R5_UNORM:
+        return COLORMASK_RGBA;
+#endif
+
     case PIPE_FORMAT_B5G5R5X1_UNORM:
     case PIPE_FORMAT_B4G4R4X4_UNORM:
     case PIPE_FORMAT_B8G8R8X8_UNORM:
@@ -831,7 +898,9 @@ static uint32_t r300_translate_colormask_swizzle(enum pipe_format format)
     case PIPE_FORMAT_B10G10R10X2_UNORM:
         return COLORMASK_BGRX;
 
+#if !UTIL_ARCH_BIG_ENDIAN
     case PIPE_FORMAT_B5G6R5_UNORM:
+#endif
     case PIPE_FORMAT_B5G5R5A1_UNORM:
     case PIPE_FORMAT_B4G4R4A4_UNORM:
     case PIPE_FORMAT_B8G8R8A8_UNORM:
@@ -872,21 +941,21 @@ static uint32_t r300_translate_colormask_swizzle(enum pipe_format format)
     }
 }
 
-boolean r300_is_colorbuffer_format_supported(enum pipe_format format)
+bool r300_is_colorbuffer_format_supported(enum pipe_format format)
 {
     return r300_translate_colorformat(format) != ~0 &&
            r300_translate_out_fmt(format) != ~0 &&
            r300_translate_colormask_swizzle(format) != ~0;
 }
 
-boolean r300_is_zs_format_supported(enum pipe_format format)
+bool r300_is_zs_format_supported(enum pipe_format format)
 {
     return r300_translate_zsformat(format) != ~0;
 }
 
-boolean r300_is_sampler_format_supported(enum pipe_format format)
+bool r300_is_sampler_format_supported(enum pipe_format format)
 {
-    return r300_translate_texformat(format, NULL, TRUE, FALSE) != ~0;
+    return r300_translate_texformat(format, NULL, true, false) != ~0;
 }
 
 void r300_texture_setup_format_state(struct r300_screen *screen,
@@ -899,7 +968,7 @@ void r300_texture_setup_format_state(struct r300_screen *screen,
 {
     struct pipe_resource *pt = &tex->b;
     struct r300_texture_desc *desc = &tex->tex;
-    boolean is_r500 = screen->caps.is_r500;
+    bool is_r500 = screen->caps.is_r500;
     unsigned width, height, depth;
     unsigned txwidth, txheight, txdepth;
 
@@ -971,13 +1040,13 @@ void r300_texture_setup_format_state(struct r300_screen *screen,
 
     out->tile_config = R300_TXO_MACRO_TILE(desc->macrotile[level]) |
                        R300_TXO_MICRO_TILE(desc->microtile) |
-                       R300_TXO_ENDIAN(r300_get_endian_swap(format));
+                       R300_TXO_ENDIAN(r300_get_endian_swap(format, tex));
 }
 
 static void r300_texture_setup_fb_state(struct r300_surface *surf)
 {
     struct r300_resource *tex = r300_resource(surf->base.texture);
-    unsigned level = surf->base.u.tex.level;
+    unsigned level = surf->base.level;
     unsigned stride =
       r300_stride_to_width(surf->base.format, tex->tex.stride_in_bytes[level]);
 
@@ -987,7 +1056,7 @@ static void r300_texture_setup_fb_state(struct r300_surface *surf)
                 stride |
                 R300_DEPTHMACROTILE(tex->tex.macrotile[level]) |
                 R300_DEPTHMICROTILE(tex->tex.microtile) |
-                R300_DEPTHENDIAN(r300_get_endian_swap(surf->base.format));
+                R300_DEPTHENDIAN(r300_get_endian_swap(surf->base.format, tex));
         surf->format = r300_translate_zsformat(surf->base.format);
         surf->pitch_zmask = tex->tex.zmask_stride_in_pixels[level];
         surf->pitch_hiz = tex->tex.hiz_stride_in_pixels[level];
@@ -999,7 +1068,7 @@ static void r300_texture_setup_fb_state(struct r300_surface *surf)
                 r300_translate_colorformat(format) |
                 R300_COLOR_TILE(tex->tex.macrotile[level]) |
                 R300_COLOR_MICROTILE(tex->tex.microtile) |
-                R300_COLOR_ENDIAN(r300_get_endian_swap(format));
+                R300_COLOR_ENDIAN(r300_get_endian_swap(format, tex));
         surf->format = r300_translate_out_fmt(format);
         surf->colormask_swizzle =
             r300_translate_colormask_swizzle(format);
@@ -1033,7 +1102,7 @@ r300_texture_create_object(struct r300_screen *rscreen,
                            enum radeon_bo_layout microtile,
                            enum radeon_bo_layout macrotile,
                            unsigned stride_in_bytes_override,
-                           struct pb_buffer *buffer)
+                           struct pb_buffer_lean *buffer)
 {
     struct radeon_winsys *rws = rscreen->rws;
     struct r300_resource *tex = NULL;
@@ -1109,7 +1178,7 @@ r300_texture_create_object(struct r300_screen *rscreen,
 fail:
     FREE(tex);
     if (buffer)
-        pb_reference(&buffer, NULL);
+        radeon_bo_reference(rscreen->rws, &buffer, NULL);
     return NULL;
 }
 
@@ -1120,8 +1189,8 @@ struct pipe_resource *r300_texture_create(struct pipe_screen *screen,
     struct r300_screen *rscreen = r300_screen(screen);
     enum radeon_bo_layout microtile, macrotile;
 
-    if ((base->flags & R300_RESOURCE_FLAG_TRANSFER) ||
-        (base->bind & (PIPE_BIND_SCANOUT | PIPE_BIND_LINEAR))) {
+    if (base->flags & R300_RESOURCE_FLAG_TRANSFER ||
+        base->bind & PIPE_BIND_LINEAR) {
         microtile = RADEON_LAYOUT_LINEAR;
         macrotile = RADEON_LAYOUT_LINEAR;
     } else {
@@ -1142,7 +1211,7 @@ struct pipe_resource *r300_texture_from_handle(struct pipe_screen *screen,
 {
     struct r300_screen *rscreen = r300_screen(screen);
     struct radeon_winsys *rws = rscreen->rws;
-    struct pb_buffer *buffer;
+    struct pb_buffer_lean *buffer;
     struct radeon_bo_metadata tiling = {};
 
     /* Support only 2D textures without mipmaps */
@@ -1186,22 +1255,19 @@ struct pipe_surface* r300_create_surface_custom(struct pipe_context * ctx,
 {
     struct r300_resource* tex = r300_resource(texture);
     struct r300_surface* surface = CALLOC_STRUCT(r300_surface);
-    unsigned level = surf_tmpl->u.tex.level;
+    unsigned level = surf_tmpl->level;
 
-    assert(surf_tmpl->u.tex.first_layer == surf_tmpl->u.tex.last_layer);
+    assert(surf_tmpl->first_layer == surf_tmpl->last_layer);
 
     if (surface) {
         uint32_t offset, tile_height;
 
         pipe_reference_init(&surface->base.reference, 1);
         pipe_resource_reference(&surface->base.texture, texture);
-        surface->base.context = ctx;
         surface->base.format = surf_tmpl->format;
-        surface->base.width = u_minify(width0_override, level);
-        surface->base.height = u_minify(height0_override, level);
-        surface->base.u.tex.level = level;
-        surface->base.u.tex.first_layer = surf_tmpl->u.tex.first_layer;
-        surface->base.u.tex.last_layer = surf_tmpl->u.tex.last_layer;
+        surface->base.level = level;
+        surface->base.first_layer = surf_tmpl->first_layer;
+        surface->base.last_layer = surf_tmpl->last_layer;
 
         surface->buf = tex->buf;
 
@@ -1211,21 +1277,22 @@ struct pipe_surface* r300_create_surface_custom(struct pipe_context * ctx,
             surface->domain &= ~RADEON_DOMAIN_GTT;
 
         surface->offset = r300_texture_get_offset(tex, level,
-                                                  surf_tmpl->u.tex.first_layer);
+                                                  surf_tmpl->first_layer);
         r300_texture_setup_fb_state(surface);
 
         /* Parameters for the CBZB clear. */
         surface->cbzb_allowed = tex->tex.cbzb_allowed[level];
-        surface->cbzb_width = align(surface->base.width, 64);
+        surface->cbzb_width = align(u_minify(width0_override, level), 64);
 
         /* Height must be aligned to the size of a tile. */
         tile_height = r300_get_pixel_alignment(surface->base.format,
                                                tex->b.nr_samples,
                                                tex->tex.microtile,
                                                tex->tex.macrotile[level],
-                                               DIM_HEIGHT, 0);
+                                               DIM_HEIGHT, 0,
+                                               tex->b.bind & PIPE_BIND_SCANOUT);
 
-        surface->cbzb_height = align((surface->base.height + 1) / 2,
+        surface->cbzb_height = align((u_minify(height0_override, level) + 1) / 2,
                                      tile_height);
 
         /* Offset must be aligned to 2K and must point at the beginning

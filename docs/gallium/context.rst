@@ -128,12 +128,12 @@ objects. They all follow simple, one-method binding calls, e.g.
 Samplers
 ^^^^^^^^
 
-pipe_sampler_state objects control how textures are sampled
-(coordinate wrap modes, interpolation modes, etc).  Note that unless
-``PIPE_CAP_TEXTURE_BUFFER_SAMPLER`` is enabled, samplers are not used for
-texture buffer objects.  That is, pipe_context::bind_sampler_views()
-will not bind a sampler if the corresponding sampler view refers to a
-PIPE_BUFFER resource.
+pipe_sampler_state objects control how textures are sampled (coordinate wrap
+modes, interpolation modes, etc). Samplers are only required for texture
+instructions for which nir_tex_instr_need_sampler returns true. Drivers must
+ignore samplers for other texture instructions. Frontends may or may not bind
+samplers when no texture instruction use them. Notably, frontends may not bind
+samplers for texture buffer objects, which are never accessed with samplers.
 
 Sampler Views
 ^^^^^^^^^^^^^
@@ -302,6 +302,8 @@ format.
 (which may be multiple bytes in length). Logically this is a memset with a
 multi-byte element value starting at offset bytes from resource start, going
 for size bytes. It is guaranteed that size % clear_value_size == 0.
+With ``pipe_caps::hw_clear_buffer_sizes`` drivers can indicate which
+clear_value_size is actually hardware accelerated and not software emulated.
 
 Evaluating Depth Buffers
 ^^^^^^^^^^^^^^^^^^^^^^^^
@@ -357,7 +359,7 @@ buffer.
 In indexed draw, ``min_index`` and ``max_index`` respectively provide a lower
 and upper bound of the indices contained in the index buffer inside the range
 between ``start`` to ``start``+``count``-1.  This allows the driver to
-determine which subset of vertices will be referenced during te draw call
+determine which subset of vertices will be referenced during the draw call
 without having to scan the index buffer.  Providing a over-estimation of the
 the true bounds, for example, a ``min_index`` and ``max_index`` of 0 and
 0xffffffff respectively, must give exactly the same rendering, albeit with less
@@ -465,6 +467,12 @@ scaled to nanoseconds, recorded after all commands issued prior to
 This query does not require a call to ``begin_query``.
 The result is an unsigned 64-bit integer.
 
+``PIPE_QUERY_TIMESTAMP_RAW`` returns a device/driver timestamp, recorded
+after all commands issued prior to ``end_query`` have been processed.
+This query does not require a call to ``begin_query``.
+The result is an unsigned 64-bit integer.  ``pipe_screen::convert_timestamp()``
+should be implemented, to covert the raw timestamp to nanoseconds, if
+this query type is supported.
 ``PIPE_QUERY_TIMESTAMP_DISJOINT`` can be used to check the
 internal timer resolution and whether the timestamp counter has become
 unreliable due to things like throttling etc. - only if this is FALSE
@@ -561,7 +569,7 @@ has completed, drawing will be predicated on the outcome of the query.
 If ``mode`` is PIPE_RENDER_COND_BY_REGION_WAIT or
 PIPE_RENDER_COND_BY_REGION_NO_WAIT rendering will be predicated as above
 for the non-REGION modes but in the case that an occlusion query returns
-a non-zero result, regions which were occluded may be ommitted by subsequent
+a non-zero result, regions which were occluded may be omitted by subsequent
 drawing commands.  This can result in better performance with some GPUs.
 Normally, if the occlusion query returned a non-zero result subsequent
 drawing happens normally so fragments may be generated, shaded and
@@ -652,6 +660,10 @@ call to ``flush`` is required to make sure the commands are emitted to the GPU.
 The Gallium implementation may implicitly ``flush`` the command stream during a
 ``fence_server_sync`` or ``fence_server_signal`` call if necessary.
 
+Gallium frontends must ensure that ``fence_server_signal`` returns before calling
+``fence_server_sync`` on the same ``pipe_fence_handle`` even if those calls are made on
+a different ``pipe_context``.
+
 Resource Busy Queries
 ^^^^^^^^^^^^^^^^^^^^^
 
@@ -665,8 +677,10 @@ Blitting
 These methods emulate classic blitter controls.
 
 These methods operate directly on ``pipe_resource`` objects, and stand
-apart from any 3D state in the context.  Blitting functionality may be
-moved to a separate abstraction at some point in the future.
+apart from any 3D state in the context. Each method is assumed to have an
+implicit memory barrier around itself. They do not need any explicit
+``memory_barrier``. Blitting functionality may be moved to a separate
+abstraction at some point in the future.
 
 ``resource_copy_region`` blits a region of a resource to a region of another
 resource, provided that both resources have the same format, or compatible
@@ -684,7 +698,7 @@ anything to queries currently gathering data).
 As opposed to manually drawing a textured quad, this lets the pipe driver choose
 the optimal method for blitting (like using a special 2D engine), and usually
 offers, for example, accelerated stencil-only copies even where
-PIPE_CAP_SHADER_STENCIL_EXPORT is not available.
+pipe_caps.shader_stencil_export is not available.
 
 
 Transfers
@@ -778,7 +792,7 @@ content unchanged. Similarly, calling this function to uncommit an already
 uncommitted memory region is allowed.
 
 For buffers, the given box must be aligned to multiples of
-``PIPE_CAP_SPARSE_BUFFER_PAGE_SIZE``. As an exception to this rule, if the size
+``pipe_caps.sparse_buffer_page_size``. As an exception to this rule, if the size
 of the buffer is not a multiple of the page size, changing the commit state of
 the last (partial) page requires a box that ends at the end of the buffer
 (i.e., box->x + box->width == buffer->width0).
@@ -866,19 +880,38 @@ The compute program has access to four special resources:
 
 These resources use a byte-based addressing scheme, and they can be
 accessed from the compute program by means of the LOAD/STORE TGSI
-opcodes.  Additional resources to be accessed using the same opcodes
-may be specified by the user with the ``set_compute_resources``
-method.
+opcodes.
 
 In addition, normal texture sampling is allowed from the compute
 program: ``bind_sampler_states`` may be used to set up texture
 samplers for the compute stage and ``set_sampler_views`` may
 be used to bind a number of sampler views to it.
 
+Compute kernel queries
+^^^^^^^^^^^^^^^^^^^^^^
+
+.. _get_compute_state_info:
+
+get_compute_state_info
+%%%%%%%%%%%%%%%%%%%%%%
+
+This function allows frontends to query kernel information defined inside
+``pipe_compute_state_object_info``.
+
+.. _get_compute_state_subgroup_size:
+
+get_compute_state_subgroup_size
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+This function returns the choosen subgroup size when ``launch_grid`` is
+called with the given block size. This doesn't need to be implemented when
+only one size is reported through ``pipe_compute_caps.subgroup_sizes`` or
+``pipe_compute_state_object_info::simd_sizes``.
+
 Mipmap generation
 ^^^^^^^^^^^^^^^^^
 
-If PIPE_CAP_GENERATE_MIPMAP is true, ``generate_mipmap`` can be used
+If pipe_caps.generate_mipmap is true, ``generate_mipmap`` can be used
 to generate mipmaps for the specified texture resource.
 It replaces texel image levels base_level+1 through
 last_level for layers range from first_layer through last_layer.
@@ -904,7 +937,7 @@ notifications are single-shot, i.e. subsequent calls to
 Bindless
 ^^^^^^^^
 
-If PIPE_CAP_BINDLESS_TEXTURE is TRUE, the following ``pipe_context`` functions
+If pipe_caps.bindless_texture is TRUE, the following ``pipe_context`` functions
 are used to create/delete bindless handles, and to make them resident in the
 current context when they are going to be used by shaders.
 

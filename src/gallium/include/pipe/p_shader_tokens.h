@@ -204,8 +204,6 @@ enum tgsi_semantic {
    TGSI_SEMANTIC_SUBGROUP_LT_MASK,
    TGSI_SEMANTIC_CS_USER_DATA_AMD,
    TGSI_SEMANTIC_VIEWPORT_MASK,
-   TGSI_SEMANTIC_TESS_DEFAULT_OUTER_LEVEL, /**< from set_tess_state */
-   TGSI_SEMANTIC_TESS_DEFAULT_INNER_LEVEL, /**< from set_tess_state */
    TGSI_SEMANTIC_COUNT,       /**< number of semantic values */
 };
 
@@ -233,7 +231,6 @@ enum tgsi_return_type {
    TGSI_RETURN_TYPE_SINT,
    TGSI_RETURN_TYPE_UINT,
    TGSI_RETURN_TYPE_FLOAT,
-   TGSI_RETURN_TYPE_UNKNOWN,
    TGSI_RETURN_TYPE_COUNT
 };
 
@@ -345,22 +342,22 @@ struct tgsi_property_data {
 enum tgsi_opcode {
    TGSI_OPCODE_ARL                = 0,
    TGSI_OPCODE_MOV                = 1,
-   TGSI_OPCODE_LIT                = 2,
+   /* gap */
    TGSI_OPCODE_RCP                = 3,
    TGSI_OPCODE_RSQ                = 4,
-   TGSI_OPCODE_EXP                = 5,
-   TGSI_OPCODE_LOG                = 6,
+   /* gap */
+   /* gap */
    TGSI_OPCODE_MUL                = 7,
    TGSI_OPCODE_ADD                = 8,
    TGSI_OPCODE_DP3                = 9,
    TGSI_OPCODE_DP4                = 10,
-   TGSI_OPCODE_DST                = 11,
+   /* gap */
    TGSI_OPCODE_MIN                = 12,
    TGSI_OPCODE_MAX                = 13,
    TGSI_OPCODE_SLT                = 14,
    TGSI_OPCODE_SGE                = 15,
    TGSI_OPCODE_MAD                = 16,
-   TGSI_OPCODE_TEX_LZ             = 17,
+   /* gap */
    TGSI_OPCODE_LRP                = 18,
    TGSI_OPCODE_FMA                = 19,
    TGSI_OPCODE_SQRT               = 20,
@@ -368,7 +365,7 @@ enum tgsi_opcode {
    TGSI_OPCODE_F2U64              = 22,
    TGSI_OPCODE_F2I64              = 23,
    TGSI_OPCODE_FRC                = 24,
-   TGSI_OPCODE_TXF_LZ             = 25,
+   /* gap */
    TGSI_OPCODE_FLR                = 26,
    TGSI_OPCODE_ROUND              = 27,
    TGSI_OPCODE_EX2                = 28,
@@ -384,9 +381,9 @@ enum tgsi_opcode {
    TGSI_OPCODE_DDY                = 38,
    TGSI_OPCODE_KILL               = 39 /* unconditional */,
    TGSI_OPCODE_PK2H               = 40,
-   TGSI_OPCODE_PK2US              = 41,
-   TGSI_OPCODE_PK4B               = 42,
-   TGSI_OPCODE_PK4UB              = 43,
+   /* gap */
+   /* gap */
+   /* gap */
    TGSI_OPCODE_D2U64              = 44,
    TGSI_OPCODE_SEQ                = 45,
    TGSI_OPCODE_D2I64              = 46,
@@ -568,7 +565,6 @@ enum tgsi_opcode {
    TGSI_OPCODE_DMAD               = 209,
    TGSI_OPCODE_DFRAC              = 210 /* eg, cayman */,
    TGSI_OPCODE_DLDEXP             = 211 /* eg, cayman */,
-   TGSI_OPCODE_DFRACEXP           = 212 /* eg, cayman */,
    TGSI_OPCODE_D2I                = 213,
    TGSI_OPCODE_I2D                = 214,
    TGSI_OPCODE_D2U                = 215,
@@ -704,8 +700,7 @@ struct tgsi_instruction_texture
 {
    unsigned Texture  : 8;    /* TGSI_TEXTURE_ */
    unsigned NumOffsets : 4;
-   unsigned ReturnType : 3; /* TGSI_RETURN_TYPE_x */
-   unsigned Padding : 17;
+   unsigned Padding : 20;
 };
 
 /* for texture offsets in GLSL and DirectX.

@@ -22,13 +22,13 @@
  */
 
 #include "main/glthread_marshal.h"
-#include "main/dispatch.h"
+#include "dispatch.h"
 
 uint32_t
 _mesa_unmarshal_GetIntegerv(struct gl_context *ctx,
-                            const struct marshal_cmd_GetIntegerv *cmd)
+                            const struct marshal_cmd_GetIntegerv *restrict cmd)
 {
-   unreachable("never executed");
+   UNREACHABLE("never executed");
    return 0;
 }
 
@@ -132,7 +132,7 @@ _mesa_marshal_GetIntegerv(GLenum pname, GLint *p)
 
 sync:
    _mesa_glthread_finish_before(ctx, "GetIntegerv");
-   CALL_GetIntegerv(ctx->CurrentServerDispatch, (pname, p));
+   CALL_GetIntegerv(ctx->Dispatch.Current, (pname, p));
 }
 
 /* TODO: Implement glGetBooleanv, glGetFloatv, etc. if needed */

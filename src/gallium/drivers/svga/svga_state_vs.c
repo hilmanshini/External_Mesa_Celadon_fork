@@ -1,27 +1,9 @@
-/**********************************************************
- * Copyright 2008-2022 VMware, Inc.  All rights reserved.
- *
- * Permission is hereby granted, free of charge, to any person
- * obtaining a copy of this software and associated documentation
- * files (the "Software"), to deal in the Software without
- * restriction, including without limitation the rights to use, copy,
- * modify, merge, publish, distribute, sublicense, and/or sell copies
- * of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be
- * included in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- *
- **********************************************************/
+/*
+ * Copyright (c) 2008-2024 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc.
+ * and/or its subsidiaries.
+ * SPDX-License-Identifier: MIT
+ */
 
 #include "util/u_inlines.h"
 #include "pipe/p_defines.h"
@@ -53,7 +35,7 @@ get_dummy_vertex_shader(void)
    struct ureg_src src;
    struct ureg_dst dst;
 
-   ureg = ureg_create(PIPE_SHADER_VERTEX);
+   ureg = ureg_create(MESA_SHADER_VERTEX);
    if (!ureg)
       return NULL;
 
@@ -142,7 +124,7 @@ make_vs_key(struct svga_context *svga, struct svga_compile_key *key)
    key->vs.attrib_puint_to_sscaled = svga->curr.velems->attrib_puint_to_sscaled;
 
    /* SVGA_NEW_TEXTURE_BINDING | SVGA_NEW_SAMPLER */
-   svga_init_shader_key_common(svga, PIPE_SHADER_VERTEX, &vs->base, key);
+   svga_init_shader_key_common(svga, MESA_SHADER_VERTEX, &vs->base, key);
 
    /* SVGA_NEW_RAST */
    key->clip_plane_enable = svga->curr.rast->templ.clip_plane_enable;
@@ -188,7 +170,7 @@ svga_reemit_vs_bindings(struct svga_context *svga)
    if (ret != PIPE_OK)
       return ret;
 
-   svga->rebind.flags.vs = FALSE;
+   svga->rebind.flags.vs = false;
    return PIPE_OK;
 }
 
@@ -216,13 +198,16 @@ compile_passthrough_vs(struct svga_context *svga,
    struct ureg_program *ureg;
    struct svga_compile_key key;
    enum pipe_error ret;
+   int8_t passthrough_color_index = -1;
+   int8_t passthrough_fog_index = -1;
+   uint64_t passthrough_generic_outputs = 0;
 
    assert(svga_have_vgpu10(svga));
    assert(fs);
 
    num_inputs = fs->base.tgsi_info.num_inputs;
 
-   ureg = ureg_create(PIPE_SHADER_VERTEX);
+   ureg = ureg_create(MESA_SHADER_VERTEX);
    if (!ureg)
       return PIPE_ERROR_OUT_OF_MEMORY;
 
@@ -240,18 +225,22 @@ compile_passthrough_vs(struct svga_context *svga,
     * number of inputs to the vertex shader.
     */
    for (i = 0; i < num_inputs; i++) {
-      switch (fs->base.tgsi_info.input_semantic_name[i]) {
-      case TGSI_SEMANTIC_COLOR:
-      case TGSI_SEMANTIC_GENERIC:
-      case TGSI_SEMANTIC_FOG:
-         dst[num_elements] = ureg_DECL_output(ureg,
-                                fs->base.tgsi_info.input_semantic_name[i],
-                                fs->base.tgsi_info.input_semantic_index[i]);
+      uint8_t tgsi_semantic_name = fs->base.tgsi_info.input_semantic_name[i];
+      uint8_t tgsi_index = fs->base.tgsi_info.input_semantic_index[i];
+      if (tgsi_semantic_name == TGSI_SEMANTIC_GENERIC ||
+          tgsi_semantic_name == TGSI_SEMANTIC_COLOR ||
+	 tgsi_semantic_name ==  TGSI_SEMANTIC_FOG) {
+         if (tgsi_semantic_name == TGSI_SEMANTIC_GENERIC) {
+            passthrough_generic_outputs |= (uint64_t) 1 << tgsi_index;
+         } else if (tgsi_semantic_name == TGSI_SEMANTIC_COLOR) {
+            passthrough_color_index = tgsi_index;
+         } else if (tgsi_semantic_name == TGSI_SEMANTIC_FOG) {
+            passthrough_fog_index = tgsi_index;
+         }
+         dst[num_elements] = ureg_DECL_output(ureg, tgsi_semantic_name,
+                                tgsi_index);
          src[num_elements] = ureg_DECL_vs_input(ureg, num_elements);
          num_elements++;
-         break;
-      default:
-         break;
       }
    }
 
@@ -266,19 +255,29 @@ compile_passthrough_vs(struct svga_context *svga,
    svga_tgsi_scan_shader(&new_vs.base);
 
    memset(&key, 0, sizeof(key));
-   key.vs.undo_viewport = 1;
 
-   ret = svga_compile_shader(svga, &new_vs.base, &key, &variant);
-   if (ret != PIPE_OK)
-      return ret;
+   key.vs.passthrough = 1;
+   key.vs.undo_viewport = 1;
+   key.vs.passthrough_generic_outputs = passthrough_generic_outputs;
+   key.vs.passthrough_color_index = passthrough_color_index;
+   key.vs.passthrough_fog_index = passthrough_fog_index;
+
+   variant = svga_search_shader_key(&vs->base, &key);
+
+   if (!variant) {
+      ret = svga_compile_shader(svga, &new_vs.base, &key, &variant);
+      if (ret != PIPE_OK)
+         return ret;
+
+      memcpy(&variant->key, &key, sizeof(variant->key));
+
+      /* insert variant at head of linked list */
+      variant->next = vs->base.variants;
+      vs->base.variants = variant;
+   }
 
    ureg_free_tokens(new_vs.base.tokens);
    ureg_destroy(ureg);
-
-   /* Overwrite the variant key to indicate it's a pass-through VS */
-   memset(&variant->key, 0, sizeof(variant->key));
-   variant->key.vs.passthrough = 1;
-   variant->key.vs.undo_viewport = 1;
 
    *out_variant = variant;
 
@@ -345,7 +344,7 @@ emit_hw_vs(struct svga_context *svga, uint64_t dirty)
          ret = svga_set_shader(svga, SVGA3D_SHADERTYPE_VS, variant);
          if (ret != PIPE_OK)
             goto done;
-         svga->rebind.flags.vs = FALSE;
+         svga->rebind.flags.vs = false;
       }
 
       svga->dirty |= SVGA_NEW_VS_VARIANT;
@@ -357,7 +356,7 @@ done:
    return ret;
 }
 
-struct svga_tracked_state svga_hw_vs = 
+struct svga_tracked_state svga_hw_vs =
 {
    "vertex shader (hwtnl)",
    (SVGA_NEW_VS |

@@ -5,6 +5,7 @@
 #include "vk_common_entrypoints.h"
 #include "vk_device.h"
 #include "vk_log.h"
+#include "vk_pipeline.h"
 #include "vk_render_pass.h"
 #include "vk_standard_sample_locations.h"
 #include "vk_util.h"
@@ -22,7 +23,10 @@ enum mesa_vk_graphics_state_groups {
    MESA_VK_GRAPHICS_STATE_MULTISAMPLE_BIT             = (1 << 7),
    MESA_VK_GRAPHICS_STATE_DEPTH_STENCIL_BIT           = (1 << 8),
    MESA_VK_GRAPHICS_STATE_COLOR_BLEND_BIT             = (1 << 9),
-   MESA_VK_GRAPHICS_STATE_RENDER_PASS_BIT             = (1 << 10),
+   MESA_VK_GRAPHICS_STATE_INPUT_ATTACHMENT_MAP_BIT    = (1 << 10),
+   MESA_VK_GRAPHICS_STATE_COLOR_ATTACHMENT_MAP_BIT    = (1 << 11),
+   MESA_VK_GRAPHICS_STATE_RENDER_PASS_BIT             = (1 << 12),
+   MESA_VK_GRAPHICS_STATE_MULTIVIEW_BIT               = (1 << 13),
 };
 
 static void
@@ -41,12 +45,14 @@ get_dynamic_state_groups(BITSET_WORD *dynamic,
 
    if (groups & MESA_VK_GRAPHICS_STATE_VERTEX_INPUT_BIT) {
       BITSET_SET(dynamic, MESA_VK_DYNAMIC_VI);
+      BITSET_SET(dynamic, MESA_VK_DYNAMIC_VI_BINDINGS_VALID);
       BITSET_SET(dynamic, MESA_VK_DYNAMIC_VI_BINDING_STRIDES);
    }
 
    if (groups & MESA_VK_GRAPHICS_STATE_INPUT_ASSEMBLY_BIT) {
       BITSET_SET(dynamic, MESA_VK_DYNAMIC_IA_PRIMITIVE_TOPOLOGY);
       BITSET_SET(dynamic, MESA_VK_DYNAMIC_IA_PRIMITIVE_RESTART_ENABLE);
+      BITSET_SET(dynamic, MESA_VK_DYNAMIC_IA_PRIMITIVE_RESTART_INDEX);
    }
 
    if (groups & MESA_VK_GRAPHICS_STATE_TESSELLATION_BIT) {
@@ -60,10 +66,14 @@ get_dynamic_state_groups(BITSET_WORD *dynamic,
       BITSET_SET(dynamic, MESA_VK_DYNAMIC_VP_SCISSOR_COUNT);
       BITSET_SET(dynamic, MESA_VK_DYNAMIC_VP_SCISSORS);
       BITSET_SET(dynamic, MESA_VK_DYNAMIC_VP_DEPTH_CLIP_NEGATIVE_ONE_TO_ONE);
+      BITSET_SET(dynamic, MESA_VK_DYNAMIC_VP_DEPTH_CLAMP_RANGE);
    }
 
-   if (groups & MESA_VK_GRAPHICS_STATE_DISCARD_RECTANGLES_BIT)
+   if (groups & MESA_VK_GRAPHICS_STATE_DISCARD_RECTANGLES_BIT) {
       BITSET_SET(dynamic, MESA_VK_DYNAMIC_DR_RECTANGLES);
+      BITSET_SET(dynamic, MESA_VK_DYNAMIC_DR_ENABLE);
+      BITSET_SET(dynamic, MESA_VK_DYNAMIC_DR_MODE);
+   }
 
    if (groups & MESA_VK_GRAPHICS_STATE_RASTERIZATION_BIT) {
       BITSET_SET(dynamic, MESA_VK_DYNAMIC_RS_RASTERIZER_DISCARD_ENABLE);
@@ -73,6 +83,7 @@ get_dynamic_state_groups(BITSET_WORD *dynamic,
       BITSET_SET(dynamic, MESA_VK_DYNAMIC_RS_CULL_MODE);
       BITSET_SET(dynamic, MESA_VK_DYNAMIC_RS_FRONT_FACE);
       BITSET_SET(dynamic, MESA_VK_DYNAMIC_RS_CONSERVATIVE_MODE);
+      BITSET_SET(dynamic, MESA_VK_DYNAMIC_RS_EXTRA_PRIMITIVE_OVERESTIMATION_SIZE);
       BITSET_SET(dynamic, MESA_VK_DYNAMIC_RS_RASTERIZATION_ORDER_AMD);
       BITSET_SET(dynamic, MESA_VK_DYNAMIC_RS_PROVOKING_VERTEX);
       BITSET_SET(dynamic, MESA_VK_DYNAMIC_RS_RASTERIZATION_STREAM);
@@ -112,12 +123,28 @@ get_dynamic_state_groups(BITSET_WORD *dynamic,
    if (groups & MESA_VK_GRAPHICS_STATE_COLOR_BLEND_BIT) {
       BITSET_SET(dynamic, MESA_VK_DYNAMIC_CB_LOGIC_OP_ENABLE);
       BITSET_SET(dynamic, MESA_VK_DYNAMIC_CB_LOGIC_OP);
+      BITSET_SET(dynamic, MESA_VK_DYNAMIC_CB_ATTACHMENT_COUNT);
       BITSET_SET(dynamic, MESA_VK_DYNAMIC_CB_COLOR_WRITE_ENABLES);
       BITSET_SET(dynamic, MESA_VK_DYNAMIC_CB_BLEND_ENABLES);
       BITSET_SET(dynamic, MESA_VK_DYNAMIC_CB_BLEND_EQUATIONS);
       BITSET_SET(dynamic, MESA_VK_DYNAMIC_CB_WRITE_MASKS);
       BITSET_SET(dynamic, MESA_VK_DYNAMIC_CB_BLEND_CONSTANTS);
+      BITSET_SET(dynamic, MESA_VK_DYNAMIC_CB_BLEND_ADVANCED);
    }
+
+   if (groups & MESA_VK_GRAPHICS_STATE_COLOR_ATTACHMENT_MAP_BIT)
+      BITSET_SET(dynamic, MESA_VK_DYNAMIC_COLOR_ATTACHMENT_MAP);
+
+   if (groups & MESA_VK_GRAPHICS_STATE_INPUT_ATTACHMENT_MAP_BIT)
+      BITSET_SET(dynamic, MESA_VK_DYNAMIC_INPUT_ATTACHMENT_MAP);
+
+   if (groups & MESA_VK_GRAPHICS_STATE_RENDER_PASS_BIT) {
+      BITSET_SET(dynamic, MESA_VK_DYNAMIC_RP_ATTACHMENTS);
+      BITSET_SET(dynamic, MESA_VK_DYNAMIC_ATTACHMENT_FEEDBACK_LOOP_ENABLE);
+   }
+
+   if (groups & MESA_VK_GRAPHICS_STATE_MULTIVIEW_BIT)
+      BITSET_SET(dynamic, MESA_VK_DYNAMIC_RP_MULTIVIEW_MASK);
 }
 
 static enum mesa_vk_graphics_state_groups
@@ -125,7 +152,9 @@ fully_dynamic_state_groups(const BITSET_WORD *dynamic)
 {
    enum mesa_vk_graphics_state_groups groups = 0;
 
-   if (BITSET_TEST(dynamic, MESA_VK_DYNAMIC_VI))
+   if (BITSET_TEST(dynamic, MESA_VK_DYNAMIC_VI) &&
+       BITSET_TEST(dynamic, MESA_VK_DYNAMIC_VI_BINDING_STRIDES) &&
+       BITSET_TEST(dynamic, MESA_VK_DYNAMIC_VI_BINDINGS_VALID))
       groups |= MESA_VK_GRAPHICS_STATE_VERTEX_INPUT_BIT;
 
    if (BITSET_TEST(dynamic, MESA_VK_DYNAMIC_TS_PATCH_CONTROL_POINTS) &&
@@ -149,12 +178,20 @@ fully_dynamic_state_groups(const BITSET_WORD *dynamic)
 
    if (BITSET_TEST(dynamic, MESA_VK_DYNAMIC_CB_LOGIC_OP_ENABLE) &&
        BITSET_TEST(dynamic, MESA_VK_DYNAMIC_CB_LOGIC_OP) &&
+       BITSET_TEST(dynamic, MESA_VK_DYNAMIC_CB_ATTACHMENT_COUNT) &&
        BITSET_TEST(dynamic, MESA_VK_DYNAMIC_CB_COLOR_WRITE_ENABLES) &&
        BITSET_TEST(dynamic, MESA_VK_DYNAMIC_CB_BLEND_ENABLES) &&
        BITSET_TEST(dynamic, MESA_VK_DYNAMIC_CB_BLEND_EQUATIONS) &&
        BITSET_TEST(dynamic, MESA_VK_DYNAMIC_CB_WRITE_MASKS) &&
-       BITSET_TEST(dynamic, MESA_VK_DYNAMIC_CB_BLEND_CONSTANTS))
+       BITSET_TEST(dynamic, MESA_VK_DYNAMIC_CB_BLEND_CONSTANTS) &&
+       BITSET_TEST(dynamic, MESA_VK_DYNAMIC_CB_BLEND_ADVANCED))
       groups |= MESA_VK_GRAPHICS_STATE_COLOR_BLEND_BIT;
+
+   if (BITSET_TEST(dynamic, MESA_VK_DYNAMIC_COLOR_ATTACHMENT_MAP))
+      groups |= MESA_VK_GRAPHICS_STATE_COLOR_ATTACHMENT_MAP_BIT;
+
+   if (BITSET_TEST(dynamic, MESA_VK_DYNAMIC_INPUT_ATTACHMENT_MAP))
+      groups |= MESA_VK_GRAPHICS_STATE_INPUT_ATTACHMENT_MAP_BIT;
 
    return groups;
 }
@@ -174,7 +211,8 @@ validate_dynamic_state_groups(const BITSET_WORD *dynamic,
 
 void
 vk_get_dynamic_graphics_states(BITSET_WORD *dynamic,
-                               const VkPipelineDynamicStateCreateInfo *info)
+                               const VkPipelineDynamicStateCreateInfo *info,
+                               const struct vk_device *device)
 {
    clear_all_dynamic_state(dynamic);
 
@@ -200,9 +238,16 @@ vk_get_dynamic_graphics_states(BITSET_WORD *dynamic,
       BITSET_SET(dynamic, MESA_VK_DYNAMIC_##MESA2); \
       break;
 
+#define CASE3(VK, MESA1, MESA2, MESA3) \
+   case VK_DYNAMIC_STATE_##VK: \
+      BITSET_SET(dynamic, MESA_VK_DYNAMIC_##MESA1); \
+      BITSET_SET(dynamic, MESA_VK_DYNAMIC_##MESA2); \
+      BITSET_SET(dynamic, MESA_VK_DYNAMIC_##MESA3); \
+      break;
+
    for (uint32_t i = 0; i < info->dynamicStateCount; i++) {
       switch (info->pDynamicStates[i]) {
-      CASE2(VERTEX_INPUT_EXT,             VI, VI_BINDING_STRIDES)
+      CASE3(VERTEX_INPUT_EXT,             VI, VI_BINDINGS_VALID, VI_BINDING_STRIDES)
       CASE( VERTEX_INPUT_BINDING_STRIDE,  VI_BINDING_STRIDES)
       CASE( VIEWPORT,                     VP_VIEWPORTS)
       CASE( SCISSOR,                      VP_SCISSORS)
@@ -228,6 +273,8 @@ vk_get_dynamic_graphics_states(BITSET_WORD *dynamic,
       CASE( DEPTH_BIAS_ENABLE,            RS_DEPTH_BIAS_ENABLE)
       CASE( PRIMITIVE_RESTART_ENABLE,     IA_PRIMITIVE_RESTART_ENABLE)
       CASE( DISCARD_RECTANGLE_EXT,        DR_RECTANGLES)
+      CASE( DISCARD_RECTANGLE_ENABLE_EXT, DR_ENABLE)
+      CASE( DISCARD_RECTANGLE_MODE_EXT,   DR_MODE)
       CASE( SAMPLE_LOCATIONS_EXT,         MS_SAMPLE_LOCATIONS)
       CASE( FRAGMENT_SHADING_RATE_KHR,    FSR)
       CASE( LINE_STIPPLE_EXT,             RS_LINE_STIPPLE)
@@ -247,16 +294,37 @@ vk_get_dynamic_graphics_states(BITSET_WORD *dynamic,
       CASE( COLOR_WRITE_MASK_EXT,         CB_WRITE_MASKS)
       CASE( RASTERIZATION_STREAM_EXT,     RS_RASTERIZATION_STREAM)
       CASE( CONSERVATIVE_RASTERIZATION_MODE_EXT, RS_CONSERVATIVE_MODE)
+      CASE( EXTRA_PRIMITIVE_OVERESTIMATION_SIZE_EXT, RS_EXTRA_PRIMITIVE_OVERESTIMATION_SIZE)
       CASE( DEPTH_CLIP_ENABLE_EXT,        RS_DEPTH_CLIP_ENABLE)
       CASE( SAMPLE_LOCATIONS_ENABLE_EXT,  MS_SAMPLE_LOCATIONS_ENABLE)
       CASE( PROVOKING_VERTEX_MODE_EXT,    RS_PROVOKING_VERTEX)
       CASE( LINE_RASTERIZATION_MODE_EXT,  RS_LINE_MODE)
       CASE( LINE_STIPPLE_ENABLE_EXT,      RS_LINE_STIPPLE_ENABLE)
       CASE( DEPTH_CLIP_NEGATIVE_ONE_TO_ONE_EXT, VP_DEPTH_CLIP_NEGATIVE_ONE_TO_ONE)
+      CASE( ATTACHMENT_FEEDBACK_LOOP_ENABLE_EXT, ATTACHMENT_FEEDBACK_LOOP_ENABLE)
+      CASE( DEPTH_CLAMP_RANGE_EXT,        VP_DEPTH_CLAMP_RANGE)
+      CASE( COLOR_BLEND_ADVANCED_EXT,     CB_BLEND_ADVANCED)
       default:
-         unreachable("Unsupported dynamic graphics state");
+         UNREACHABLE("Unsupported dynamic graphics state");
       }
    }
+
+   /* Per spec, COLOR_BLEND_ADVANCED only needs to be dynamic if
+    * advancedBlendCoherentOperations is enabled. Mark it as dynamic when
+    * the feature is not enabled to simplify downstream checks.
+    */
+   if (!device->enabled_features.advancedBlendCoherentOperations)
+      BITSET_SET(dynamic, MESA_VK_DYNAMIC_CB_BLEND_ADVANCED);
+
+   /* Per spec, attachmentCount is ignored if COLOR_BLEND_ENABLE,
+    * COLOR_BLEND_EQUATION, COLOR_WRITE_MASK, and COLOR_BLEND_ADVANCED
+    * are all dynamic.
+    */
+   if (BITSET_TEST(dynamic, MESA_VK_DYNAMIC_CB_BLEND_ENABLES) &&
+       BITSET_TEST(dynamic, MESA_VK_DYNAMIC_CB_BLEND_EQUATIONS) &&
+       BITSET_TEST(dynamic, MESA_VK_DYNAMIC_CB_WRITE_MASKS) &&
+       BITSET_TEST(dynamic, MESA_VK_DYNAMIC_CB_BLEND_ADVANCED))
+      BITSET_SET(dynamic, MESA_VK_DYNAMIC_CB_ATTACHMENT_COUNT);
 }
 
 #define IS_DYNAMIC(STATE) \
@@ -273,6 +341,8 @@ vk_vertex_input_state_init(struct vk_vertex_input_state *vi,
    assert(!IS_DYNAMIC(VI));
 
    memset(vi, 0, sizeof(*vi));
+   if (!vi_info)
+      return;
 
    for (uint32_t i = 0; i < vi_info->vertexBindingDescriptionCount; i++) {
       const VkVertexInputBindingDescription *desc =
@@ -304,12 +374,12 @@ vk_vertex_input_state_init(struct vk_vertex_input_state *vi,
       vi->attributes[a].offset = desc->offset;
    }
 
-   const VkPipelineVertexInputDivisorStateCreateInfoEXT *vi_div_state =
+   const VkPipelineVertexInputDivisorStateCreateInfoKHR *vi_div_state =
       vk_find_struct_const(vi_info->pNext,
-                           PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO_EXT);
+                           PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO_KHR);
    if (vi_div_state) {
       for (uint32_t i = 0; i < vi_div_state->vertexBindingDivisorCount; i++) {
-         const VkVertexInputBindingDivisorDescriptionEXT *desc =
+         const VkVertexInputBindingDivisorDescriptionKHR *desc =
             &vi_div_state->pVertexBindingDivisors[i];
 
          assert(desc->binding < MESA_VK_MAX_VERTEX_BINDINGS);
@@ -329,6 +399,9 @@ vk_dynamic_graphics_state_init_vi(struct vk_dynamic_graphics_state *dst,
    if (IS_NEEDED(VI))
       *dst->vi = *vi;
 
+   if (IS_NEEDED(VI_BINDINGS_VALID))
+      dst->vi_bindings_valid = vi->bindings_valid;
+
    if (IS_NEEDED(VI_BINDING_STRIDES)) {
       for (uint32_t b = 0; b < MESA_VK_MAX_VERTEX_BINDINGS; b++) {
          if (vi->bindings_valid & BITFIELD_BIT(b))
@@ -344,6 +417,10 @@ vk_input_assembly_state_init(struct vk_input_assembly_state *ia,
                              const BITSET_WORD *dynamic,
                              const VkPipelineInputAssemblyStateCreateInfo *ia_info)
 {
+   memset(ia, 0, sizeof(*ia));
+   if (!ia_info)
+      return;
+
    /* From the Vulkan 1.3.224 spec:
     *
     *    "VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY specifies that the topology
@@ -371,14 +448,17 @@ vk_tessellation_state_init(struct vk_tessellation_state *ts,
                            const BITSET_WORD *dynamic,
                            const VkPipelineTessellationStateCreateInfo *ts_info)
 {
-   if (IS_DYNAMIC(TS_PATCH_CONTROL_POINTS)) {
-      ts->patch_control_points = 0;
-   } else {
+   *ts = (struct vk_tessellation_state) {
+      .domain_origin = VK_TESSELLATION_DOMAIN_ORIGIN_UPPER_LEFT,
+   };
+   if (!ts_info)
+      return;
+
+   if (!IS_DYNAMIC(TS_PATCH_CONTROL_POINTS)) {
       assert(ts_info->patchControlPoints <= UINT8_MAX);
       ts->patch_control_points = ts_info->patchControlPoints;
    }
 
-   ts->domain_origin = VK_TESSELLATION_DOMAIN_ORIGIN_UPPER_LEFT;
    if (!IS_DYNAMIC(TS_DOMAIN_ORIGIN)) {
       const VkPipelineTessellationDomainOriginStateCreateInfo *ts_do_info =
          vk_find_struct_const(ts_info->pNext,
@@ -404,6 +484,8 @@ vk_viewport_state_init(struct vk_viewport_state *vp,
                        const VkPipelineViewportStateCreateInfo *vp_info)
 {
    memset(vp, 0, sizeof(*vp));
+   if (!vp_info)
+      return;
 
    if (!IS_DYNAMIC(VP_VIEWPORT_COUNT)) {
       assert(vp_info->viewportCount <= MESA_VK_MAX_VIEWPORTS);
@@ -434,6 +516,17 @@ vk_viewport_state_init(struct vk_viewport_state *vp,
       if (vp_dcc_info != NULL)
          vp->depth_clip_negative_one_to_one = vp_dcc_info->negativeOneToOne;
    }
+
+   if (!IS_DYNAMIC(VP_DEPTH_CLAMP_RANGE)) {
+      const VkPipelineViewportDepthClampControlCreateInfoEXT *vp_dcc_info =
+         vk_find_struct_const(vp_info->pNext,
+                              PIPELINE_VIEWPORT_DEPTH_CLAMP_CONTROL_CREATE_INFO_EXT);
+      if (vp_dcc_info != NULL) {
+         vp->depth_clamp_mode = vp_dcc_info->depthClampMode;
+         if (vp->depth_clamp_mode == VK_DEPTH_CLAMP_MODE_USER_DEFINED_RANGE_EXT)
+            vp->depth_clamp_range = *vp_dcc_info->pDepthClampRange;
+      }
+   }
 }
 
 static void
@@ -450,6 +543,8 @@ vk_dynamic_graphics_state_init_vp(struct vk_dynamic_graphics_state *dst,
       typed_memcpy(dst->vp.scissors, vp->scissors, vp->scissor_count);
 
    dst->vp.depth_clip_negative_one_to_one = vp->depth_clip_negative_one_to_one;
+   dst->vp.depth_clamp_mode = vp->depth_clamp_mode;
+   dst->vp.depth_clamp_range = vp->depth_clamp_range;
 }
 
 static void
@@ -477,6 +572,8 @@ vk_dynamic_graphics_state_init_dr(struct vk_dynamic_graphics_state *dst,
                                   const BITSET_WORD *needed,
                                   const struct vk_discard_rectangles_state *dr)
 {
+   dst->dr.enable = dr->rectangle_count > 0;
+   dst->dr.mode = dr->mode;
    dst->dr.rectangle_count = dr->rectangle_count;
    typed_memcpy(dst->dr.rectangles, dr->rectangles, dr->rectangle_count);
 }
@@ -492,8 +589,13 @@ vk_rasterization_state_init(struct vk_rasterization_state *rs,
       .extra_primitive_overestimation_size = 0.0f,
       .rasterization_order_amd = VK_RASTERIZATION_ORDER_STRICT_AMD,
       .provoking_vertex = VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT,
-      .line.mode = VK_LINE_RASTERIZATION_MODE_DEFAULT_EXT,
+      .line.mode = VK_LINE_RASTERIZATION_MODE_DEFAULT_KHR,
+      .depth_clip_enable = IS_DYNAMIC(RS_DEPTH_CLAMP_ENABLE) ? VK_MESA_DEPTH_CLIP_ENABLE_NOT_CLAMP : VK_MESA_DEPTH_CLIP_ENABLE_FALSE,
+      .depth_bias.representation = VK_DEPTH_BIAS_REPRESENTATION_LEAST_REPRESENTABLE_VALUE_FORMAT_EXT,
+      .depth_bias.exact = false,
    };
+   if (!rs_info)
+      return;
 
    if (!IS_DYNAMIC(RS_RASTERIZER_DISCARD_ENABLE))
       rs->rasterizer_discard_enable = rs_info->rasterizerDiscardEnable;
@@ -508,9 +610,7 @@ vk_rasterization_state_init(struct vk_rasterization_state *rs,
     *    depth clipping is disabled when
     *    VkPipelineRasterizationStateCreateInfo::depthClampEnable is VK_TRUE.
     */
-   if (IS_DYNAMIC(RS_DEPTH_CLAMP_ENABLE)) {
-      rs->depth_clip_enable = VK_MESA_DEPTH_CLIP_ENABLE_NOT_CLAMP;
-   } else {
+   if (!IS_DYNAMIC(RS_DEPTH_CLAMP_ENABLE)) {
       rs->depth_clamp_enable = rs_info->depthClampEnable;
       rs->depth_clip_enable = rs_info->depthClampEnable ?
                               VK_MESA_DEPTH_CLIP_ENABLE_FALSE :
@@ -524,9 +624,9 @@ vk_rasterization_state_init(struct vk_rasterization_state *rs,
    rs->depth_bias.enable = rs_info->depthBiasEnable;
    if ((rs_info->depthBiasEnable || IS_DYNAMIC(RS_DEPTH_BIAS_ENABLE)) &&
        !IS_DYNAMIC(RS_DEPTH_BIAS_FACTORS)) {
-      rs->depth_bias.constant = rs_info->depthBiasConstantFactor;
+      rs->depth_bias.constant_factor = rs_info->depthBiasConstantFactor;
       rs->depth_bias.clamp = rs_info->depthBiasClamp;
-      rs->depth_bias.slope = rs_info->depthBiasSlopeFactor;
+      rs->depth_bias.slope_factor = rs_info->depthBiasSlopeFactor;
    }
    rs->line.width = rs_info->lineWidth;
 
@@ -551,8 +651,8 @@ vk_rasterization_state_init(struct vk_rasterization_state *rs,
       }
 
       case VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_LINE_STATE_CREATE_INFO_EXT: {
-         const VkPipelineRasterizationLineStateCreateInfoEXT *rl_info =
-            (const VkPipelineRasterizationLineStateCreateInfoEXT *)ext;
+         const VkPipelineRasterizationLineStateCreateInfoKHR *rl_info =
+            (const VkPipelineRasterizationLineStateCreateInfoKHR *)ext;
          rs->line.mode = rl_info->lineRasterizationMode;
          if (!IS_DYNAMIC(RS_LINE_STIPPLE_ENABLE))
             rs->line.stipple.enable = rl_info->stippledLineEnable;
@@ -581,6 +681,16 @@ vk_rasterization_state_init(struct vk_rasterization_state *rs,
          const VkPipelineRasterizationStateStreamCreateInfoEXT *rss_info =
             (const VkPipelineRasterizationStateStreamCreateInfoEXT *)ext;
          rs->rasterization_stream = rss_info->rasterizationStream;
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_DEPTH_BIAS_REPRESENTATION_INFO_EXT: {
+         const VkDepthBiasRepresentationInfoEXT *dbr_info =
+            (const VkDepthBiasRepresentationInfoEXT *)ext;
+         if (!IS_DYNAMIC(RS_DEPTH_BIAS_FACTORS)) {
+            rs->depth_bias.representation = dbr_info->depthBiasRepresentation;
+            rs->depth_bias.exact = dbr_info->depthBiasExact;
+         }
          break;
       }
 
@@ -653,8 +763,15 @@ vk_multisample_state_init(struct vk_multisample_state *ms,
                           const BITSET_WORD *dynamic,
                           const VkPipelineMultisampleStateCreateInfo *ms_info)
 {
-   assert(ms_info->rasterizationSamples <= MESA_VK_MAX_SAMPLES);
-   ms->rasterization_samples = ms_info->rasterizationSamples;
+   memset(ms, 0, sizeof(*ms));
+   if (!ms_info)
+      return;
+
+   if (!IS_DYNAMIC(MS_RASTERIZATION_SAMPLES)) {
+      assert(ms_info->rasterizationSamples <= MESA_VK_MAX_SAMPLES);
+      ms->rasterization_samples = ms_info->rasterizationSamples;
+   }
+
    ms->sample_shading_enable = ms_info->sampleShadingEnable;
    ms->min_sample_shading = ms_info->minSampleShading;
 
@@ -697,7 +814,7 @@ vk_multisample_sample_locations_state_init(
 
    assert(ms->sample_locations == NULL);
    if (!IS_DYNAMIC(MS_SAMPLE_LOCATIONS)) {
-      if (ms->sample_locations_enable) {
+      if (sl_info && ms->sample_locations_enable) {
          vk_sample_locations_state_init(sl, &sl_info->sampleLocationsInfo);
          ms->sample_locations = sl;
       } else if (!IS_DYNAMIC(MS_RASTERIZATION_SAMPLES)) {
@@ -709,6 +826,9 @@ vk_multisample_sample_locations_state_init(
          ms->sample_locations =
             vk_standard_sample_locations_state(ms_info->rasterizationSamples);
       }
+      /* In the case that the rasterization samples are dynamic we cannot
+       * pre-populate with a specific set of standard sample locations
+       */
    }
 }
 
@@ -723,7 +843,7 @@ vk_dynamic_graphics_state_init_ms(struct vk_dynamic_graphics_state *dst,
    dst->ms.alpha_to_one_enable = ms->alpha_to_one_enable;
    dst->ms.sample_locations_enable = ms->sample_locations_enable;
 
-   if (IS_NEEDED(MS_SAMPLE_LOCATIONS))
+   if (IS_NEEDED(MS_SAMPLE_LOCATIONS) && ms->sample_locations)
       *dst->ms.sample_locations = *ms->sample_locations;
 }
 
@@ -745,7 +865,11 @@ vk_depth_stencil_state_init(struct vk_depth_stencil_state *ds,
                             const BITSET_WORD *dynamic,
                             const VkPipelineDepthStencilStateCreateInfo *ds_info)
 {
-   memset(ds, 0, sizeof(*ds));
+   *ds = (struct vk_depth_stencil_state) {
+      .stencil.write_enable = true,
+   };
+   if (!ds_info)
+      return;
 
    ds->depth.test_enable = ds_info->depthTestEnable;
    ds->depth.write_enable = ds_info->depthWriteEnable;
@@ -753,9 +877,7 @@ vk_depth_stencil_state_init(struct vk_depth_stencil_state *ds,
    ds->depth.bounds_test.enable = ds_info->depthBoundsTestEnable;
    ds->depth.bounds_test.min = ds_info->minDepthBounds;
    ds->depth.bounds_test.max = ds_info->maxDepthBounds;
-
    ds->stencil.test_enable = ds_info->stencilTestEnable;
-   ds->stencil.write_enable = true;
    vk_stencil_test_face_state_init(&ds->stencil.front, &ds_info->front);
    vk_stencil_test_face_state_init(&ds->stencil.back, &ds_info->back);
 }
@@ -894,17 +1016,36 @@ vk_color_blend_state_init(struct vk_color_blend_state *cb,
                           const BITSET_WORD *dynamic,
                           const VkPipelineColorBlendStateCreateInfo *cb_info)
 {
-   memset(cb, 0, sizeof(*cb));
+   *cb = (struct vk_color_blend_state) {
+      .color_write_enables = BITFIELD_MASK(MESA_VK_MAX_COLOR_ATTACHMENTS),
+   };
+   if (!cb_info)
+      return;
 
    cb->logic_op_enable = cb_info->logicOpEnable;
    cb->logic_op = cb_info->logicOp;
 
    assert(cb_info->attachmentCount <= MESA_VK_MAX_COLOR_ATTACHMENTS);
    cb->attachment_count = cb_info->attachmentCount;
-   /* pAttachments is ignored if any of these is not set */
-   bool full_dynamic = IS_DYNAMIC(CB_BLEND_ENABLES) && IS_DYNAMIC(CB_BLEND_EQUATIONS) && IS_DYNAMIC(CB_WRITE_MASKS);
+
+   /* Per spec, pAttachments is ignored if BLEND_ENABLES, BLEND_EQUATIONS,
+    * WRITE_MASKS, and BLEND_ADVANCED are all dynamic.
+    */
+   bool full_dynamic = IS_DYNAMIC(CB_BLEND_ENABLES) &&
+                       IS_DYNAMIC(CB_BLEND_EQUATIONS) &&
+                       IS_DYNAMIC(CB_WRITE_MASKS) &&
+                       IS_DYNAMIC(CB_BLEND_ADVANCED);
+
+   /* Advanced blend state is ignored if CB_BLEND_ADVANCED is dynamic */
+   const VkPipelineColorBlendAdvancedStateCreateInfoEXT *advanced = NULL;
+   if (!IS_DYNAMIC(CB_BLEND_ADVANCED)) {
+      advanced = vk_find_struct_const(cb_info->pNext,
+         PIPELINE_COLOR_BLEND_ADVANCED_STATE_CREATE_INFO_EXT);
+   }
+
    for (uint32_t a = 0; a < cb_info->attachmentCount; a++) {
-      const VkPipelineColorBlendAttachmentState *att = full_dynamic ? NULL : &cb_info->pAttachments[a];
+      const VkPipelineColorBlendAttachmentState *att =
+         full_dynamic ? NULL : &cb_info->pAttachments[a];
 
       cb->attachments[a] = (struct vk_color_blend_attachment_state) {
          .blend_enable = IS_DYNAMIC(CB_BLEND_ENABLES) || att->blendEnable,
@@ -915,6 +1056,10 @@ vk_color_blend_state_init(struct vk_color_blend_state *cb,
          .write_mask = IS_DYNAMIC(CB_WRITE_MASKS) ? 0xf : att->colorWriteMask,
          .color_blend_op = IS_DYNAMIC(CB_BLEND_EQUATIONS) ? 0 : att->colorBlendOp,
          .alpha_blend_op = IS_DYNAMIC(CB_BLEND_EQUATIONS) ? 0 : att->alphaBlendOp,
+         /* Vulkan spec defaults for advanced blend if not provided or dynamic */
+         .src_premultiplied = advanced ? advanced->srcPremultiplied : true,
+         .dst_premultiplied = advanced ? advanced->dstPremultiplied : true,
+         .blend_overlap = advanced ? advanced->blendOverlap : VK_BLEND_OVERLAP_UNCORRELATED_EXT,
       };
    }
 
@@ -923,14 +1068,87 @@ vk_color_blend_state_init(struct vk_color_blend_state *cb,
 
    const VkPipelineColorWriteCreateInfoEXT *cw_info =
       vk_find_struct_const(cb_info->pNext, PIPELINE_COLOR_WRITE_CREATE_INFO_EXT);
-   if (cw_info != NULL) {
+   if (!IS_DYNAMIC(CB_COLOR_WRITE_ENABLES) && cw_info != NULL) {
+      uint8_t color_write_enables = 0;
       assert(cb_info->attachmentCount == cw_info->attachmentCount);
       for (uint32_t a = 0; a < cw_info->attachmentCount; a++) {
          if (cw_info->pColorWriteEnables[a])
-            cb->color_write_enables |= BITFIELD_BIT(a);
+            color_write_enables |= BITFIELD_BIT(a);
       }
+      cb->color_write_enables = color_write_enables;
    } else {
-      cb->color_write_enables = BITFIELD_MASK(cb_info->attachmentCount);
+      cb->color_write_enables = BITFIELD_MASK(MESA_VK_MAX_COLOR_ATTACHMENTS);
+   }
+}
+
+/* From the description of VkRenderingInputAttachmentIndexInfoKHR:
+ *
+ *    If pDepthInputAttachmentIndex or pStencilInputAttachmentIndex are set to
+ *    NULL, they map to input attachments without a InputAttachmentIndex
+ *    decoration. If they point to a value of VK_ATTACHMENT_UNUSED, it
+ *    indicates that the corresponding attachment will not be used as an input
+ *    attachment in this pipeline.
+ */
+static uint8_t
+map_ds_input_attachment_index(const uint32_t *ds_attachment_index_ptr)
+{
+   if (!ds_attachment_index_ptr)
+      return MESA_VK_ATTACHMENT_NO_INDEX;
+   uint32_t ds_attachment_index = *ds_attachment_index_ptr;
+   return ds_attachment_index == VK_ATTACHMENT_UNUSED ?
+      MESA_VK_ATTACHMENT_UNUSED : ds_attachment_index;
+}
+
+static void
+vk_input_attachment_location_state_init(struct vk_input_attachment_location_state *ial,
+                                        const BITSET_WORD *dynamic,
+                                        const VkRenderingInputAttachmentIndexInfoKHR *ial_info)
+{
+   *ial = (struct vk_input_attachment_location_state) {
+      .color_map = { 0, 1, 2, 3, 4, 5, 6, 7 },
+      .color_attachment_count = MESA_VK_COLOR_ATTACHMENT_COUNT_UNKNOWN,
+      .depth_att = MESA_VK_ATTACHMENT_NO_INDEX,
+      .stencil_att = MESA_VK_ATTACHMENT_NO_INDEX,
+   };
+   if (!ial_info)
+      return;
+
+   for (uint32_t a = 0; a < MIN2(ial_info->colorAttachmentCount,
+                                 MESA_VK_MAX_COLOR_ATTACHMENTS); a++) {
+      if (!ial_info->pColorAttachmentInputIndices) {
+         ial->color_map[a] = a;
+      } else if (ial_info->pColorAttachmentInputIndices[a] == VK_ATTACHMENT_UNUSED) {
+         ial->color_map[a] = MESA_VK_ATTACHMENT_UNUSED;
+      } else {
+         ial->color_map[a] = ial_info->pColorAttachmentInputIndices[a];
+      }
+   }
+
+   ial->color_attachment_count = ial_info->colorAttachmentCount;
+
+   ial->depth_att =
+      map_ds_input_attachment_index(ial_info->pDepthInputAttachmentIndex);
+   ial->stencil_att =
+      map_ds_input_attachment_index(ial_info->pStencilInputAttachmentIndex);
+}
+
+static void
+vk_color_attachment_location_state_init(struct vk_color_attachment_location_state *cal,
+                                        const BITSET_WORD *dynamic,
+                                        const VkRenderingAttachmentLocationInfoKHR *cal_info)
+{
+   *cal = (struct vk_color_attachment_location_state) {
+      .color_map = { 0, 1, 2, 3, 4, 5, 6, 7 },
+   };
+   if (!cal_info)
+      return;
+
+   for (uint32_t a = 0; a < MIN2(cal_info->colorAttachmentCount,
+                                 MESA_VK_MAX_COLOR_ATTACHMENTS); a++) {
+      cal->color_map[a] =
+         cal_info->pColorAttachmentLocations == NULL ? a :
+         cal_info->pColorAttachmentLocations[a] == VK_ATTACHMENT_UNUSED ?
+         MESA_VK_ATTACHMENT_UNUSED : cal_info->pColorAttachmentLocations[a];
    }
 }
 
@@ -942,51 +1160,145 @@ vk_dynamic_graphics_state_init_cb(struct vk_dynamic_graphics_state *dst,
    dst->cb.logic_op_enable = cb->logic_op_enable;
    dst->cb.logic_op = cb->logic_op;
    dst->cb.color_write_enables = cb->color_write_enables;
+   dst->cb.attachment_count = cb->attachment_count;
 
    if (IS_NEEDED(CB_BLEND_ENABLES) ||
        IS_NEEDED(CB_BLEND_EQUATIONS) ||
-       IS_NEEDED(CB_WRITE_MASKS)) {
-      dst->cb.attachment_count = cb->attachment_count;
+       IS_NEEDED(CB_WRITE_MASKS) ||
+       IS_NEEDED(CB_BLEND_ADVANCED)) {
       typed_memcpy(dst->cb.attachments, cb->attachments, cb->attachment_count);
-   } else {
-      dst->cb.attachment_count = 0;
    }
 
    if (IS_NEEDED(CB_BLEND_CONSTANTS))
       typed_memcpy(dst->cb.blend_constants, cb->blend_constants, 4);
 }
 
-static bool
-vk_render_pass_state_is_complete(const struct vk_render_pass_state *rp)
+static void
+vk_dynamic_graphics_state_init_ial(struct vk_dynamic_graphics_state *dst,
+                                   const BITSET_WORD *needed,
+                                   const struct vk_input_attachment_location_state *ial)
 {
-   return rp->attachment_aspects != VK_IMAGE_ASPECT_METADATA_BIT;
+   if (IS_NEEDED(INPUT_ATTACHMENT_MAP)) {
+      dst->ial.color_attachment_count = ial->color_attachment_count;
+      typed_memcpy(dst->ial.color_map, ial->color_map, MESA_VK_MAX_COLOR_ATTACHMENTS);
+      dst->ial.depth_att = ial->depth_att;
+      dst->ial.stencil_att = ial->stencil_att;
+   }
+}
+
+static void
+vk_dynamic_graphics_state_init_cal(struct vk_dynamic_graphics_state *dst,
+                                   const BITSET_WORD *needed,
+                                   const struct vk_color_attachment_location_state *cal)
+{
+   if (IS_NEEDED(COLOR_ATTACHMENT_MAP))
+      typed_memcpy(dst->cal.color_map, cal->color_map, MESA_VK_MAX_COLOR_ATTACHMENTS);
+}
+
+static void
+vk_pipeline_flags_init(struct vk_graphics_pipeline_state *state,
+                       VkPipelineCreateFlags2KHR driver_rp_flags,
+                       bool has_driver_rp,
+                       const VkGraphicsPipelineCreateInfo *info,
+                       const BITSET_WORD *dynamic,
+                       VkGraphicsPipelineLibraryFlagsEXT lib)
+{
+   VkPipelineCreateFlags2KHR valid_pipeline_flags = 0;
+   VkPipelineCreateFlags2KHR valid_renderpass_flags = 0;
+   if (lib & (VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT |
+              VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT)) {
+      valid_renderpass_flags |=
+         VK_PIPELINE_CREATE_2_PER_LAYER_FRAGMENT_DENSITY_BIT_VALVE;
+      valid_pipeline_flags |=
+         VK_PIPELINE_CREATE_2_PER_LAYER_FRAGMENT_DENSITY_BIT_VALVE;
+   }
+   if (lib & VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT) {
+      valid_renderpass_flags |=
+         VK_PIPELINE_CREATE_2_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR |
+         VK_PIPELINE_CREATE_2_RENDERING_FRAGMENT_DENSITY_MAP_ATTACHMENT_BIT_EXT;
+      valid_pipeline_flags |=
+         VK_PIPELINE_CREATE_2_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR |
+         VK_PIPELINE_CREATE_2_RENDERING_FRAGMENT_DENSITY_MAP_ATTACHMENT_BIT_EXT;
+   }
+   if (lib & VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT) {
+      valid_renderpass_flags |=
+         VK_PIPELINE_CREATE_2_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT |
+         VK_PIPELINE_CREATE_2_DEPTH_STENCIL_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
+      if (!IS_DYNAMIC(ATTACHMENT_FEEDBACK_LOOP_ENABLE)) {
+         valid_pipeline_flags |=
+            VK_PIPELINE_CREATE_2_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT |
+            VK_PIPELINE_CREATE_2_DEPTH_STENCIL_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
+      }
+   }
+   const VkPipelineCreateFlags2KHR renderpass_flags =
+      (has_driver_rp ? driver_rp_flags :
+       vk_get_pipeline_rendering_flags(info)) & valid_renderpass_flags;
+
+   const VkPipelineCreateFlags2KHR pipeline_flags =
+      vk_graphics_pipeline_create_flags(info) & valid_pipeline_flags;
+
+   bool pipeline_feedback_loop = pipeline_flags &
+      (VK_PIPELINE_CREATE_2_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT |
+       VK_PIPELINE_CREATE_2_DEPTH_STENCIL_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT);
+
+   bool renderpass_feedback_loop = renderpass_flags &
+      (VK_PIPELINE_CREATE_2_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT |
+       VK_PIPELINE_CREATE_2_DEPTH_STENCIL_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT);
+
+   state->pipeline_flags |= renderpass_flags | pipeline_flags;
+   state->feedback_loop_not_input_only |=
+      pipeline_feedback_loop || (!has_driver_rp && renderpass_feedback_loop);
+}
+
+static void
+vk_multiview_state_init(struct vk_multiview_state *mv,
+                        const struct vk_multiview_state *old_mv,
+                        const struct vk_multiview_state *driver_mv,
+                        const VkGraphicsPipelineCreateInfo *info)
+{
+   /* If we already have multview state, then we don't need a new one, both
+    * have to match.
+    */
+   if (old_mv != NULL) {
+      *mv = *old_mv;
+      return;
+   }
+
+   if (info->renderPass != VK_NULL_HANDLE && driver_mv != NULL) {
+      *mv = *driver_mv;
+      return;
+   }
+
+   const VkPipelineRenderingCreateInfo *r_info =
+      vk_get_pipeline_rendering_create_info(info);
+
+   mv->view_mask = r_info != NULL ? r_info->viewMask : 0;
 }
 
 static void
 vk_render_pass_state_init(struct vk_render_pass_state *rp,
                           const struct vk_render_pass_state *old_rp,
+                          const struct vk_render_pass_state *driver_rp,
                           const VkGraphicsPipelineCreateInfo *info,
-                          const struct vk_subpass_info *sp_info,
                           VkGraphicsPipelineLibraryFlagsEXT lib)
 {
    /* If we already have render pass state and it has attachment info, then
-    * it's complete and we don't need a new one.
+    * it's complete and we don't need a new one.  The one caveat here is that
+    * we may need to add in some rendering flags.
     */
-   if (old_rp != NULL && vk_render_pass_state_is_complete(old_rp)) {
+   if (old_rp != NULL && vk_render_pass_state_has_attachment_info(old_rp)) {
       *rp = *old_rp;
       return;
    }
 
    *rp = (struct vk_render_pass_state) {
-      .render_pass = info->renderPass,
-      .subpass = info->subpass,
       .depth_attachment_format = VK_FORMAT_UNDEFINED,
       .stencil_attachment_format = VK_FORMAT_UNDEFINED,
+      .attachments = MESA_VK_RP_ATTACHMENT_INFO_INVALID,
    };
 
-   if (info->renderPass != VK_NULL_HANDLE && sp_info != NULL) {
-      rp->attachment_aspects = sp_info->attachment_aspects;
-      rp->view_mask = sp_info->view_mask;
+   if (info->renderPass != VK_NULL_HANDLE && driver_rp != NULL) {
+      *rp = *driver_rp;
       return;
    }
 
@@ -996,7 +1308,9 @@ vk_render_pass_state_init(struct vk_render_pass_state *rp,
    if (r_info == NULL)
       return;
 
-   rp->view_mask = r_info->viewMask;
+   const VkCustomResolveCreateInfoEXT *crc_info =
+      vk_find_struct_const(info->pNext, CUSTOM_RESOLVE_CREATE_INFO_EXT);
+   rp->custom_resolve = crc_info != NULL && crc_info->customResolve;
 
    /* From the Vulkan 1.3.218 spec description of pre-rasterization state:
     *
@@ -1016,34 +1330,26 @@ vk_render_pass_state_init(struct vk_render_pass_state *rp,
     */
    if (info->renderPass == VK_NULL_HANDLE &&
        !(lib & VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT)) {
-      rp->attachment_aspects = VK_IMAGE_ASPECT_METADATA_BIT;
       return;
    }
 
    assert(r_info->colorAttachmentCount <= MESA_VK_MAX_COLOR_ATTACHMENTS);
    rp->color_attachment_count = r_info->colorAttachmentCount;
-   for (uint32_t i = 0; i < r_info->colorAttachmentCount; i++) {
-      rp->color_attachment_formats[i] = r_info->pColorAttachmentFormats[i];
-      if (r_info->pColorAttachmentFormats[i] != VK_FORMAT_UNDEFINED)
-         rp->attachment_aspects |= VK_IMAGE_ASPECT_COLOR_BIT;
-   }
 
-   rp->depth_attachment_format = r_info->depthAttachmentFormat;
-   if (r_info->depthAttachmentFormat != VK_FORMAT_UNDEFINED)
-      rp->attachment_aspects |= VK_IMAGE_ASPECT_DEPTH_BIT;
+   if (rp->custom_resolve) {
+      assert(crc_info->colorAttachmentCount == r_info->colorAttachmentCount);
 
-   rp->stencil_attachment_format = r_info->stencilAttachmentFormat;
-   if (r_info->stencilAttachmentFormat != VK_FORMAT_UNDEFINED)
-      rp->attachment_aspects |= VK_IMAGE_ASPECT_STENCIL_BIT;
+      for (uint32_t i = 0; i < crc_info->colorAttachmentCount; i++)
+         rp->color_attachment_formats[i] = crc_info->pColorAttachmentFormats[i];
 
-   const VkRenderingSelfDependencyInfoMESA *rsd_info =
-      vk_find_struct_const(r_info->pNext, RENDERING_SELF_DEPENDENCY_INFO_MESA);
-   if (rsd_info != NULL) {
-      STATIC_ASSERT(sizeof(rp->color_self_dependencies) * 8 >=
-                    MESA_VK_MAX_COLOR_ATTACHMENTS);
-      rp->color_self_dependencies = rsd_info->colorSelfDependencies;
-      rp->depth_self_dependency = rsd_info->depthSelfDependency;
-      rp->stencil_self_dependency = rsd_info->stencilSelfDependency;
+      rp->depth_attachment_format = crc_info->depthAttachmentFormat;
+      rp->stencil_attachment_format = crc_info->stencilAttachmentFormat;
+   } else {
+      for (uint32_t i = 0; i < r_info->colorAttachmentCount; i++)
+         rp->color_attachment_formats[i] = r_info->pColorAttachmentFormats[i];
+
+      rp->depth_attachment_format = r_info->depthAttachmentFormat;
+      rp->stencil_attachment_format = r_info->stencilAttachmentFormat;
    }
 
    const VkAttachmentSampleCountInfoAMD *asc_info =
@@ -1056,13 +1362,35 @@ vk_render_pass_state_init(struct vk_render_pass_state *rp,
 
       rp->depth_stencil_attachment_samples = asc_info->depthStencilAttachmentSamples;
    }
+
+   rp->attachments = 0;
+
+   for (uint32_t i = 0; i < r_info->colorAttachmentCount; i++) {
+      if (rp->color_attachment_formats[i] != VK_FORMAT_UNDEFINED)
+         rp->attachments |= MESA_VK_RP_ATTACHMENT_COLOR_BIT(i);
+   }
+   if (rp->depth_attachment_format != VK_FORMAT_UNDEFINED)
+      rp->attachments |= MESA_VK_RP_ATTACHMENT_DEPTH_BIT;
+
+   if (rp->stencil_attachment_format != VK_FORMAT_UNDEFINED)
+      rp->attachments |= MESA_VK_RP_ATTACHMENT_STENCIL_BIT;
+}
+
+static void
+vk_dynamic_graphics_state_init_mv(struct vk_dynamic_graphics_state *dst,
+                                  const BITSET_WORD *needed,
+                                  const struct vk_multiview_state *mv)
+{
+   dst->rp.view_mask = mv->view_mask;
 }
 
 static void
 vk_dynamic_graphics_state_init_rp(struct vk_dynamic_graphics_state *dst,
                                   const BITSET_WORD *needed,
                                   const struct vk_render_pass_state *rp)
-{ }
+{
+   dst->rp.attachments = rp->attachments;
+}
 
 #define FOREACH_STATE_GROUP(f)                           \
    f(MESA_VK_GRAPHICS_STATE_VERTEX_INPUT_BIT,            \
@@ -1085,8 +1413,14 @@ vk_dynamic_graphics_state_init_rp(struct vk_dynamic_graphics_state *dst,
      vk_depth_stencil_state, ds);                        \
    f(MESA_VK_GRAPHICS_STATE_COLOR_BLEND_BIT,             \
      vk_color_blend_state, cb);                          \
+   f(MESA_VK_GRAPHICS_STATE_INPUT_ATTACHMENT_MAP_BIT,    \
+     vk_input_attachment_location_state, ial);           \
+   f(MESA_VK_GRAPHICS_STATE_COLOR_ATTACHMENT_MAP_BIT,    \
+     vk_color_attachment_location_state, cal);           \
    f(MESA_VK_GRAPHICS_STATE_RENDER_PASS_BIT,             \
-     vk_render_pass_state, rp);
+     vk_render_pass_state, rp);                          \
+   f(MESA_VK_GRAPHICS_STATE_MULTIVIEW_BIT,               \
+     vk_multiview_state, mv);
 
 static enum mesa_vk_graphics_state_groups
 vk_graphics_pipeline_state_groups(const struct vk_graphics_pipeline_state *state)
@@ -1102,6 +1436,26 @@ vk_graphics_pipeline_state_groups(const struct vk_graphics_pipeline_state *state
 #undef FILL_HAS
 
    return groups | fully_dynamic_state_groups(state->dynamic);
+}
+
+void
+vk_graphics_pipeline_get_state(const struct vk_graphics_pipeline_state *state,
+                               BITSET_WORD *set_state_out)
+{
+   /* For now, we just validate dynamic state */
+   enum mesa_vk_graphics_state_groups groups = 0;
+
+#define FILL_HAS(STATE, type, s) \
+   if (state->s != NULL) groups |= STATE
+
+   FOREACH_STATE_GROUP(FILL_HAS)
+
+#undef FILL_HAS
+
+   BITSET_DECLARE(set_state, MESA_VK_DYNAMIC_GRAPHICS_STATE_ENUM_MAX);
+   get_dynamic_state_groups(set_state, groups);
+   BITSET_ANDNOT(set_state, set_state, state->dynamic);
+   memcpy(set_state_out, set_state, sizeof(set_state));
 }
 
 static void
@@ -1133,7 +1487,9 @@ VkResult
 vk_graphics_pipeline_state_fill(const struct vk_device *device,
                                 struct vk_graphics_pipeline_state *state,
                                 const VkGraphicsPipelineCreateInfo *info,
-                                const struct vk_subpass_info *sp_info,
+                                const struct vk_multiview_state *driver_mv,
+                                const struct vk_render_pass_state *driver_rp,
+                                VkPipelineCreateFlags2KHR driver_rp_flags,
                                 struct vk_graphics_pipeline_all_state *all,
                                 const VkAllocationCallbacks *alloc,
                                 VkSystemAllocationScope scope,
@@ -1142,24 +1498,77 @@ vk_graphics_pipeline_state_fill(const struct vk_device *device,
    vk_graphics_pipeline_state_validate(state);
 
    BITSET_DECLARE(dynamic, MESA_VK_DYNAMIC_GRAPHICS_STATE_ENUM_MAX);
-   vk_get_dynamic_graphics_states(dynamic, info->pDynamicState);
-
-   for (uint32_t i = 0; i < info->stageCount; i++)
-      state->shader_stages |= info->pStages[i].stage;
-
-   /* In case we return early */
-   if (alloc_ptr_out != NULL)
-      *alloc_ptr_out = NULL;
+   vk_get_dynamic_graphics_states(dynamic, info->pDynamicState, device);
 
    /*
     * First, figure out which library-level shader/state groups we need
     */
 
    VkGraphicsPipelineLibraryFlagsEXT lib;
-   if (info->flags & VK_PIPELINE_CREATE_LIBRARY_BIT_KHR) {
-      const VkGraphicsPipelineLibraryCreateInfoEXT *gfx_lib_info =
-         vk_find_struct_const(info->pNext, GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT);
-      lib = gfx_lib_info->flags;
+   const VkGraphicsPipelineLibraryCreateInfoEXT *gpl_info =
+      vk_find_struct_const(info->pNext, GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT);
+   const VkPipelineLibraryCreateInfoKHR *lib_info =
+      vk_find_struct_const(info->pNext, PIPELINE_LIBRARY_CREATE_INFO_KHR);
+
+   VkPipelineCreateFlags2KHR pipeline_flags = vk_graphics_pipeline_create_flags(info);
+
+   VkShaderStageFlagBits allowed_stages;
+   if (!(pipeline_flags & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR)) {
+      allowed_stages = VK_SHADER_STAGE_ALL_GRAPHICS |
+                       VK_SHADER_STAGE_TASK_BIT_EXT |
+                       VK_SHADER_STAGE_MESH_BIT_EXT;
+   } else if (gpl_info) {
+      allowed_stages = 0;
+
+      /* If we're creating a pipeline library without pre-rasterization,
+       * discard all the associated stages.
+       */
+      if (gpl_info->flags &
+          VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT) {
+         allowed_stages |= (VK_SHADER_STAGE_VERTEX_BIT |
+                            VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+                            VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT |
+                            VK_SHADER_STAGE_GEOMETRY_BIT |
+                            VK_SHADER_STAGE_TASK_BIT_EXT |
+                            VK_SHADER_STAGE_MESH_BIT_EXT);
+      }
+
+      /* If we're creating a pipeline library without fragment shader,
+       * discard that stage.
+       */
+      if (gpl_info->flags &
+           VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT)
+         allowed_stages |= VK_SHADER_STAGE_FRAGMENT_BIT;
+   } else {
+      /* VkGraphicsPipelineLibraryCreateInfoEXT was omitted, flags should
+       * be assumed to be empty and therefore no shader stage should be
+       * considered.
+       */
+      allowed_stages = 0;
+   }
+
+   for (uint32_t i = 0; i < info->stageCount; i++) {
+      state->shader_stages |= info->pStages[i].stage & allowed_stages;
+   }
+
+   /* In case we return early */
+   if (alloc_ptr_out != NULL)
+      *alloc_ptr_out = NULL;
+
+   if (gpl_info) {
+      lib = gpl_info->flags;
+   } else if ((lib_info && lib_info->libraryCount > 0) ||
+              (pipeline_flags & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR)) {
+     /*
+      * From the Vulkan 1.3.210 spec:
+      *    "If this structure is omitted, and either VkGraphicsPipelineCreateInfo::flags
+      *    includes VK_PIPELINE_CREATE_LIBRARY_BIT_KHR or the
+      *    VkGraphicsPipelineCreateInfo::pNext chain includes a
+      *    VkPipelineLibraryCreateInfoKHR structure with a libraryCount greater than 0,
+      *    it is as if flags is 0. Otherwise if this structure is omitted, it is as if
+      *    flags includes all possible subsets of the graphics pipeline."
+      */
+      lib = 0;
    } else {
       /* We're building a complete pipeline.  From the Vulkan 1.3.218 spec:
        *
@@ -1197,12 +1606,16 @@ vk_graphics_pipeline_state_fill(const struct vk_device *device,
       needs |= MESA_VK_GRAPHICS_STATE_INPUT_ASSEMBLY_BIT;
    }
 
+   if (lib & (VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT |
+              VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT))
+      needs |= MESA_VK_GRAPHICS_STATE_MULTIVIEW_BIT;
+
    /* Other stuff potentially depends on this so gather it early */
    struct vk_render_pass_state rp;
    if (lib & (VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT |
               VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT |
               VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT)) {
-      vk_render_pass_state_init(&rp, state->rp, info, sp_info, lib);
+      vk_render_pass_state_init(&rp, state->rp, driver_rp, info, lib);
 
       needs |= MESA_VK_GRAPHICS_STATE_RENDER_PASS_BIT;
 
@@ -1210,9 +1623,15 @@ vk_graphics_pipeline_state_fill(const struct vk_device *device,
        * to NULL so it gets replaced with the new version.
        */
       if (state->rp != NULL &&
-          !vk_render_pass_state_is_complete(state->rp) &&
-          vk_render_pass_state_is_complete(&rp))
+          !vk_render_pass_state_has_attachment_info(state->rp) &&
+          !vk_render_pass_state_has_attachment_info(&rp))
          state->rp = NULL;
+   }
+
+   if (lib & (VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT |
+              VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT |
+              VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT)) {
+      vk_pipeline_flags_init(state, driver_rp_flags, !!driver_rp, info, dynamic, lib);
    }
 
    if (lib & VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT) {
@@ -1222,10 +1641,10 @@ vk_graphics_pipeline_state_fill(const struct vk_device *device,
        *
        *    "If the pipeline is being created with pre-rasterization shader
        *    state the stage member of one element of pStages must be either
-       *    VK_SHADER_STAGE_VERTEX_BIT or VK_SHADER_STAGE_MESH_BIT_NV"
+       *    VK_SHADER_STAGE_VERTEX_BIT or VK_SHADER_STAGE_MESH_BIT_EXT"
        */
       assert(state->shader_stages & (VK_SHADER_STAGE_VERTEX_BIT |
-                                     VK_SHADER_STAGE_MESH_BIT_NV));
+                                     VK_SHADER_STAGE_MESH_BIT_EXT));
 
       if (state->shader_stages & (VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
                                   VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT))
@@ -1263,49 +1682,19 @@ vk_graphics_pipeline_state_fill(const struct vk_device *device,
       if (info->pMultisampleState != NULL)
          needs |= MESA_VK_GRAPHICS_STATE_MULTISAMPLE_BIT;
 
-      /* From the Vulkan 1.3.218 spec:
-       *
-       *    VUID-VkGraphicsPipelineCreateInfo-renderPass-06043
-       *
-       *    "If renderPass is not VK_NULL_HANDLE, the pipeline is being
-       *    created with fragment shader state, and subpass uses a
-       *    depth/stencil attachment, pDepthStencilState must be a valid
-       *    pointer to a valid VkPipelineDepthStencilStateCreateInfo
-       *    structure"
-       *
-       *    VUID-VkGraphicsPipelineCreateInfo-renderPass-06053
-       *
-       *    "If renderPass is VK_NULL_HANDLE, the pipeline is being created
-       *    with fragment shader state and fragment output interface state,
-       *    and either of VkPipelineRenderingCreateInfo::depthAttachmentFormat
-       *    or VkPipelineRenderingCreateInfo::stencilAttachmentFormat are not
-       *    VK_FORMAT_UNDEFINED, pDepthStencilState must be a valid pointer to
-       *    a valid VkPipelineDepthStencilStateCreateInfo structure"
-       *
-       *    VUID-VkGraphicsPipelineCreateInfo-renderPass-06590
-       *
-       *    "If renderPass is VK_NULL_HANDLE and the pipeline is being created
-       *    with fragment shader state but not fragment output interface
-       *    state, pDepthStencilState must be a valid pointer to a valid
-       *    VkPipelineDepthStencilStateCreateInfo structure"
-       *
-       * In the first case, we'll have a real set of aspects in rp.  In the
-       * second case, where we have both fragment shader and fragment output
-       * state, we will also have a valid set of aspects.  In the third case
-       * where we only have fragment shader state and no render pass, the
-       * vk_render_pass_state will be incomplete.
-       */
-      if ((rp.attachment_aspects & (VK_IMAGE_ASPECT_DEPTH_BIT |
-                                    VK_IMAGE_ASPECT_STENCIL_BIT)) ||
-          !vk_render_pass_state_is_complete(&rp))
-         needs |= MESA_VK_GRAPHICS_STATE_DEPTH_STENCIL_BIT;
+      /* Always need D/S state due to VK_EXT_dynamic_rendering_unused_attachments */
+      needs |= MESA_VK_GRAPHICS_STATE_DEPTH_STENCIL_BIT;
+
+      needs |= MESA_VK_GRAPHICS_STATE_INPUT_ATTACHMENT_MAP_BIT;
    }
 
    if (lib & VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT) {
-      if (rp.attachment_aspects & (VK_IMAGE_ASPECT_COLOR_BIT))
+      if (rp.attachments & MESA_VK_RP_ATTACHMENT_ANY_COLOR_BITS)
          needs |= MESA_VK_GRAPHICS_STATE_COLOR_BLEND_BIT;
 
       needs |= MESA_VK_GRAPHICS_STATE_MULTISAMPLE_BIT;
+
+      needs |= MESA_VK_GRAPHICS_STATE_COLOR_ATTACHMENT_MAP_BIT;
    }
 
    /*
@@ -1322,6 +1711,22 @@ vk_graphics_pipeline_state_fill(const struct vk_device *device,
    /* Filter dynamic state down to just what we're adding */
    BITSET_DECLARE(dynamic_filter, MESA_VK_DYNAMIC_GRAPHICS_STATE_ENUM_MAX);
    get_dynamic_state_groups(dynamic_filter, needs);
+
+   /* Attachment feedback loop state is part of the renderpass state in mesa
+    * because attachment feedback loops can also come from the render pass,
+    * but in Vulkan it is part of the fragment output interface. The
+    * renderpass state also exists, possibly in an incomplete state, in other
+    * stages for things like the view mask, but it does not contain the
+    * feedback loop flags. In those other stages we have to ignore
+    * VK_DYNAMIC_STATE_ATTACHMENT_FEEDBACK_LOOP_ENABLE_EXT, even though it is
+    * part of a state group that exists in those stages.
+    */
+   if (!(lib &
+         VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT)) {
+      BITSET_CLEAR(dynamic_filter,
+                   MESA_VK_DYNAMIC_ATTACHMENT_FEEDBACK_LOOP_ENABLE);
+   }
+
    BITSET_AND(dynamic, dynamic, dynamic_filter);
 
    /* And add it in */
@@ -1367,8 +1772,9 @@ vk_graphics_pipeline_state_fill(const struct vk_device *device,
    const VkPipelineSampleLocationsStateCreateInfoEXT *sl_info = NULL;
    struct vk_sample_locations_state *new_sl = NULL;
    if (needs & MESA_VK_GRAPHICS_STATE_MULTISAMPLE_BIT) {
-      sl_info = vk_find_struct_const(info->pMultisampleState->pNext,
-                                     PIPELINE_SAMPLE_LOCATIONS_STATE_CREATE_INFO_EXT);
+      if (info->pMultisampleState)
+         sl_info = vk_find_struct_const(info->pMultisampleState->pNext,
+                                       PIPELINE_SAMPLE_LOCATIONS_STATE_CREATE_INFO_EXT);
       if (needs_sample_locations_state(dynamic, sl_info)) {
          if (all == NULL) {
             vk_multialloc_add(&ma, &new_sl, struct vk_sample_locations_state, 1);
@@ -1413,6 +1819,37 @@ vk_graphics_pipeline_state_fill(const struct vk_device *device,
    const VkPipelineFragmentShadingRateStateCreateInfoKHR *fsr_info =
       vk_find_struct_const(info->pNext, PIPELINE_FRAGMENT_SHADING_RATE_STATE_CREATE_INFO_KHR);
 
+   const VkRenderingInputAttachmentIndexInfoKHR *ial_info =
+      !driver_rp ? vk_get_pipeline_rendering_ial_info(info)
+                 : vk_find_struct_const(
+                      info->pNext, RENDERING_INPUT_ATTACHMENT_INDEX_INFO_KHR);
+
+   const VkRenderingAttachmentLocationInfoKHR *cal_info =
+      vk_find_struct_const(info->pNext, RENDERING_ATTACHMENT_LOCATION_INFO_KHR);
+
+   VkPipelineDepthStencilStateCreateInfo custom_ds_info;
+   /* With VK_EXT_dynamic_rendering_unused_attachments, we must explicitly
+    * disable depth and stencil if pDepthStencilState may not be a valid
+    * pointer. Dynamic renderpasses are allowed to have depth/stencil
+    * attachments even when the pipeline have them as VK_FORMAT_UNDEFINED,
+    * in which case pDepthStencilState may not be a valid pointer and we
+    * cannot access it even if depth/stencil state is statically specified
+    * by the pipeline.
+    */
+   if ((needs & MESA_VK_GRAPHICS_STATE_DEPTH_STENCIL_BIT) &&
+       vk_render_pass_state_has_attachment_info(&rp)) {
+      bool has_depth = rp.attachments & MESA_VK_RP_ATTACHMENT_DEPTH_BIT;
+      bool has_stencil = rp.attachments & MESA_VK_RP_ATTACHMENT_STENCIL_BIT;
+
+      if (!has_depth && !has_stencil) {
+         custom_ds_info = (VkPipelineDepthStencilStateCreateInfo){
+            .depthTestEnable = false,
+            .stencilTestEnable = false,
+         };
+         ds_info = &custom_ds_info;
+      }
+   }
+
    /*
     * Finally, fill out all the states
     */
@@ -1425,15 +1862,37 @@ vk_graphics_pipeline_state_fill(const struct vk_device *device,
 
    /* render pass state is special and we just copy it */
 #define vk_render_pass_state_init(s, d, i) *s = rp
+#define vk_multiview_state_init(s, d, i) vk_multiview_state_init(s, state->mv, driver_mv, info)
 
    FOREACH_STATE_GROUP(INIT_STATE_IF_NEEDED)
 
+#undef vk_multiview_state_init
 #undef vk_render_pass_state_init
 #undef INIT_STATE_IF_NEEDED
 
    if (needs & MESA_VK_GRAPHICS_STATE_MULTISAMPLE_BIT) {
        vk_multisample_sample_locations_state_init(new_ms, new_sl, dynamic,
                                                   ms_info, sl_info);
+   }
+
+   /* VK_EXT_rasterization_order_attachment_access */
+   if (needs & MESA_VK_GRAPHICS_STATE_COLOR_BLEND_BIT) {
+      if (cb_info && (cb_info->flags &
+          VK_PIPELINE_COLOR_BLEND_STATE_CREATE_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_BIT_EXT)) {
+         state->rasterization_order_access |= VK_IMAGE_ASPECT_COLOR_BIT;
+      }
+   }
+   if (needs & MESA_VK_GRAPHICS_STATE_DEPTH_STENCIL_BIT) {
+      if (ds_info) {
+         if (ds_info->flags &
+             VK_PIPELINE_DEPTH_STENCIL_STATE_CREATE_RASTERIZATION_ORDER_ATTACHMENT_DEPTH_ACCESS_BIT_EXT) {
+            state->rasterization_order_access |= VK_IMAGE_ASPECT_DEPTH_BIT;
+         }
+         if (ds_info->flags &
+             VK_PIPELINE_DEPTH_STENCIL_STATE_CREATE_RASTERIZATION_ORDER_ATTACHMENT_STENCIL_ACCESS_BIT_EXT) {
+            state->rasterization_order_access |= VK_IMAGE_ASPECT_STENCIL_BIT;
+         }
+      }
    }
 
    return VK_SUCCESS;
@@ -1453,12 +1912,16 @@ vk_graphics_pipeline_state_merge(struct vk_graphics_pipeline_state *dst,
 
    dst->shader_stages |= src->shader_stages;
 
+   dst->pipeline_flags |= src->pipeline_flags;
+   dst->feedback_loop_not_input_only |= src->feedback_loop_not_input_only;
+   dst->rasterization_order_access |= src->rasterization_order_access;
+
    /* Render pass state needs special care because a render pass state may be
     * incomplete (view mask only).  See vk_render_pass_state_init().
     */
    if (dst->rp != NULL && src->rp != NULL &&
-       !vk_render_pass_state_is_complete(dst->rp) &&
-       vk_render_pass_state_is_complete(src->rp))
+       !vk_render_pass_state_has_attachment_info(dst->rp) &&
+       vk_render_pass_state_has_attachment_info(src->rp))
       dst->rp = src->rp;
 
 #define MERGE(STATE, type, state) \
@@ -1469,7 +1932,91 @@ vk_graphics_pipeline_state_merge(struct vk_graphics_pipeline_state *dst,
 #undef MERGE
 }
 
-const struct vk_dynamic_graphics_state vk_default_dynamic_graphics_state = {
+static bool
+is_group_all_dynamic(const struct vk_graphics_pipeline_state *state,
+                     enum mesa_vk_graphics_state_groups group)
+{
+   /* Render pass is a bit special, because it contains always-static state
+    * (e.g. the view mask). It's never all dynamic.
+    */
+   if (group == MESA_VK_GRAPHICS_STATE_RENDER_PASS_BIT)
+      return false;
+
+   BITSET_DECLARE(group_state, MESA_VK_DYNAMIC_GRAPHICS_STATE_ENUM_MAX);
+   BITSET_DECLARE(dynamic_state, MESA_VK_DYNAMIC_GRAPHICS_STATE_ENUM_MAX);
+   get_dynamic_state_groups(group_state, group);
+   BITSET_AND(dynamic_state, group_state, state->dynamic);
+   return BITSET_EQUAL(dynamic_state, group_state);
+}
+
+VkResult
+vk_graphics_pipeline_state_copy(const struct vk_device *device,
+                                struct vk_graphics_pipeline_state *state,
+                                const struct vk_graphics_pipeline_state *old_state,
+                                const VkAllocationCallbacks *alloc,
+                                VkSystemAllocationScope scope,
+                                void **alloc_ptr_out)
+{
+   vk_graphics_pipeline_state_validate(old_state);
+
+   VK_MULTIALLOC(ma);
+
+#define ENSURE_STATE_IF_NEEDED(STATE, type, s) \
+   struct type *new_##s = NULL; \
+   if (old_state->s && !is_group_all_dynamic(state, STATE)) { \
+      vk_multialloc_add(&ma, &new_##s, struct type, 1); \
+   }
+
+   FOREACH_STATE_GROUP(ENSURE_STATE_IF_NEEDED)
+
+#undef ENSURE_STATE_IF_NEEDED
+
+   /* Sample locations are a bit special. */
+   struct vk_sample_locations_state *new_sample_locations = NULL;
+   if (old_state->ms && old_state->ms->sample_locations &&
+       !BITSET_TEST(old_state->dynamic, MESA_VK_DYNAMIC_MS_SAMPLE_LOCATIONS)) {
+      assert(old_state->ms->sample_locations);
+      vk_multialloc_add(&ma, &new_sample_locations,
+                        struct vk_sample_locations_state, 1);
+   }
+
+   if (ma.size > 0) {
+      *alloc_ptr_out = vk_multialloc_alloc2(&ma, &device->alloc, alloc, scope);
+      if (*alloc_ptr_out == NULL)
+         return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+   }
+
+   if (new_sample_locations) {
+      *new_sample_locations = *old_state->ms->sample_locations;
+   }
+
+#define COPY_STATE_IF_NEEDED(STATE, type, s) \
+   if (new_##s) { \
+      *new_##s = *old_state->s; \
+   } \
+   state->s = new_##s;
+
+   FOREACH_STATE_GROUP(COPY_STATE_IF_NEEDED)
+
+   if (new_ms) {
+      new_ms->sample_locations = new_sample_locations;
+   }
+
+   state->shader_stages = old_state->shader_stages;
+   BITSET_COPY(state->dynamic, old_state->dynamic);
+
+#undef COPY_STATE_IF_NEEDED
+
+   state->pipeline_flags = old_state->pipeline_flags;
+   state->feedback_loop_not_input_only =
+      old_state->feedback_loop_not_input_only;
+   state->rasterization_order_access = old_state->rasterization_order_access;
+
+   vk_graphics_pipeline_state_validate(state);
+   return VK_SUCCESS;
+}
+
+static const struct vk_dynamic_graphics_state vk_default_dynamic_graphics_state = {
    .rs = {
       .line = {
          .width = 1.0f,
@@ -1504,6 +2051,15 @@ const struct vk_dynamic_graphics_state vk_default_dynamic_graphics_state = {
    .cb = {
       .color_write_enables = 0xffu,
       .attachment_count = MESA_VK_MAX_COLOR_ATTACHMENTS,
+   },
+   .ial = {
+      .color_map = { 0, 1, 2, 3, 4, 5, 6, 7 },
+      .color_attachment_count = MESA_VK_COLOR_ATTACHMENT_COUNT_UNKNOWN,
+      .depth_att = MESA_VK_ATTACHMENT_NO_INDEX,
+      .stencil_att = MESA_VK_ATTACHMENT_NO_INDEX,
+   },
+   .cal = {
+      .color_map = { 0, 1, 2, 3, 4, 5, 6, 7 },
    },
 };
 
@@ -1566,8 +2122,39 @@ vk_dynamic_graphics_state_fill(struct vk_dynamic_graphics_state *dyn,
 
 #undef INIT_DYNAMIC_STATE
 
-   /* Mask off all but the groups we actually found */
+   /* Feedback loop state is weird: implicit feedback loops from the
+    * renderpass and dynamically-enabled feedback loops can in theory both be
+    * enabled independently, so we can't just use one field; instead drivers
+    * have to OR the pipeline state (in vk_render_pass_state::pipeline_flags)
+    * and dynamic state. Due to this it isn't worth tracking
+    * implicit render pass flags vs. pipeline flags in the pipeline state, and
+    * we just combine the two in vk_render_pass_flags_init() and don't bother
+    * setting the dynamic state from the pipeline here, instead just making
+    * sure the dynamic state is reset to 0 when feedback loop state is static.
+    */
+   dyn->feedback_loops = 0;
+
+   dyn->rasterization_order_access = p->rasterization_order_access;
+
    get_dynamic_state_groups(dyn->set, groups);
+
+   /* Vertex input state is always included in a complete pipeline. If p->vi
+    * is NULL, that means that it has been precompiled by the driver, but we
+    * should still track vi_bindings_valid.
+    */
+   BITSET_SET(dyn->set, MESA_VK_DYNAMIC_VI_BINDINGS_VALID);
+
+   /* If the pipeline doesn't render any color attachments, we should still
+    * keep track of the fact that it writes 0 attachments, even though none of
+    * the other blend states will be initialized. Normally this would be
+    * initialized with the other blend states.
+    */
+   if (!p->rp || !(p->rp->attachments & MESA_VK_RP_ATTACHMENT_ANY_COLOR_BITS)) {
+      dyn->cb.attachment_count = 0;
+      BITSET_SET(dyn->set, MESA_VK_DYNAMIC_CB_ATTACHMENT_COUNT);
+   }
+
+   /* Mask off all but the groups we actually found */
    BITSET_AND(dyn->set, dyn->set, needed);
 }
 
@@ -1612,8 +2199,8 @@ vk_dynamic_graphics_state_copy(struct vk_dynamic_graphics_state *dst,
 #define COPY_IF_SET(STATE, state) \
    if (IS_SET_IN_SRC(STATE)) SET_DYN_VALUE(dst, STATE, state, src->state)
 
-   assert((dst->vi != NULL) == (src->vi != NULL));
-   if (dst->vi != NULL && IS_SET_IN_SRC(VI)) {
+   if (IS_SET_IN_SRC(VI)) {
+      assert(dst->vi != NULL);
       COPY_MEMBER(VI, vi->bindings_valid);
       u_foreach_bit(b, src->vi->bindings_valid) {
          COPY_MEMBER(VI, vi->bindings[b].stride);
@@ -1628,9 +2215,14 @@ vk_dynamic_graphics_state_copy(struct vk_dynamic_graphics_state *dst,
       }
    }
 
+   if (IS_SET_IN_SRC(VI_BINDINGS_VALID))
+      COPY_MEMBER(VI_BINDINGS_VALID, vi_bindings_valid);
+
    if (IS_SET_IN_SRC(VI_BINDING_STRIDES)) {
-      COPY_ARRAY(VI_BINDING_STRIDES, vi_binding_strides,
-                 MESA_VK_MAX_VERTEX_BINDINGS);
+      assert(IS_SET_IN_SRC(VI_BINDINGS_VALID));
+      u_foreach_bit(a, src->vi_bindings_valid) {
+         COPY_MEMBER(VI_BINDING_STRIDES, vi_binding_strides[a]);
+      }
    }
 
    COPY_IF_SET(IA_PRIMITIVE_TOPOLOGY, ia.primitive_topology);
@@ -1653,6 +2245,14 @@ vk_dynamic_graphics_state_copy(struct vk_dynamic_graphics_state *dst,
    COPY_IF_SET(VP_DEPTH_CLIP_NEGATIVE_ONE_TO_ONE,
                vp.depth_clip_negative_one_to_one);
 
+   if (IS_SET_IN_SRC(VP_DEPTH_CLAMP_RANGE)) {
+      COPY_MEMBER(VP_DEPTH_CLAMP_RANGE, vp.depth_clamp_mode);
+      COPY_MEMBER(VP_DEPTH_CLAMP_RANGE, vp.depth_clamp_range.minDepthClamp);
+      COPY_MEMBER(VP_DEPTH_CLAMP_RANGE, vp.depth_clamp_range.maxDepthClamp);
+   }
+
+   COPY_IF_SET(DR_ENABLE, dr.enable);
+   COPY_IF_SET(DR_MODE, dr.mode);
    if (IS_SET_IN_SRC(DR_RECTANGLES)) {
       COPY_MEMBER(DR_RECTANGLES, dr.rectangle_count);
       COPY_ARRAY(DR_RECTANGLES, dr.rectangles, src->dr.rectangle_count);
@@ -1671,9 +2271,11 @@ vk_dynamic_graphics_state_copy(struct vk_dynamic_graphics_state *dst,
    COPY_IF_SET(RS_PROVOKING_VERTEX, rs.provoking_vertex);
    COPY_IF_SET(RS_RASTERIZATION_STREAM, rs.rasterization_stream);
    COPY_IF_SET(RS_DEPTH_BIAS_ENABLE, rs.depth_bias.enable);
-   COPY_IF_SET(RS_DEPTH_BIAS_FACTORS, rs.depth_bias.constant);
+   COPY_IF_SET(RS_DEPTH_BIAS_FACTORS, rs.depth_bias.constant_factor);
    COPY_IF_SET(RS_DEPTH_BIAS_FACTORS, rs.depth_bias.clamp);
-   COPY_IF_SET(RS_DEPTH_BIAS_FACTORS, rs.depth_bias.slope);
+   COPY_IF_SET(RS_DEPTH_BIAS_FACTORS, rs.depth_bias.slope_factor);
+   COPY_IF_SET(RS_DEPTH_BIAS_FACTORS, rs.depth_bias.representation);
+   COPY_IF_SET(RS_DEPTH_BIAS_FACTORS, rs.depth_bias.exact);
    COPY_IF_SET(RS_LINE_WIDTH, rs.line.width);
    COPY_IF_SET(RS_LINE_MODE, rs.line.mode);
    COPY_IF_SET(RS_LINE_STIPPLE_ENABLE, rs.line.stipple.enable);
@@ -1691,10 +2293,8 @@ vk_dynamic_graphics_state_copy(struct vk_dynamic_graphics_state *dst,
    COPY_IF_SET(MS_ALPHA_TO_ONE_ENABLE, ms.alpha_to_one_enable);
    COPY_IF_SET(MS_SAMPLE_LOCATIONS_ENABLE, ms.sample_locations_enable);
 
-   assert((dst->ms.sample_locations == NULL) ==
-          (src->ms.sample_locations == NULL));
-   if (dst->ms.sample_locations != NULL &&
-       IS_SET_IN_SRC(MS_SAMPLE_LOCATIONS)) {
+   if (IS_SET_IN_SRC(MS_SAMPLE_LOCATIONS)) {
+      assert(dst->ms.sample_locations != NULL);
       COPY_MEMBER(MS_SAMPLE_LOCATIONS, ms.sample_locations->per_pixel);
       COPY_MEMBER(MS_SAMPLE_LOCATIONS, ms.sample_locations->grid_size.width);
       COPY_MEMBER(MS_SAMPLE_LOCATIONS, ms.sample_locations->grid_size.height);
@@ -1739,6 +2339,7 @@ vk_dynamic_graphics_state_copy(struct vk_dynamic_graphics_state *dst,
 
    COPY_IF_SET(CB_LOGIC_OP_ENABLE, cb.logic_op_enable);
    COPY_IF_SET(CB_LOGIC_OP, cb.logic_op);
+   COPY_IF_SET(CB_ATTACHMENT_COUNT, cb.attachment_count);
    COPY_IF_SET(CB_COLOR_WRITE_ENABLES, cb.color_write_enables);
    if (IS_SET_IN_SRC(CB_BLEND_ENABLES)) {
       for (uint32_t a = 0; a < src->cb.attachment_count; a++)
@@ -1764,6 +2365,39 @@ vk_dynamic_graphics_state_copy(struct vk_dynamic_graphics_state *dst,
    }
    if (IS_SET_IN_SRC(CB_BLEND_CONSTANTS))
       COPY_ARRAY(CB_BLEND_CONSTANTS, cb.blend_constants, 4);
+
+   if (IS_SET_IN_SRC(CB_BLEND_ADVANCED)) {
+      for (uint32_t a = 0; a < src->cb.attachment_count; a++) {
+         COPY_MEMBER(CB_BLEND_ADVANCED,
+                     cb.attachments[a].dst_premultiplied);
+         COPY_MEMBER(CB_BLEND_ADVANCED,
+                     cb.attachments[a].src_premultiplied);
+         COPY_MEMBER(CB_BLEND_ADVANCED,
+                     cb.attachments[a].blend_overlap);
+      }
+   }
+
+   COPY_IF_SET(RP_ATTACHMENTS, rp.attachments);
+
+   if (IS_SET_IN_SRC(INPUT_ATTACHMENT_MAP)) {
+      COPY_MEMBER(INPUT_ATTACHMENT_MAP, ial.color_attachment_count);
+      COPY_ARRAY(INPUT_ATTACHMENT_MAP, ial.color_map,
+                 MESA_VK_MAX_COLOR_ATTACHMENTS);
+      COPY_MEMBER(INPUT_ATTACHMENT_MAP, ial.depth_att);
+      COPY_MEMBER(INPUT_ATTACHMENT_MAP, ial.stencil_att);
+   }
+
+   if (IS_SET_IN_SRC(COLOR_ATTACHMENT_MAP)) {
+      COPY_ARRAY(COLOR_ATTACHMENT_MAP, cal.color_map,
+                 MESA_VK_MAX_COLOR_ATTACHMENTS);
+   }
+
+   COPY_IF_SET(ATTACHMENT_FEEDBACK_LOOP_ENABLE, feedback_loops);
+
+   /* rasterization_order_access is not dynamic state, so propagate it
+    * unconditionally when copying (e.g., secondary command buffer execution).
+    */
+   dst->rasterization_order_access |= src->rasterization_order_access;
 
 #undef IS_SET_IN_SRC
 #undef MARK_DIRTY
@@ -1811,15 +2445,16 @@ vk_common_CmdSetVertexInputEXT(VkCommandBuffer commandBuffer,
 
       const uint32_t b = desc->binding;
       bindings_valid |= BITFIELD_BIT(b);
-      SET_DYN_VALUE(dyn, VI, vi->bindings[b].stride, desc->stride);
-      SET_DYN_VALUE(dyn, VI, vi->bindings[b].input_rate, desc->inputRate);
-      SET_DYN_VALUE(dyn, VI, vi->bindings[b].divisor, desc->divisor);
+      dyn->vi->bindings[b].stride = desc->stride;
+      dyn->vi->bindings[b].input_rate = desc->inputRate;
+      dyn->vi->bindings[b].divisor = desc->divisor;
 
       /* Also set bindings_strides in case a driver is keying off that */
-      SET_DYN_VALUE(dyn, VI_BINDING_STRIDES,
-                    vi_binding_strides[b], desc->stride);
+      dyn->vi_binding_strides[b] = desc->stride;
    }
-   SET_DYN_VALUE(dyn, VI, vi->bindings_valid, bindings_valid);
+
+   dyn->vi->bindings_valid = bindings_valid;
+   SET_DYN_VALUE(dyn, VI_BINDINGS_VALID, vi_bindings_valid, bindings_valid);
 
    uint32_t attributes_valid = 0;
    for (uint32_t i = 0; i < vertexAttributeDescriptionCount; i++) {
@@ -1832,11 +2467,16 @@ vk_common_CmdSetVertexInputEXT(VkCommandBuffer commandBuffer,
 
       const uint32_t a = desc->location;
       attributes_valid |= BITFIELD_BIT(a);
-      SET_DYN_VALUE(dyn, VI, vi->attributes[a].binding, desc->binding);
-      SET_DYN_VALUE(dyn, VI, vi->attributes[a].format, desc->format);
-      SET_DYN_VALUE(dyn, VI, vi->attributes[a].offset, desc->offset);
+      dyn->vi->attributes[a].binding = desc->binding;
+      dyn->vi->attributes[a].format = desc->format;
+      dyn->vi->attributes[a].offset = desc->offset;
    }
-   SET_DYN_VALUE(dyn, VI, vi->attributes_valid, attributes_valid);
+   dyn->vi->attributes_valid = attributes_valid;
+
+   BITSET_SET(dyn->set, MESA_VK_DYNAMIC_VI);
+   BITSET_SET(dyn->set, MESA_VK_DYNAMIC_VI_BINDING_STRIDES);
+   BITSET_SET(dyn->dirty, MESA_VK_DYNAMIC_VI);
+   BITSET_SET(dyn->dirty, MESA_VK_DYNAMIC_VI_BINDING_STRIDES);
 }
 
 void
@@ -1851,6 +2491,37 @@ vk_cmd_set_vertex_binding_strides(struct vk_command_buffer *cmd,
       SET_DYN_VALUE(dyn, VI_BINDING_STRIDES,
                     vi_binding_strides[first_binding + i], strides[i]);
    }
+}
+
+void
+vk_cmd_set_vertex_binding_strides2(struct vk_command_buffer *cmd,
+                                   uint32_t first_binding,
+                                   uint32_t binding_count,
+                                   const VkBindVertexBuffer3InfoKHR *bindings)
+{
+   struct vk_dynamic_graphics_state *dyn = &cmd->dynamic_graphics_state;
+
+   for (uint32_t i = 0; i < binding_count; i++) {
+      if (!bindings[i].setStride)
+         continue;
+      SET_DYN_VALUE(dyn, VI_BINDING_STRIDES,
+                    vi_binding_strides[first_binding + i],
+                    bindings[i].addressRange.stride);
+   }
+}
+
+void
+vk_cmd_set_index_buffer_type(struct vk_command_buffer *cmd,
+                             VkIndexType index_type)
+{
+   struct vk_dynamic_graphics_state *dyn = &cmd->dynamic_graphics_state;
+
+   /* From the Vulkan 1.4.348 spec, vkCmdSetPrimitiveRestartIndexEXT():
+    *
+    *    "Binding an index buffer invalidates the custom index value."
+    */
+   SET_DYN_VALUE(dyn, IA_PRIMITIVE_RESTART_INDEX,
+                 ia.primitive_restart_index, vk_index_to_restart(index_type));
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -1873,6 +2544,17 @@ vk_common_CmdSetPrimitiveRestartEnable(VkCommandBuffer commandBuffer,
 
    SET_DYN_BOOL(dyn, IA_PRIMITIVE_RESTART_ENABLE,
                 ia.primitive_restart_enable, primitiveRestartEnable);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vk_common_CmdSetPrimitiveRestartIndexEXT(VkCommandBuffer commandBuffer,
+                                         uint32_t primitiveRestartIndex)
+{
+   VK_FROM_HANDLE(vk_command_buffer, cmd, commandBuffer);
+   struct vk_dynamic_graphics_state *dyn = &cmd->dynamic_graphics_state;
+
+   SET_DYN_VALUE(dyn, IA_PRIMITIVE_RESTART_INDEX,
+                 ia.primitive_restart_index, primitiveRestartIndex);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -1972,8 +2654,8 @@ vk_common_CmdSetDiscardRectangleEXT(VkCommandBuffer commandBuffer,
 }
 
 VKAPI_ATTR void VKAPI_CALL
-vk_common_CmdSetRasterizerDiscardEnableEXT(VkCommandBuffer commandBuffer,
-                                           VkBool32 rasterizerDiscardEnable)
+vk_common_CmdSetRasterizerDiscardEnable(VkCommandBuffer commandBuffer,
+                                        VkBool32 rasterizerDiscardEnable)
 {
    VK_FROM_HANDLE(vk_command_buffer, cmd, commandBuffer);
    struct vk_dynamic_graphics_state *dyn = &cmd->dynamic_graphics_state;
@@ -2072,13 +2754,24 @@ vk_common_CmdSetProvokingVertexModeEXT(VkCommandBuffer commandBuffer,
 }
 
 VKAPI_ATTR void VKAPI_CALL
+vk_common_CmdSetAttachmentFeedbackLoopEnableEXT(VkCommandBuffer commandBuffer,
+                                                VkImageAspectFlags aspectMask)
+{
+   VK_FROM_HANDLE(vk_command_buffer, cmd, commandBuffer);
+   struct vk_dynamic_graphics_state *dyn = &cmd->dynamic_graphics_state;
+
+   SET_DYN_VALUE(dyn, ATTACHMENT_FEEDBACK_LOOP_ENABLE,
+                 feedback_loops, aspectMask);
+}
+
+VKAPI_ATTR void VKAPI_CALL
 vk_common_CmdSetRasterizationStreamEXT(VkCommandBuffer commandBuffer,
                                        uint32_t rasterizationStream)
 {
    VK_FROM_HANDLE(vk_command_buffer, cmd, commandBuffer);
    struct vk_dynamic_graphics_state *dyn = &cmd->dynamic_graphics_state;
 
-   SET_DYN_VALUE(dyn, RS_PROVOKING_VERTEX,
+   SET_DYN_VALUE(dyn, RS_RASTERIZATION_STREAM,
                  rs.rasterization_stream, rasterizationStream);
 }
 
@@ -2100,14 +2793,16 @@ vk_common_CmdSetDepthBias(VkCommandBuffer commandBuffer,
                           float depthBiasSlopeFactor)
 {
    VK_FROM_HANDLE(vk_command_buffer, cmd, commandBuffer);
-   struct vk_dynamic_graphics_state *dyn = &cmd->dynamic_graphics_state;
 
-   SET_DYN_VALUE(dyn, RS_DEPTH_BIAS_FACTORS,
-                 rs.depth_bias.constant, depthBiasConstantFactor);
-   SET_DYN_VALUE(dyn, RS_DEPTH_BIAS_FACTORS,
-                 rs.depth_bias.clamp, depthBiasClamp);
-   SET_DYN_VALUE(dyn, RS_DEPTH_BIAS_FACTORS,
-                 rs.depth_bias.slope, depthBiasSlopeFactor);
+   VkDepthBiasInfoEXT depth_bias_info = {
+      .sType = VK_STRUCTURE_TYPE_DEPTH_BIAS_INFO_EXT,
+      .depthBiasConstantFactor = depthBiasConstantFactor,
+      .depthBiasClamp = depthBiasClamp,
+      .depthBiasSlopeFactor = depthBiasSlopeFactor,
+   };
+
+   cmd->base.device->dispatch_table.CmdSetDepthBias2EXT(commandBuffer,
+                                                        &depth_bias_info);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -2122,7 +2817,7 @@ vk_common_CmdSetLineWidth(VkCommandBuffer commandBuffer,
 
 VKAPI_ATTR void VKAPI_CALL
 vk_common_CmdSetLineRasterizationModeEXT(VkCommandBuffer commandBuffer,
-                                         VkLineRasterizationModeEXT lineRasterizationMode)
+                                         VkLineRasterizationModeKHR lineRasterizationMode)
 {
    VK_FROM_HANDLE(vk_command_buffer, cmd, commandBuffer);
    struct vk_dynamic_graphics_state *dyn = &cmd->dynamic_graphics_state;
@@ -2142,7 +2837,7 @@ vk_common_CmdSetLineStippleEnableEXT(VkCommandBuffer commandBuffer,
 }
 
 VKAPI_ATTR void VKAPI_CALL
-vk_common_CmdSetLineStippleEXT(VkCommandBuffer commandBuffer,
+vk_common_CmdSetLineStippleKHR(VkCommandBuffer commandBuffer,
                                uint32_t lineStippleFactor,
                                uint16_t lineStipplePattern)
 {
@@ -2190,9 +2885,11 @@ vk_common_CmdSetSampleMaskEXT(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(vk_command_buffer, cmd, commandBuffer);
    struct vk_dynamic_graphics_state *dyn = &cmd->dynamic_graphics_state;
 
-   assert(samples <= MESA_VK_MAX_SAMPLES);
+   VkSampleMask sample_mask = BITFIELD_MASK(MESA_VK_MAX_SAMPLES);
+   if (pSampleMask != NULL)
+      sample_mask &= *pSampleMask;
 
-   SET_DYN_VALUE(dyn, MS_SAMPLE_MASK, ms.sample_mask, *pSampleMask);
+   SET_DYN_VALUE(dyn, MS_SAMPLE_MASK, ms.sample_mask, sample_mask);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -2527,7 +3224,7 @@ vk_common_CmdSetColorWriteMaskEXT(VkCommandBuffer commandBuffer,
       uint32_t a = firstAttachment + i;
       assert(a < ARRAY_SIZE(dyn->cb.attachments));
 
-      SET_DYN_VALUE(dyn, CB_BLEND_EQUATIONS,
+      SET_DYN_VALUE(dyn, CB_WRITE_MASKS,
                     cb.attachments[a].write_mask, pColorWriteMasks[i]);
    }
 }
@@ -2549,5 +3246,336 @@ vk_common_CmdSetColorBlendAdvancedEXT(VkCommandBuffer commandBuffer,
                                       uint32_t attachmentCount,
                                       const VkColorBlendAdvancedEXT* pColorBlendAdvanced)
 {
-   unreachable("VK_EXT_blend_operation_advanced unsupported");
+   VK_FROM_HANDLE(vk_command_buffer, cmd, commandBuffer);
+   struct vk_dynamic_graphics_state *dyn = &cmd->dynamic_graphics_state;
+
+   for (uint32_t i = 0; i < attachmentCount; i++) {
+      uint32_t a = firstAttachment + i;
+      assert(a < ARRAY_SIZE(dyn->cb.attachments));
+
+      SET_DYN_VALUE(dyn, CB_BLEND_ADVANCED,
+                    cb.attachments[a].color_blend_op,
+                    pColorBlendAdvanced[i].advancedBlendOp);
+
+      SET_DYN_VALUE(dyn, CB_BLEND_ADVANCED,
+                    cb.attachments[a].alpha_blend_op,
+                    pColorBlendAdvanced[i].advancedBlendOp);
+
+      SET_DYN_VALUE(dyn, CB_BLEND_ADVANCED,
+                    cb.attachments[a].src_premultiplied,
+                    pColorBlendAdvanced[i].srcPremultiplied);
+
+      SET_DYN_VALUE(dyn, CB_BLEND_ADVANCED,
+                    cb.attachments[a].dst_premultiplied,
+                    pColorBlendAdvanced[i].dstPremultiplied);
+
+      SET_DYN_VALUE(dyn, CB_BLEND_ADVANCED,
+                    cb.attachments[a].blend_overlap,
+                    pColorBlendAdvanced[i].blendOverlap);
+
+      SET_DYN_VALUE(dyn, CB_BLEND_ADVANCED,
+                    cb.attachments[a].clamp_results,
+                    pColorBlendAdvanced[i].clampResults);
+   }
+}
+
+void
+vk_cmd_set_cb_attachment_count(struct vk_command_buffer *cmd,
+                               uint32_t attachment_count)
+{
+   struct vk_dynamic_graphics_state *dyn = &cmd->dynamic_graphics_state;
+
+   SET_DYN_VALUE(dyn, CB_ATTACHMENT_COUNT, cb.attachment_count, attachment_count);
+}
+
+void
+vk_cmd_set_rp_attachments(struct vk_command_buffer *cmd,
+                          enum vk_rp_attachment_flags attachments)
+{
+   struct vk_dynamic_graphics_state *dyn = &cmd->dynamic_graphics_state;
+
+   SET_DYN_VALUE(dyn, RP_ATTACHMENTS, rp.attachments, attachments);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vk_common_CmdSetDiscardRectangleEnableEXT(VkCommandBuffer commandBuffer,
+                                          VkBool32 discardRectangleEnable)
+{
+   VK_FROM_HANDLE(vk_command_buffer, cmd, commandBuffer);
+   struct vk_dynamic_graphics_state *dyn = &cmd->dynamic_graphics_state;
+
+   SET_DYN_VALUE(dyn, DR_ENABLE, dr.enable, discardRectangleEnable);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vk_common_CmdSetDiscardRectangleModeEXT(VkCommandBuffer commandBuffer,
+                                        VkDiscardRectangleModeEXT discardRectangleMode)
+{
+   VK_FROM_HANDLE(vk_command_buffer, cmd, commandBuffer);
+   struct vk_dynamic_graphics_state *dyn = &cmd->dynamic_graphics_state;
+
+   SET_DYN_VALUE(dyn, DR_MODE, dr.mode, discardRectangleMode);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vk_common_CmdSetDepthBias2EXT(
+    VkCommandBuffer                             commandBuffer,
+    const VkDepthBiasInfoEXT*                   pDepthBiasInfo)
+{
+   VK_FROM_HANDLE(vk_command_buffer, cmd, commandBuffer);
+   struct vk_dynamic_graphics_state *dyn = &cmd->dynamic_graphics_state;
+
+   SET_DYN_VALUE(dyn, RS_DEPTH_BIAS_FACTORS,
+                 rs.depth_bias.constant_factor, pDepthBiasInfo->depthBiasConstantFactor);
+   SET_DYN_VALUE(dyn, RS_DEPTH_BIAS_FACTORS,
+                 rs.depth_bias.clamp, pDepthBiasInfo->depthBiasClamp);
+   SET_DYN_VALUE(dyn, RS_DEPTH_BIAS_FACTORS,
+                 rs.depth_bias.slope_factor, pDepthBiasInfo->depthBiasSlopeFactor);
+
+   /** From the Vulkan 1.3.254 spec:
+    *
+    *    "If pNext does not contain a VkDepthBiasRepresentationInfoEXT
+    *     structure, then this command is equivalent to including a
+    *     VkDepthBiasRepresentationInfoEXT with depthBiasExact set to VK_FALSE
+    *     and depthBiasRepresentation set to
+    *     VK_DEPTH_BIAS_REPRESENTATION_LEAST_REPRESENTABLE_VALUE_FORMAT_EXT."
+    */
+   const VkDepthBiasRepresentationInfoEXT *dbr_info =
+      vk_find_struct_const(pDepthBiasInfo->pNext, DEPTH_BIAS_REPRESENTATION_INFO_EXT);
+   if (dbr_info) {
+      SET_DYN_VALUE(dyn, RS_DEPTH_BIAS_FACTORS,
+                    rs.depth_bias.representation, dbr_info->depthBiasRepresentation);
+      SET_DYN_VALUE(dyn, RS_DEPTH_BIAS_FACTORS,
+                    rs.depth_bias.exact, dbr_info->depthBiasExact);
+   } else {
+      SET_DYN_VALUE(dyn, RS_DEPTH_BIAS_FACTORS,
+                    rs.depth_bias.representation,
+                    VK_DEPTH_BIAS_REPRESENTATION_LEAST_REPRESENTABLE_VALUE_FORMAT_EXT);
+      SET_DYN_VALUE(dyn, RS_DEPTH_BIAS_FACTORS,
+                    rs.depth_bias.exact, false);
+   }
+}
+
+void
+vk_cmd_set_rendering_attachment_locations(struct vk_command_buffer *cmd,
+                                          const VkRenderingAttachmentLocationInfoKHR *info)
+{
+   struct vk_dynamic_graphics_state *dyn = &cmd->dynamic_graphics_state;
+
+   assert(info->colorAttachmentCount <= MESA_VK_MAX_COLOR_ATTACHMENTS);
+   for (uint32_t i = 0; i < info->colorAttachmentCount; i++) {
+      const uint8_t val =
+         info->pColorAttachmentLocations == NULL ? i :
+         info->pColorAttachmentLocations[i] == VK_ATTACHMENT_UNUSED ?
+         MESA_VK_ATTACHMENT_UNUSED : info->pColorAttachmentLocations[i];
+      SET_DYN_VALUE(dyn, COLOR_ATTACHMENT_MAP, cal.color_map[i], val);
+   }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vk_common_CmdSetRenderingAttachmentLocationsKHR(
+    VkCommandBuffer                             commandBuffer,
+    const VkRenderingAttachmentLocationInfoKHR* pLocationInfo)
+{
+   VK_FROM_HANDLE(vk_command_buffer, cmd, commandBuffer);
+
+   vk_cmd_set_rendering_attachment_locations(cmd, pLocationInfo);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vk_common_CmdSetRenderingInputAttachmentIndicesKHR(
+    VkCommandBuffer                             commandBuffer,
+    const VkRenderingInputAttachmentIndexInfoKHR* pLocationInfo)
+{
+   VK_FROM_HANDLE(vk_command_buffer, cmd, commandBuffer);
+   struct vk_dynamic_graphics_state *dyn = &cmd->dynamic_graphics_state;
+
+   assert(pLocationInfo->colorAttachmentCount <= MESA_VK_MAX_COLOR_ATTACHMENTS);
+   for (uint32_t i = 0; i < pLocationInfo->colorAttachmentCount; i++) {
+      uint8_t val;
+
+      if (!pLocationInfo->pColorAttachmentInputIndices) {
+         val = i;
+      } else if (pLocationInfo->pColorAttachmentInputIndices[i] == VK_ATTACHMENT_UNUSED) {
+         val = MESA_VK_ATTACHMENT_UNUSED;
+      } else {
+         val = pLocationInfo->pColorAttachmentInputIndices[i];
+      }
+
+      SET_DYN_VALUE(dyn, INPUT_ATTACHMENT_MAP,
+                    ial.color_map[i], val);
+   }
+
+   uint8_t depth_att =
+      map_ds_input_attachment_index(pLocationInfo->pDepthInputAttachmentIndex);
+   uint8_t stencil_att =
+      map_ds_input_attachment_index(pLocationInfo->pStencilInputAttachmentIndex);
+   SET_DYN_VALUE(dyn, INPUT_ATTACHMENT_MAP, ial.depth_att, depth_att);
+   SET_DYN_VALUE(dyn, INPUT_ATTACHMENT_MAP, ial.stencil_att, stencil_att);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vk_common_CmdSetDepthClampRangeEXT(VkCommandBuffer commandBuffer,
+                                   VkDepthClampModeEXT depthClampMode,
+                                   const VkDepthClampRangeEXT* pDepthClampRange)
+{
+   VK_FROM_HANDLE(vk_command_buffer, cmd, commandBuffer);
+   struct vk_dynamic_graphics_state *dyn = &cmd->dynamic_graphics_state;
+
+   SET_DYN_BOOL(dyn, VP_DEPTH_CLAMP_RANGE, vp.depth_clamp_mode, depthClampMode);
+   if (depthClampMode == VK_DEPTH_CLAMP_MODE_USER_DEFINED_RANGE_EXT) {
+      SET_DYN_VALUE(dyn, VP_DEPTH_CLAMP_RANGE, vp.depth_clamp_range.minDepthClamp,
+                    pDepthClampRange->minDepthClamp);
+      SET_DYN_VALUE(dyn, VP_DEPTH_CLAMP_RANGE, vp.depth_clamp_range.maxDepthClamp,
+                    pDepthClampRange->maxDepthClamp);
+   }
+}
+
+/* These are stubs required by VK_EXT_shader_object */
+
+VKAPI_ATTR void VKAPI_CALL
+vk_common_CmdSetViewportWScalingEnableNV(
+    VkCommandBuffer                             commandBuffer,
+    VkBool32                                    viewportWScalingEnable)
+{
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vk_common_CmdSetCoverageReductionModeNV(
+    VkCommandBuffer                             commandBuffer,
+    VkCoverageReductionModeNV                   coverageReductionMode)
+{
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vk_common_CmdSetCoverageToColorEnableNV(
+    VkCommandBuffer                             commandBuffer,
+    VkBool32                                    coverageToColorEnable)
+{
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vk_common_CmdSetCoverageToColorLocationNV(
+    VkCommandBuffer                             commandBuffer,
+    uint32_t                                    coverageToColorLocation)
+{
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vk_common_CmdSetCoverageModulationModeNV(
+    VkCommandBuffer                             commandBuffer,
+    VkCoverageModulationModeNV                  coverageModulationMode)
+{
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vk_common_CmdSetCoverageModulationTableEnableNV(
+    VkCommandBuffer                             commandBuffer,
+    VkBool32                                    coverageModulationTableEnable)
+{
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vk_common_CmdSetCoverageModulationTableNV(
+    VkCommandBuffer                             commandBuffer,
+    uint32_t                                    coverageModulationTableCount,
+    const float*                                pCoverageModulationTable)
+{
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vk_common_CmdSetRepresentativeFragmentTestEnableNV(
+    VkCommandBuffer                             commandBuffer,
+    VkBool32                                    representativeFragmentTestEnable)
+{
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vk_common_CmdSetShadingRateImageEnableNV(
+    VkCommandBuffer                             commandBuffer,
+    VkBool32                                    shadingRateImageEnable)
+{
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vk_common_CmdSetViewportSwizzleNV(
+    VkCommandBuffer                             commandBuffer,
+    uint32_t                                    firstViewport,
+    uint32_t                                    viewportCount,
+    const VkViewportSwizzleNV*                  pViewportSwizzles)
+{
+}
+
+const char *
+vk_dynamic_graphic_state_to_str(enum mesa_vk_dynamic_graphics_state state)
+{
+#define NAME(name) \
+      case MESA_VK_DYNAMIC_##name: return #name
+
+   switch (state) {
+      NAME(VI);
+      NAME(VI_BINDINGS_VALID);
+      NAME(VI_BINDING_STRIDES);
+      NAME(IA_PRIMITIVE_TOPOLOGY);
+      NAME(IA_PRIMITIVE_RESTART_ENABLE);
+      NAME(TS_PATCH_CONTROL_POINTS);
+      NAME(TS_DOMAIN_ORIGIN);
+      NAME(VP_VIEWPORT_COUNT);
+      NAME(VP_VIEWPORTS);
+      NAME(VP_SCISSOR_COUNT);
+      NAME(VP_SCISSORS);
+      NAME(VP_DEPTH_CLIP_NEGATIVE_ONE_TO_ONE);
+      NAME(VP_DEPTH_CLAMP_RANGE);
+      NAME(DR_RECTANGLES);
+      NAME(DR_MODE);
+      NAME(DR_ENABLE);
+      NAME(RS_RASTERIZER_DISCARD_ENABLE);
+      NAME(RS_DEPTH_CLAMP_ENABLE);
+      NAME(RS_DEPTH_CLIP_ENABLE);
+      NAME(RS_POLYGON_MODE);
+      NAME(RS_CULL_MODE);
+      NAME(RS_FRONT_FACE);
+      NAME(RS_CONSERVATIVE_MODE);
+      NAME(RS_EXTRA_PRIMITIVE_OVERESTIMATION_SIZE);
+      NAME(RS_RASTERIZATION_ORDER_AMD);
+      NAME(RS_PROVOKING_VERTEX);
+      NAME(RS_RASTERIZATION_STREAM);
+      NAME(RS_DEPTH_BIAS_ENABLE);
+      NAME(RS_DEPTH_BIAS_FACTORS);
+      NAME(RS_LINE_WIDTH);
+      NAME(RS_LINE_MODE);
+      NAME(RS_LINE_STIPPLE_ENABLE);
+      NAME(RS_LINE_STIPPLE);
+      NAME(FSR);
+      NAME(MS_RASTERIZATION_SAMPLES);
+      NAME(MS_SAMPLE_MASK);
+      NAME(MS_ALPHA_TO_COVERAGE_ENABLE);
+      NAME(MS_ALPHA_TO_ONE_ENABLE);
+      NAME(MS_SAMPLE_LOCATIONS_ENABLE);
+      NAME(MS_SAMPLE_LOCATIONS);
+      NAME(DS_DEPTH_TEST_ENABLE);
+      NAME(DS_DEPTH_WRITE_ENABLE);
+      NAME(DS_DEPTH_COMPARE_OP);
+      NAME(DS_DEPTH_BOUNDS_TEST_ENABLE);
+      NAME(DS_DEPTH_BOUNDS_TEST_BOUNDS);
+      NAME(DS_STENCIL_TEST_ENABLE);
+      NAME(DS_STENCIL_OP);
+      NAME(DS_STENCIL_COMPARE_MASK);
+      NAME(DS_STENCIL_WRITE_MASK);
+      NAME(DS_STENCIL_REFERENCE);
+      NAME(CB_LOGIC_OP_ENABLE);
+      NAME(CB_LOGIC_OP);
+      NAME(CB_ATTACHMENT_COUNT);
+      NAME(CB_COLOR_WRITE_ENABLES);
+      NAME(CB_BLEND_ENABLES);
+      NAME(CB_BLEND_EQUATIONS);
+      NAME(CB_WRITE_MASKS);
+      NAME(CB_BLEND_CONSTANTS);
+      NAME(ATTACHMENT_FEEDBACK_LOOP_ENABLE);
+      NAME(COLOR_ATTACHMENT_MAP);
+      NAME(CB_BLEND_ADVANCED);
+   default: UNREACHABLE("Invalid state");
+   }
+
+#undef NAME
 }

@@ -24,14 +24,14 @@
 
 #include <stdlib.h>
 
+#include "util/log.h"
 #include "vc4_qpu.h"
 
 static void
 fail_instr(uint64_t inst, const char *msg)
 {
-        fprintf(stderr, "vc4_qpu_validate: %s: ", msg);
-        vc4_qpu_disasm(&inst, 1);
-        fprintf(stderr, "\n");
+        mesa_loge("vc4_qpu_validate: %s: ", msg);
+        vc4_qpu_disasme(&inst, 1);
         abort();
 }
 
@@ -121,7 +121,7 @@ vc4_qpu_validate(uint64_t *insts, uint32_t num_inst)
          * keep compiling the validation code to make sure it doesn't get
          * broken.
          */
-#ifndef DEBUG
+#if !MESA_DEBUG
         return;
 #endif
 

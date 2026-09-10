@@ -27,8 +27,8 @@
 #include "util/u_transfer.h"
 #include "util/format_srgb.h"
 
-#include "tgsi/tgsi_parse.h"
 #include "compiler/nir/nir.h"
+#include "nir/tgsi_to_nir.h"
 
 #include "nv50/nv50_stateobj.h"
 #include "nv50/nv50_context.h"
@@ -630,7 +630,7 @@ nv50_stage_sampler_states_bind(struct nv50_context *nv50, int s,
 
 static void
 nv50_bind_sampler_states(struct pipe_context *pipe,
-                         enum pipe_shader_type shader, unsigned start,
+                         mesa_shader_stage shader, unsigned start,
                          unsigned num_samplers, void **samplers)
 {
    unsigned s = nv50_context_shader_stage(shader);
@@ -661,7 +661,7 @@ nv50_sampler_view_destroy(struct pipe_context *pipe,
 
 static inline void
 nv50_stage_set_sampler_views(struct nv50_context *nv50, int s,
-                             unsigned nr, bool take_ownership,
+                             unsigned nr,
                              struct pipe_sampler_view **views)
 {
    unsigned i;
@@ -684,12 +684,7 @@ nv50_stage_set_sampler_views(struct nv50_context *nv50, int s,
          nv50->textures_coherent[s] &= ~(1 << i);
       }
 
-      if (take_ownership) {
-         pipe_sampler_view_reference(&nv50->textures[s][i], NULL);
-         nv50->textures[s][i] = view;
-      } else {
-         pipe_sampler_view_reference(&nv50->textures[s][i], view);
-      }
+      pipe_sampler_view_reference(&nv50->textures[s][i], view);
    }
 
    assert(nv50->num_textures[s] <= PIPE_MAX_SAMPLERS);
@@ -706,17 +701,16 @@ nv50_stage_set_sampler_views(struct nv50_context *nv50, int s,
 }
 
 static void
-nv50_set_sampler_views(struct pipe_context *pipe, enum pipe_shader_type shader,
+nv50_set_sampler_views(struct pipe_context *pipe, mesa_shader_stage shader,
                        unsigned start, unsigned nr,
                        unsigned unbind_num_trailing_slots,
-                       bool take_ownership,
                        struct pipe_sampler_view **views)
 {
    struct nv50_context *nv50 = nv50_context(pipe);
    unsigned s = nv50_context_shader_stage(shader);
 
    assert(start == 0);
-   nv50_stage_set_sampler_views(nv50, s, nr, take_ownership, views);
+   nv50_stage_set_sampler_views(nv50, s, nr, views);
 
    if (unlikely(s == NV50_SHADER_STAGE_COMPUTE)) {
       nouveau_bufctx_reset(nv50->bufctx_cp, NV50_BIND_CP_TEXTURES);
@@ -737,7 +731,7 @@ nv50_set_sampler_views(struct pipe_context *pipe, enum pipe_shader_type shader,
 static void *
 nv50_sp_state_create(struct pipe_context *pipe,
                      const struct pipe_shader_state *cso,
-                     enum pipe_shader_type type)
+                     mesa_shader_stage type)
 {
    struct nv50_program *prog;
 
@@ -746,14 +740,13 @@ nv50_sp_state_create(struct pipe_context *pipe,
       return NULL;
 
    prog->type = type;
-   prog->pipe.type = cso->type;
 
    switch (cso->type) {
    case PIPE_SHADER_IR_TGSI:
-      prog->pipe.tokens = tgsi_dup_tokens(cso->tokens);
+      prog->nir = tgsi_to_nir(cso->tokens, pipe->screen, false);
       break;
    case PIPE_SHADER_IR_NIR:
-      prog->pipe.ir.nir = cso->ir.nir;
+      prog->nir = cso->ir.nir;
       break;
    default:
       assert(!"unsupported IR!");
@@ -762,7 +755,7 @@ nv50_sp_state_create(struct pipe_context *pipe,
    }
 
    if (cso->stream_output.num_outputs)
-      prog->pipe.stream_output = cso->stream_output;
+      prog->stream_output = cso->stream_output;
 
    prog->translated = nv50_program_translate(
          prog, nv50_context(pipe)->screen->base.device->chipset,
@@ -781,10 +774,7 @@ nv50_sp_state_delete(struct pipe_context *pipe, void *hwcso)
    nv50_program_destroy(nv50, prog);
    simple_mtx_unlock(&nv50->screen->state_lock);
 
-   if (prog->pipe.type == PIPE_SHADER_IR_TGSI)
-      FREE((void *)prog->pipe.tokens);
-   else if (prog->pipe.type == PIPE_SHADER_IR_NIR)
-      ralloc_free(prog->pipe.ir.nir);
+   ralloc_free(prog->nir);
    FREE(prog);
 }
 
@@ -792,7 +782,7 @@ static void *
 nv50_vp_state_create(struct pipe_context *pipe,
                      const struct pipe_shader_state *cso)
 {
-   return nv50_sp_state_create(pipe, cso, PIPE_SHADER_VERTEX);
+   return nv50_sp_state_create(pipe, cso, MESA_SHADER_VERTEX);
 }
 
 static void
@@ -808,7 +798,7 @@ static void *
 nv50_fp_state_create(struct pipe_context *pipe,
                      const struct pipe_shader_state *cso)
 {
-   return nv50_sp_state_create(pipe, cso, PIPE_SHADER_FRAGMENT);
+   return nv50_sp_state_create(pipe, cso, MESA_SHADER_FRAGMENT);
 }
 
 static void
@@ -824,7 +814,7 @@ static void *
 nv50_gp_state_create(struct pipe_context *pipe,
                      const struct pipe_shader_state *cso)
 {
-   return nv50_sp_state_create(pipe, cso, PIPE_SHADER_GEOMETRY);
+   return nv50_sp_state_create(pipe, cso, MESA_SHADER_GEOMETRY);
 }
 
 static void
@@ -845,15 +835,16 @@ nv50_cp_state_create(struct pipe_context *pipe,
    prog = CALLOC_STRUCT(nv50_program);
    if (!prog)
       return NULL;
-   prog->type = PIPE_SHADER_COMPUTE;
-   prog->pipe.type = cso->ir_type;
+   prog->type = MESA_SHADER_COMPUTE;
 
    switch(cso->ir_type) {
-   case PIPE_SHADER_IR_TGSI:
-      prog->pipe.tokens = tgsi_dup_tokens((const struct tgsi_token *)cso->prog);
+   case PIPE_SHADER_IR_TGSI: {
+      const struct tgsi_token *tokens = cso->prog;
+      prog->nir = tgsi_to_nir(tokens, pipe->screen, false);
       break;
+   }
    case PIPE_SHADER_IR_NIR:
-      prog->pipe.ir.nir = (nir_shader *)cso->prog;
+      prog->nir = (nir_shader *)cso->prog;
       break;
    default:
       assert(!"unsupported IR!");
@@ -862,7 +853,6 @@ nv50_cp_state_create(struct pipe_context *pipe,
    }
 
    prog->cp.smem_size = cso->static_shared_mem;
-   prog->parm_size = cso->req_input_mem;
 
    return (void *)prog;
 }
@@ -877,9 +867,24 @@ nv50_cp_state_bind(struct pipe_context *pipe, void *hwcso)
 }
 
 static void
+nv50_get_compute_state_info(struct pipe_context *pipe, void *hwcso,
+                            struct pipe_compute_state_object_info *info)
+{
+   struct nv50_context *nv50 = nv50_context(pipe);
+   struct nv50_program *prog = (struct nv50_program *)hwcso;
+   uint16_t obj_class = nv50->screen->compute->oclass;
+   uint32_t smregs = obj_class >= NVA3_COMPUTE_CLASS ? 16384 : 8192;
+   uint32_t threads = smregs / align(prog->max_gpr, 4);
+
+   info->max_threads = MIN2(ROUND_DOWN_TO(threads, 32), 512);
+   info->private_memory = prog->tls_space;
+   info->preferred_simd_size = 32;
+   info->simd_sizes = 32;
+}
+
+static void
 nv50_set_constant_buffer(struct pipe_context *pipe,
-                         enum pipe_shader_type shader, uint index,
-                         bool take_ownership,
+                         mesa_shader_stage shader, uint index,
                          const struct pipe_constant_buffer *cb)
 {
    struct nv50_context *nv50 = nv50_context(pipe);
@@ -887,7 +892,7 @@ nv50_set_constant_buffer(struct pipe_context *pipe,
    const unsigned s = nv50_context_shader_stage(shader);
    const unsigned i = index;
 
-   if (unlikely(shader == PIPE_SHADER_COMPUTE)) {
+   if (unlikely(shader == MESA_SHADER_COMPUTE)) {
       if (nv50->constbuf[s][i].user)
          nv50->constbuf[s][i].u.buf = NULL;
       else
@@ -909,12 +914,7 @@ nv50_set_constant_buffer(struct pipe_context *pipe,
    if (nv50->constbuf[s][i].u.buf)
       nv04_resource(nv50->constbuf[s][i].u.buf)->cb_bindings[s] &= ~(1 << i);
 
-   if (take_ownership) {
-      pipe_resource_reference(&nv50->constbuf[s][i].u.buf, NULL);
-      nv50->constbuf[s][i].u.buf = res;
-   } else {
-      pipe_resource_reference(&nv50->constbuf[s][i].u.buf, res);
-   }
+   pipe_resource_reference(&nv50->constbuf[s][i].u.buf, res);
 
    nv50->constbuf[s][i].user = (cb && cb->user_buffer) ? true : false;
    if (nv50->constbuf[s][i].user) {
@@ -1000,6 +1000,7 @@ nv50_set_framebuffer_state(struct pipe_context *pipe,
 
    nouveau_bufctx_reset(nv50->bufctx_3d, NV50_BIND_3D_FB);
 
+   nv50_framebuffer_init(pipe, fb, nv50->fb_cbufs, &nv50->fb_zsbuf);
    util_copy_framebuffer_state(&nv50->framebuffer, fb);
 
    nv50->dirty_3d |= NV50_NEW_3D_FRAMEBUFFER | NV50_NEW_3D_TEXTURES;
@@ -1071,9 +1072,7 @@ nv50_set_window_rectangles(struct pipe_context *pipe,
 
 static void
 nv50_set_vertex_buffers(struct pipe_context *pipe,
-                        unsigned start_slot, unsigned count,
-                        unsigned unbind_num_trailing_slots,
-                        bool take_ownership,
+                        unsigned count,
                         const struct pipe_vertex_buffer *vb)
 {
    struct nv50_context *nv50 = nv50_context(pipe);
@@ -1082,18 +1081,18 @@ nv50_set_vertex_buffers(struct pipe_context *pipe,
    nouveau_bufctx_reset(nv50->bufctx_3d, NV50_BIND_3D_VERTEX);
    nv50->dirty_3d |= NV50_NEW_3D_ARRAYS;
 
+   unsigned last_count = nv50->num_vtxbufs;
    util_set_vertex_buffers_count(nv50->vtxbuf, &nv50->num_vtxbufs, vb,
-                                 start_slot, count,
-                                 unbind_num_trailing_slots,
-                                 take_ownership);
+                                 count);
 
-   unsigned clear_mask = ~u_bit_consecutive(start_slot + count, unbind_num_trailing_slots);
+   unsigned clear_mask =
+      last_count > count ? BITFIELD_RANGE(count, last_count - count) : 0;
    nv50->vbo_user &= clear_mask;
    nv50->vbo_constant &= clear_mask;
    nv50->vtxbufs_coherent &= clear_mask;
 
    if (!vb) {
-      clear_mask = ~u_bit_consecutive(start_slot, count);
+      clear_mask = ~u_bit_consecutive(0, count);
       nv50->vbo_user &= clear_mask;
       nv50->vbo_constant &= clear_mask;
       nv50->vtxbufs_coherent &= clear_mask;
@@ -1101,18 +1100,13 @@ nv50_set_vertex_buffers(struct pipe_context *pipe,
    }
 
    for (i = 0; i < count; ++i) {
-      unsigned dst_index = start_slot + i;
+      unsigned dst_index = i;
 
       if (vb[i].is_user_buffer) {
          nv50->vbo_user |= 1 << dst_index;
-         if (!vb[i].stride)
-            nv50->vbo_constant |= 1 << dst_index;
-         else
-            nv50->vbo_constant &= ~(1 << dst_index);
          nv50->vtxbufs_coherent &= ~(1 << dst_index);
       } else {
          nv50->vbo_user &= ~(1 << dst_index);
-         nv50->vbo_constant &= ~(1 << dst_index);
 
          if (vb[i].buffer.resource &&
              vb[i].buffer.resource->flags & PIPE_RESOURCE_FLAG_MAP_COHERENT)
@@ -1200,7 +1194,8 @@ static void
 nv50_set_stream_output_targets(struct pipe_context *pipe,
                                unsigned num_targets,
                                struct pipe_stream_output_target **targets,
-                               const unsigned *offsets)
+                               const unsigned *offsets,
+                               enum mesa_prim output_prim)
 {
    struct nv50_context *nv50 = nv50_context(pipe);
    unsigned i;
@@ -1310,7 +1305,7 @@ nv50_bind_images_range(struct nv50_context *nv50,
 
 static void
 nv50_set_shader_images(struct pipe_context *pipe,
-                       enum pipe_shader_type shader,
+                       mesa_shader_stage shader,
                        unsigned start, unsigned nr,
                        unsigned unbind_num_trailing_slots,
                        const struct pipe_image_view *images)
@@ -1327,14 +1322,6 @@ nv50_set_shader_images(struct pipe_context *pipe,
       return;
 
    nv50_context(pipe)->dirty_cp |= NV50_NEW_CP_SURFACES;
-}
-
-static void
-nv50_set_compute_resources(struct pipe_context *pipe,
-                           unsigned start, unsigned nr,
-                           struct pipe_surface **resources)
-{
-   /* TODO: bind surfaces */
 }
 
 static bool
@@ -1383,7 +1370,7 @@ nv50_bind_buffers_range(struct nv50_context *nv50,
 
 static void
 nv50_set_shader_buffers(struct pipe_context *pipe,
-                        enum pipe_shader_type shader,
+                        mesa_shader_stage shader,
                         unsigned start, unsigned nr,
                         const struct pipe_shader_buffer *buffers,
                         unsigned writable_bitmask)
@@ -1481,6 +1468,8 @@ nv50_init_state_functions(struct nv50_context *nv50)
 
    pipe->create_sampler_view = nv50_create_sampler_view;
    pipe->sampler_view_destroy = nv50_sampler_view_destroy;
+   pipe->sampler_view_release = u_default_sampler_view_release;
+   pipe->resource_release = u_default_resource_release;
    pipe->set_sampler_views = nv50_set_sampler_views;
 
    pipe->create_vs_state = nv50_vp_state_create;
@@ -1495,6 +1484,8 @@ nv50_init_state_functions(struct nv50_context *nv50)
    pipe->delete_fs_state = nv50_sp_state_delete;
    pipe->delete_gs_state = nv50_sp_state_delete;
    pipe->delete_compute_state = nv50_sp_state_delete;
+
+   pipe->get_compute_state_info = nv50_get_compute_state_info;
 
    pipe->set_blend_color = nv50_set_blend_color;
    pipe->set_stencil_ref = nv50_set_stencil_ref;
@@ -1519,7 +1510,6 @@ nv50_init_state_functions(struct nv50_context *nv50)
    pipe->set_stream_output_targets = nv50_set_stream_output_targets;
 
    pipe->set_global_binding = nv50_set_global_bindings;
-   pipe->set_compute_resources = nv50_set_compute_resources;
    pipe->set_shader_images = nv50_set_shader_images;
    pipe->set_shader_buffers = nv50_set_shader_buffers;
 

@@ -1,24 +1,6 @@
 /*
- * Copyright (C) 2018 Rob Clark <robclark@freedesktop.org>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * Copyright © 2018 Rob Clark <robclark@freedesktop.org>
+ * SPDX-License-Identifier: MIT
  *
  * Authors:
  *    Rob Clark <robclark@freedesktop.org>
@@ -53,8 +35,8 @@ fd_ringbuffer_sp_init(struct fd_ringbuffer_sp *fd_ring, uint32_t size,
                       enum fd_ringbuffer_flags flags);
 
 
-static void
-append_suballoc_bo(struct fd_submit_sp *submit, struct fd_bo *bo)
+static inline bool
+check_append_suballoc_bo(struct fd_submit_sp *submit, struct fd_bo *bo, bool check)
 {
    uint32_t idx = READ_ONCE(bo->idx);
 
@@ -68,6 +50,8 @@ append_suballoc_bo(struct fd_submit_sp *submit, struct fd_bo *bo)
       if (entry) {
          /* found */
          idx = (uint32_t)(uintptr_t)entry->data;
+      } else if (unlikely(check)) {
+         return false;
       } else {
          idx = APPEND(submit, suballoc_bos, fd_bo_ref(bo));
 
@@ -76,15 +60,23 @@ append_suballoc_bo(struct fd_submit_sp *submit, struct fd_bo *bo)
       }
       bo->idx = idx;
    }
+
+   return true;
 }
 
-/* add (if needed) bo to submit and return index: */
-uint32_t
-fd_submit_append_bo(struct fd_submit_sp *submit, struct fd_bo *bo)
+static inline uint32_t
+check_append_bo(struct fd_submit_sp *submit, struct fd_bo *bo, bool check)
 {
    if (suballoc_bo(bo)) {
-      append_suballoc_bo(submit, bo);
-      bo = fd_bo_heap_block(bo);
+      if (check) {
+         if (!check_append_suballoc_bo(submit, bo, true)) {
+            return ~0;
+         }
+         bo = fd_bo_heap_block(bo);
+      } else {
+         check_append_suballoc_bo(submit, bo, false);
+         bo = fd_bo_heap_block(bo);
+      }
    }
 
    /* NOTE: it is legal to use the same bo on different threads for
@@ -101,6 +93,8 @@ fd_submit_append_bo(struct fd_submit_sp *submit, struct fd_bo *bo)
       if (entry) {
          /* found */
          idx = (uint32_t)(uintptr_t)entry->data;
+      } else if (unlikely(check)) {
+         return ~0;
       } else {
          idx = APPEND(submit, bos, fd_bo_ref(bo));
 
@@ -111,6 +105,13 @@ fd_submit_append_bo(struct fd_submit_sp *submit, struct fd_bo *bo)
    }
 
    return idx;
+}
+
+/* add (if needed) bo to submit and return index: */
+uint32_t
+fd_submit_append_bo(struct fd_submit_sp *submit, struct fd_bo *bo)
+{
+   return check_append_bo(submit, bo, false);
 }
 
 static void
@@ -292,11 +293,16 @@ flush_deferred_submits(struct fd_device *dev)
 
    DEBUG_MSG("enqueue: %u", submit->fence);
 
-   util_queue_add_job(&submit->pipe->dev->submit_queue,
-                      submit, fence,
-                      fd_submit_sp_flush_execute,
-                      fd_submit_sp_flush_cleanup,
-                      0);
+   if (fd_device_threaded_submit(submit->pipe->dev)) {
+      util_queue_add_job(&submit->pipe->dev->submit_queue,
+                         submit, fence,
+                         fd_submit_sp_flush_execute,
+                         fd_submit_sp_flush_cleanup,
+                         0);
+   } else {
+      fd_submit_sp_flush_execute(submit, NULL, 0);
+      fd_submit_sp_flush_cleanup(submit, NULL, 0);
+   }
 }
 
 static bool
@@ -354,7 +360,7 @@ fd_submit_sp_flush(struct fd_submit *submit, int in_fence_fd, bool use_fence_fd)
 
    bool has_shared = fd_submit_sp_flush_prep(submit, in_fence_fd, out_fence);
 
-   if ((in_fence_fd != -1) || out_fence->use_fence_fd)
+   if (((in_fence_fd != -1) || out_fence->use_fence_fd) && !dev->disable_explicit_sync_heuristic)
       pipe->no_implicit_sync = true;
 
    /* The rule about skipping submit merging with shared buffers is only
@@ -393,6 +399,9 @@ fd_pipe_sp_flush(struct fd_pipe *pipe, uint32_t fence)
 {
    struct fd_device *dev = pipe->dev;
 
+   if (!fd_fence_before(pipe->last_submit_fence, fence))
+      return;
+
    MESA_TRACE_FUNC();
 
    simple_mtx_lock(&dev->submit_lock);
@@ -402,6 +411,9 @@ fd_pipe_sp_flush(struct fd_pipe *pipe, uint32_t fence)
    flush_deferred_submits(dev);
 
    simple_mtx_unlock(&dev->submit_lock);
+
+   if (!fd_device_threaded_submit(pipe->dev))
+      return;
 
    /* Once we are sure that we've enqueued at least up to the requested
     * submit, we need to be sure that submitq has caught up and flushed
@@ -460,6 +472,7 @@ fd_submit_sp_new(struct fd_pipe *pipe, flush_submit_list_fn flush_submit_list)
    slab_create_child(&fd_submit->ring_pool, &pipe->ring_pool);
 
    fd_submit->flush_submit_list = flush_submit_list;
+   fd_submit->seqno = seqno_next(&pipe->submit_seqno);
 
    submit = &fd_submit->base;
    submit->funcs = &submit_funcs;
@@ -526,7 +539,7 @@ fd_ringbuffer_references_bo(struct fd_ringbuffer *ring, struct fd_bo *bo)
 }
 
 static void
-fd_ringbuffer_sp_emit_bo_nonobj(struct fd_ringbuffer *ring, struct fd_bo *bo)
+fd_ringbuffer_sp_attach_bo_nonobj(struct fd_ringbuffer *ring, struct fd_bo *bo)
 {
    assert(!(ring->flags & _FD_RINGBUFFER_OBJECT));
 
@@ -537,7 +550,74 @@ fd_ringbuffer_sp_emit_bo_nonobj(struct fd_ringbuffer *ring, struct fd_bo *bo)
 }
 
 static void
-fd_ringbuffer_sp_emit_bo_obj(struct fd_ringbuffer *ring, struct fd_bo *bo)
+fd_ringbuffer_sp_assert_attached_nonobj(struct fd_ringbuffer *ring, struct fd_bo *bo)
+{
+#ifndef NDEBUG
+   struct fd_ringbuffer_sp *fd_ring = to_fd_ringbuffer_sp(ring);
+   struct fd_submit_sp *fd_submit = to_fd_submit_sp(fd_ring->u.submit);
+   assert(check_append_bo(fd_submit, bo, true) != ~0);
+#endif
+}
+
+static struct fd_bo *
+find_target_bo(struct fd_ringbuffer *target, uint32_t cmd_idx, uint32_t *size)
+{
+   struct fd_ringbuffer_sp *fd_target = to_fd_ringbuffer_sp(target);
+
+   if ((target->flags & FD_RINGBUFFER_GROWABLE) &&
+       (cmd_idx < fd_target->u.nr_cmds)) {
+      *size = fd_target->u.cmds[cmd_idx].size;
+      return fd_target->u.cmds[cmd_idx].ring_bo;
+   } else {
+      *size = offset_bytes(target->cur, target->start);
+      return fd_target->ring_bo;
+   }
+}
+
+static uint32_t
+fd_ringbuffer_sp_attach_ring_nonobj(struct fd_ringbuffer *ring,
+                                    struct fd_ringbuffer *target,
+                                    uint32_t cmd_idx,
+                                    uint64_t *iova)
+{
+   struct fd_ringbuffer_sp *fd_target = to_fd_ringbuffer_sp(target);
+   struct fd_ringbuffer_sp *fd_ring = to_fd_ringbuffer_sp(ring);
+   struct fd_submit_sp *fd_submit = to_fd_submit_sp(fd_ring->u.submit);
+   struct fd_bo *bo;
+   uint32_t size;
+
+   bo = find_target_bo(target, cmd_idx, &size);
+
+   *iova = bo->iova + fd_target->offset;
+
+   fd_ringbuffer_sp_attach_bo_nonobj(ring, bo);
+
+   if (!(target->flags & _FD_RINGBUFFER_OBJECT))
+      return size;
+
+   if ((fd_submit->seqno != fd_target->u.last_submit_seqno) ||
+       (target->flags & FD_RINGBUFFER_SHAREABLE)) {
+      for (unsigned i = 0; i < fd_target->u.nr_reloc_bos; i++) {
+         fd_submit_append_bo(fd_submit, fd_target->u.reloc_bos[i]);
+      }
+      fd_target->u.last_submit_seqno = fd_submit->seqno;
+   }
+
+#ifndef NDEBUG
+   /* Dealing with assert'd BOs is deferred until the submit is known,
+    * since the batch resource tracking attaches BOs directly to
+    * the submit instead of the long lived stateobj
+    */
+   for (unsigned i = 0; i < fd_target->u.nr_assert_bos; i++) {
+      fd_ringbuffer_sp_assert_attached_nonobj(ring, fd_target->u.assert_bos[i]);
+   }
+#endif
+
+   return size;
+}
+
+static void
+fd_ringbuffer_sp_attach_bo_obj(struct fd_ringbuffer *ring, struct fd_bo *bo)
 {
    assert(ring->flags & _FD_RINGBUFFER_OBJECT);
 
@@ -552,6 +632,56 @@ fd_ringbuffer_sp_emit_bo_obj(struct fd_ringbuffer *ring, struct fd_bo *bo)
    if (!fd_ringbuffer_references_bo(ring, bo)) {
       APPEND(&fd_ring->u, reloc_bos, fd_bo_ref(bo));
    }
+}
+
+static void
+fd_ringbuffer_sp_assert_attached_obj(struct fd_ringbuffer *ring, struct fd_bo *bo)
+{
+#ifndef NDEBUG
+   /* If the stateobj already references the bo, nothing more to do: */
+   if (fd_ringbuffer_references_bo(ring, bo))
+      return;
+
+   /* If not, we need to defer the assert.. because the batch resource
+    * tracking may have attached the bo to the submit that the stateobj
+    * will eventually be referenced by:
+    */
+   struct fd_ringbuffer_sp *fd_ring = to_fd_ringbuffer_sp(ring);
+   for (int i = 0; i < fd_ring->u.nr_assert_bos; i++)
+      if (fd_ring->u.assert_bos[i] == bo)
+         return;
+
+   APPEND(&fd_ring->u, assert_bos, fd_bo_ref(bo));
+#endif
+}
+
+static uint32_t
+fd_ringbuffer_sp_attach_ring_obj(struct fd_ringbuffer *ring,
+                                 struct fd_ringbuffer *target,
+                                 uint32_t cmd_idx,
+                                 uint64_t *iova)
+{
+   struct fd_ringbuffer_sp *fd_target = to_fd_ringbuffer_sp(target);
+   struct fd_ringbuffer_sp *fd_ring = to_fd_ringbuffer_sp(ring);
+   struct fd_bo *bo;
+   uint32_t size;
+
+   bo = find_target_bo(target, cmd_idx, &size);
+
+   *iova = bo->iova + fd_target->offset;
+
+   fd_ringbuffer_sp_attach_bo_obj(ring, bo);
+
+   if (!(target->flags & _FD_RINGBUFFER_OBJECT))
+      return size;
+
+   for (unsigned i = 0; i < fd_target->u.nr_reloc_bos; i++) {
+      struct fd_bo *target_bo = fd_target->u.reloc_bos[i];
+      if (!fd_ringbuffer_references_bo(ring, target_bo))
+         APPEND(&fd_ring->u, reloc_bos, fd_bo_ref(target_bo));
+   }
+
+   return size;
 }
 
 #define PTRSZ 64
@@ -597,6 +727,10 @@ fd_ringbuffer_sp_destroy(struct fd_ringbuffer *ring)
    if (ring->flags & _FD_RINGBUFFER_OBJECT) {
       fd_bo_del_array(fd_ring->u.reloc_bos, fd_ring->u.nr_reloc_bos);
       free(fd_ring->u.reloc_bos);
+#ifndef NDEBUG
+      fd_bo_del_array(fd_ring->u.assert_bos, fd_ring->u.nr_assert_bos);
+      free(fd_ring->u.assert_bos);
+#endif
       free(fd_ring);
    } else {
       struct fd_submit *submit = fd_ring->u.submit;
@@ -613,9 +747,11 @@ fd_ringbuffer_sp_destroy(struct fd_ringbuffer *ring)
 
 static const struct fd_ringbuffer_funcs ring_funcs_nonobj_32 = {
    .grow = fd_ringbuffer_sp_grow,
-   .emit_bo = fd_ringbuffer_sp_emit_bo_nonobj,
+   .attach_bo = fd_ringbuffer_sp_attach_bo_nonobj,
+   .attach_ring = fd_ringbuffer_sp_attach_ring_nonobj,
+   .assert_attached = fd_ringbuffer_sp_assert_attached_nonobj,
    .emit_reloc = fd_ringbuffer_sp_emit_reloc_nonobj_32,
-   .emit_reloc_ring = fd_ringbuffer_sp_emit_reloc_ring_32,
+   .emit_reloc_ring = fd_ringbuffer_sp_emit_reloc_ring_nonobj_32,
    .cmd_count = fd_ringbuffer_sp_cmd_count,
    .check_size = fd_ringbuffer_sp_check_size,
    .destroy = fd_ringbuffer_sp_destroy,
@@ -623,18 +759,22 @@ static const struct fd_ringbuffer_funcs ring_funcs_nonobj_32 = {
 
 static const struct fd_ringbuffer_funcs ring_funcs_obj_32 = {
    .grow = fd_ringbuffer_sp_grow,
-   .emit_bo = fd_ringbuffer_sp_emit_bo_obj,
+   .attach_bo = fd_ringbuffer_sp_attach_bo_obj,
+   .attach_ring = fd_ringbuffer_sp_attach_ring_obj,
+   .assert_attached = fd_ringbuffer_sp_assert_attached_obj,
    .emit_reloc = fd_ringbuffer_sp_emit_reloc_obj_32,
-   .emit_reloc_ring = fd_ringbuffer_sp_emit_reloc_ring_32,
+   .emit_reloc_ring = fd_ringbuffer_sp_emit_reloc_ring_obj_32,
    .cmd_count = fd_ringbuffer_sp_cmd_count,
    .destroy = fd_ringbuffer_sp_destroy,
 };
 
 static const struct fd_ringbuffer_funcs ring_funcs_nonobj_64 = {
    .grow = fd_ringbuffer_sp_grow,
-   .emit_bo = fd_ringbuffer_sp_emit_bo_nonobj,
+   .attach_bo = fd_ringbuffer_sp_attach_bo_nonobj,
+   .attach_ring = fd_ringbuffer_sp_attach_ring_nonobj,
+   .assert_attached = fd_ringbuffer_sp_assert_attached_nonobj,
    .emit_reloc = fd_ringbuffer_sp_emit_reloc_nonobj_64,
-   .emit_reloc_ring = fd_ringbuffer_sp_emit_reloc_ring_64,
+   .emit_reloc_ring = fd_ringbuffer_sp_emit_reloc_ring_nonobj_64,
    .cmd_count = fd_ringbuffer_sp_cmd_count,
    .check_size = fd_ringbuffer_sp_check_size,
    .destroy = fd_ringbuffer_sp_destroy,
@@ -642,9 +782,11 @@ static const struct fd_ringbuffer_funcs ring_funcs_nonobj_64 = {
 
 static const struct fd_ringbuffer_funcs ring_funcs_obj_64 = {
    .grow = fd_ringbuffer_sp_grow,
-   .emit_bo = fd_ringbuffer_sp_emit_bo_obj,
+   .attach_bo = fd_ringbuffer_sp_attach_bo_obj,
+   .attach_ring = fd_ringbuffer_sp_attach_ring_obj,
+   .assert_attached = fd_ringbuffer_sp_assert_attached_obj,
    .emit_reloc = fd_ringbuffer_sp_emit_reloc_obj_64,
-   .emit_reloc_ring = fd_ringbuffer_sp_emit_reloc_ring_64,
+   .emit_reloc_ring = fd_ringbuffer_sp_emit_reloc_ring_obj_64,
    .cmd_count = fd_ringbuffer_sp_cmd_count,
    .destroy = fd_ringbuffer_sp_destroy,
 };
@@ -666,13 +808,13 @@ fd_ringbuffer_sp_init(struct fd_ringbuffer_sp *fd_ring, uint32_t size,
    ring->flags = flags;
 
    if (flags & _FD_RINGBUFFER_OBJECT) {
-      if (fd_dev_64b(&fd_ring->u.pipe->dev_id)) {
+      if (fd_ring->u.pipe->is_64bit) {
          ring->funcs = &ring_funcs_obj_64;
       } else {
          ring->funcs = &ring_funcs_obj_32;
       }
    } else {
-      if (fd_dev_64b(&fd_ring->u.submit->pipe->dev_id)) {
+      if (fd_ring->u.submit->pipe->is_64bit) {
          ring->funcs = &ring_funcs_nonobj_64;
       } else {
          ring->funcs = &ring_funcs_nonobj_32;
@@ -686,6 +828,10 @@ fd_ringbuffer_sp_init(struct fd_ringbuffer_sp *fd_ring, uint32_t size,
 
    fd_ring->u.reloc_bos = NULL;
    fd_ring->u.nr_reloc_bos = fd_ring->u.max_reloc_bos = 0;
+#ifndef NDEBUG
+   fd_ring->u.assert_bos = NULL;
+   fd_ring->u.nr_assert_bos = fd_ring->u.max_assert_bos = 0;
+#endif
 
    return ring;
 }
@@ -708,13 +854,14 @@ fd_ringbuffer_sp_new_object(struct fd_pipe *pipe, uint32_t size)
       if (dev->suballoc_bo)
          fd_bo_del(dev->suballoc_bo);
       dev->suballoc_bo =
-         fd_bo_new_ring(dev, MAX2(SUBALLOC_SIZE, align(size, 4096)));
+         fd_bo_new_ring(dev, MAX2(SUBALLOC_SIZE, align(size, os_page_size)));
       fd_ring->offset = 0;
    }
 
    fd_ring->u.pipe = pipe;
    fd_ring->ring_bo = fd_bo_ref(dev->suballoc_bo);
    fd_ring->base.refcnt = 1;
+   fd_ring->u.last_submit_seqno = 0;
 
    dev->suballoc_offset = fd_ring->offset + size;
 

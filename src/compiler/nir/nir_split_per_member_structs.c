@@ -21,14 +21,8 @@
  * IN THE SOFTWARE.
  */
 
-#include "nir.h"
+#include "nir_builder.h"
 #include "nir_deref.h"
-
-struct split_struct_state {
-   void *dead_ctx;
-
-   struct hash_table *var_to_member_map;
-};
 
 static nir_variable *
 find_var_member(struct nir_variable *var, unsigned member,
@@ -149,8 +143,8 @@ rewrite_deref_instr(nir_builder *b, nir_instr *instr, void *cb_data)
    b->cursor = nir_before_instr(&deref->instr);
    nir_deref_instr *member_deref =
       build_member_deref(b, nir_deref_instr_parent(deref), member);
-   nir_ssa_def_rewrite_uses(&deref->dest.ssa,
-                            &member_deref->dest.ssa);
+   nir_def_rewrite_uses(&deref->def,
+                        &member_deref->def);
 
    /* The referenced variable is no longer valid, clean up the deref */
    nir_deref_instr_remove_if_unused(deref);
@@ -166,9 +160,7 @@ nir_split_per_member_structs(nir_shader *shader)
    struct hash_table *var_to_member_map =
       _mesa_pointer_hash_table_create(dead_ctx);
 
-   nir_foreach_variable_with_modes_safe(var, shader, nir_var_shader_in |
-                                                     nir_var_shader_out |
-                                                     nir_var_system_value) {
+   nir_foreach_variable_with_modes_safe(var, shader, nir_var_shader_in | nir_var_shader_out | nir_var_system_value) {
       if (var->num_members == 0)
          continue;
 
@@ -183,8 +175,7 @@ nir_split_per_member_structs(nir_shader *shader)
    }
 
    nir_shader_instructions_pass(shader, rewrite_deref_instr,
-                                nir_metadata_block_index |
-                                nir_metadata_dominance,
+                                nir_metadata_control_flow,
                                 var_to_member_map);
 
    ralloc_free(dead_ctx);

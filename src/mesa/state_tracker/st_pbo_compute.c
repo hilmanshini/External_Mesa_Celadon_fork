@@ -28,6 +28,7 @@
 #include "main/image.h"
 #include "main/pbo.h"
 
+#include "nir/pipe_nir.h"
 #include "state_tracker/st_nir.h"
 #include "state_tracker/st_format.h"
 #include "state_tracker/st_pbo.h"
@@ -48,7 +49,7 @@ struct pbo_spec_async_data {
    unsigned uses;
    struct util_queue_fence fence;
    nir_shader *nir;
-   struct pipe_shader_state *cs;
+   void *cs;
 };
 
 struct pbo_async_data {
@@ -94,6 +95,7 @@ get_convert_format(struct gl_context *ctx,
    struct st_context *st = st_context(ctx);
    GLint bpp = _mesa_bytes_per_pixel(format, type);
    if (_mesa_is_depth_format(format) ||
+       format == GL_STENCIL_INDEX ||
        format == GL_GREEN_INTEGER ||
        format == GL_BLUE_INTEGER) {
       switch (bpp) {
@@ -142,24 +144,24 @@ get_convert_format(struct gl_context *ctx,
 
 
 struct pbo_shader_data {
-   nir_ssa_def *offset;
-   nir_ssa_def *range;
-   nir_ssa_def *invert;
-   nir_ssa_def *blocksize;
-   nir_ssa_def *alignment;
-   nir_ssa_def *dst_bit_size;
-   nir_ssa_def *channels;
-   nir_ssa_def *normalized;
-   nir_ssa_def *integer;
-   nir_ssa_def *clamp_uint;
-   nir_ssa_def *r11g11b10_or_sint;
-   nir_ssa_def *r9g9b9e5;
-   nir_ssa_def *bits1;
-   nir_ssa_def *bits2;
-   nir_ssa_def *bits3;
-   nir_ssa_def *bits4;
-   nir_ssa_def *swap;
-   nir_ssa_def *bits; //vec4
+   nir_def *offset;
+   nir_def *range;
+   nir_def *invert;
+   nir_def *blocksize;
+   nir_def *alignment;
+   nir_def *dst_bit_size;
+   nir_def *channels;
+   nir_def *normalized;
+   nir_def *integer;
+   nir_def *clamp_uint;
+   nir_def *r11g11b10_or_sint;
+   nir_def *r9g9b9e5;
+   nir_def *bits1;
+   nir_def *bits2;
+   nir_def *bits3;
+   nir_def *bits4;
+   nir_def *swap;
+   nir_def *bits; //vec4
 };
 
 
@@ -208,13 +210,13 @@ struct pbo_data {
 #define STRUCT_BLOCK(offset, ...) \
    do { \
       assert(offset % 8 == 0); \
-      nir_ssa_def *block##offset = nir_u2u32(b, nir_extract_bits(b, &ubo_load, 1, (offset), 1, 8)); \
+      nir_def *block##offset = nir_u2u32(b, nir_extract_bits(b, &ubo_load, 1, (offset), 1, 8)); \
       __VA_ARGS__ \
    } while (0)
 #define STRUCT_MEMBER(blockoffset, name, offset, size, op, clamp) \
    do { \
       assert(offset + size <= 8); \
-      nir_ssa_def *val = nir_iand_imm(b, block##blockoffset, u_bit_consecutive(offset, size)); \
+      nir_def *val = nir_iand_imm(b, block##blockoffset, u_bit_consecutive(offset, size)); \
       if (offset) \
          val = nir_ushr_imm(b, val, offset); \
       sd->name = op; \
@@ -235,7 +237,7 @@ static void
 init_pbo_shader_data(nir_builder *b, struct pbo_shader_data *sd, unsigned coord_components)
 {
    nir_variable *ubo = nir_variable_create(b->shader, nir_var_uniform, glsl_uvec4_type(), "offset");
-   nir_ssa_def *ubo_load = nir_load_var(b, ubo);
+   nir_def *ubo_load = nir_load_var(b, ubo);
 
    sd->offset = nir_u2u32(b, nir_extract_bits(b, &ubo_load, 1, STRUCT_OFFSET(x), 2, 16));
    if (coord_components == 1)
@@ -289,17 +291,17 @@ init_pbo_shader_data(nir_builder *b, struct pbo_shader_data *sd, unsigned coord_
                                    nir_bcsel(b,
                                              nir_ieq_imm(b, sd->bits1, 8),
                                              nir_bcsel(b,
-                                                       nir_uge(b, sd->channels, nir_imm_int(b, 2)),
+                                                       nir_uge_imm(b, sd->channels, 2),
                                                        nir_bcsel(b,
-                                                                 nir_uge(b, sd->channels, nir_imm_int(b, 3)),
+                                                                 nir_uge_imm(b, sd->channels, 3),
                                                                  nir_bcsel(b,
-                                                                           nir_ieq(b, sd->channels, nir_imm_int(b, 4)),
-                                                                           nir_ball(b, nir_ieq(b, sd->bits, nir_imm_ivec4(b, 8, 8, 8, 8))),
-                                                                           nir_ball(b, nir_ieq(b, nir_channels(b, sd->bits, 7), nir_imm_ivec3(b, 8, 8, 8)))),
-                                                                 nir_ball(b, nir_ieq(b, nir_channels(b, sd->bits, 3), nir_imm_ivec2(b, 8, 8)))),
-                                                       nir_imm_bool(b, 0)),
-                                             nir_imm_bool(b, 0))),
-                           nir_imm_bool(b, 0),
+                                                                           nir_ieq_imm(b, sd->channels, 4),
+                                                                           nir_ball(b, nir_ieq_imm(b, sd->bits, 8)),
+                                                                           nir_ball(b, nir_ieq_imm(b, nir_channels(b, sd->bits, 7), 8))),
+                                                                 nir_ball(b, nir_ieq_imm(b, nir_channels(b, sd->bits, 3), 8))),
+                                                       nir_imm_false(b)),
+                                             nir_imm_false(b))),
+                           nir_imm_false(b),
                            sd->swap);
      */
 }
@@ -353,8 +355,8 @@ fill_pbo_data(struct pbo_data *pd, enum pipe_format src_format, enum pipe_format
    return weird_packed ? 1 : dst_desc->nr_channels;
 }
 
-static nir_ssa_def *
-get_buffer_offset(nir_builder *b, nir_ssa_def *coord, struct pbo_shader_data *sd)
+static nir_def *
+get_buffer_offset(nir_builder *b, nir_def *coord, struct pbo_shader_data *sd)
 {
 /* from _mesa_image_offset():
       offset = topOfImage
@@ -362,15 +364,15 @@ get_buffer_offset(nir_builder *b, nir_ssa_def *coord, struct pbo_shader_data *sd
                + (skiprows + row) * bytes_per_row
                + (skipimages + img) * bytes_per_image;
  */
-   nir_ssa_def *bytes_per_row = nir_imul(b, nir_channel(b, sd->range, 0), sd->blocksize);
-   bytes_per_row = nir_bcsel(b, nir_ult(b, sd->alignment, nir_imm_int(b, 2)),
+   nir_def *bytes_per_row = nir_imul(b, nir_channel(b, sd->range, 0), sd->blocksize);
+   bytes_per_row = nir_bcsel(b, nir_ult_imm(b, sd->alignment, 2),
                              bytes_per_row,
                              nir_iand(b,
-                                      nir_isub(b, nir_iadd(b, bytes_per_row, sd->alignment), nir_imm_int(b, 1)),
-                                      nir_inot(b, nir_isub(b, sd->alignment, nir_imm_int(b, 1)))));
-   nir_ssa_def *bytes_per_image = nir_imul(b, bytes_per_row, nir_channel(b, sd->range, 1));
+                                      nir_iadd_imm(b, nir_iadd(b, bytes_per_row, sd->alignment), -1),
+                                      nir_inot(b, nir_iadd_imm(b, sd->alignment, -1))));
+   nir_def *bytes_per_image = nir_imul(b, bytes_per_row, nir_channel(b, sd->range, 1));
    bytes_per_row = nir_bcsel(b, sd->invert,
-                             nir_isub(b, nir_imm_int(b, 0), bytes_per_row),
+                             nir_ineg(b, bytes_per_row),
                              bytes_per_row);
    return nir_iadd(b,
                    nir_imul(b, nir_channel(b, coord, 0), sd->blocksize),
@@ -380,7 +382,7 @@ get_buffer_offset(nir_builder *b, nir_ssa_def *coord, struct pbo_shader_data *sd
 }
 
 static inline void
-write_ssbo(nir_builder *b, nir_ssa_def *pixel, nir_ssa_def *buffer_offset)
+write_ssbo(nir_builder *b, nir_def *pixel, nir_def *buffer_offset)
 {
    nir_store_ssbo(b, pixel, nir_imm_zero(b, 1, 32), buffer_offset,
                   .align_mul = pixel->bit_size / 8,
@@ -388,9 +390,9 @@ write_ssbo(nir_builder *b, nir_ssa_def *pixel, nir_ssa_def *buffer_offset)
 }
 
 static void
-write_conversion(nir_builder *b, nir_ssa_def *pixel, nir_ssa_def *buffer_offset, struct pbo_shader_data *sd)
+write_conversion(nir_builder *b, nir_def *pixel, nir_def *buffer_offset, struct pbo_shader_data *sd)
 {
-   nir_push_if(b, nir_ilt(b, sd->dst_bit_size, nir_imm_int(b, 32)));
+   nir_push_if(b, nir_ilt_imm(b, sd->dst_bit_size, 32));
       nir_push_if(b, nir_ieq_imm(b, sd->dst_bit_size, 16));
          write_ssbo(b, nir_u2u16(b, pixel), buffer_offset);
       nir_push_else(b, NULL);
@@ -401,17 +403,17 @@ write_conversion(nir_builder *b, nir_ssa_def *pixel, nir_ssa_def *buffer_offset,
    nir_pop_if(b, NULL);
 }
 
-static nir_ssa_def *
-swap2(nir_builder *b, nir_ssa_def *src)
+static nir_def *
+swap2(nir_builder *b, nir_def *src)
 {
    /* dst[i] = (src[i] >> 8) | ((src[i] << 8) & 0xff00); */
    return nir_ior(b,
                   nir_ushr_imm(b, src, 8),
-                  nir_iand_imm(b, nir_ishl(b, src, nir_imm_int(b, 8)), 0xff00));
+                  nir_iand_imm(b, nir_ishl_imm(b, src, 8), 0xff00));
 }
 
-static nir_ssa_def *
-swap4(nir_builder *b, nir_ssa_def *src)
+static nir_def *
+swap4(nir_builder *b, nir_def *src)
 {
    /* a = (b >> 24) | ((b >> 8) & 0xff00) | ((b << 8) & 0xff0000) | ((b << 24) & 0xff000000); */
    return nir_ior(b,
@@ -419,21 +421,21 @@ swap4(nir_builder *b, nir_ssa_def *src)
                   nir_ushr_imm(b, src, 24),
                   nir_ior(b,
                           /* ((b >> 8) & 0xff00) */
-                          nir_iand(b, nir_ushr_imm(b, src, 8), nir_imm_int(b, 0xff00)),
+                          nir_iand_imm(b, nir_ushr_imm(b, src, 8), 0xff00),
                           nir_ior(b,
                                   /* ((b << 8) & 0xff0000) */
-                                  nir_iand(b, nir_ishl(b, src, nir_imm_int(b, 8)), nir_imm_int(b, 0xff0000)),
+                                  nir_iand_imm(b, nir_ishl_imm(b, src, 8), 0xff0000),
                                   /* ((b << 24) & 0xff000000) */
-                                  nir_iand(b, nir_ishl(b, src, nir_imm_int(b, 24)), nir_imm_int(b, 0xff000000)))));
+                                  nir_iand_imm(b, nir_ishl_imm(b, src, 24), 0xff000000))));
 }
 
 /* explode the cf to handle channel counts in the shader */
 static void
-grab_components(nir_builder *b, nir_ssa_def *pixel, nir_ssa_def *buffer_offset, struct pbo_shader_data *sd, bool weird_packed)
+grab_components(nir_builder *b, nir_def *pixel, nir_def *buffer_offset, struct pbo_shader_data *sd, bool weird_packed)
 {
    if (weird_packed) {
       nir_push_if(b, nir_ieq_imm(b, sd->bits1, 32));
-         write_conversion(b, nir_channels(b, pixel, 3), buffer_offset, sd);
+         write_conversion(b, nir_trim_vector(b, pixel, 2), buffer_offset, sd);
       nir_push_else(b, NULL);
          write_conversion(b, nir_channel(b, pixel, 0), buffer_offset, sd);
       nir_pop_if(b, NULL);
@@ -442,12 +444,15 @@ grab_components(nir_builder *b, nir_ssa_def *pixel, nir_ssa_def *buffer_offset, 
          write_conversion(b, nir_channel(b, pixel, 0), buffer_offset, sd);
       nir_push_else(b, NULL);
          nir_push_if(b, nir_ieq_imm(b, sd->channels, 2));
-            write_conversion(b, nir_channels(b, pixel, (1 << 2) - 1), buffer_offset, sd);
+            write_conversion(b, nir_trim_vector(b, pixel, 2), buffer_offset,
+                             sd);
          nir_push_else(b, NULL);
             nir_push_if(b, nir_ieq_imm(b, sd->channels, 3));
-               write_conversion(b, nir_channels(b, pixel, (1 << 3) - 1), buffer_offset, sd);
+               write_conversion(b, nir_trim_vector(b, pixel, 3),
+                                buffer_offset, sd);
             nir_push_else(b, NULL);
-               write_conversion(b, nir_channels(b, pixel, (1 << 4) - 1), buffer_offset, sd);
+               write_conversion(b, nir_trim_vector(b, pixel, 4),
+                                buffer_offset, sd);
             nir_pop_if(b, NULL);
          nir_pop_if(b, NULL);
       nir_pop_if(b, NULL);
@@ -456,23 +461,23 @@ grab_components(nir_builder *b, nir_ssa_def *pixel, nir_ssa_def *buffer_offset, 
 
 /* if byteswap is enabled, handle that and then write the components */
 static void
-handle_swap(nir_builder *b, nir_ssa_def *pixel, nir_ssa_def *buffer_offset,
+handle_swap(nir_builder *b, nir_def *pixel, nir_def *buffer_offset,
             struct pbo_shader_data *sd, unsigned num_components, bool weird_packed)
 {
    nir_push_if(b, sd->swap); {
       nir_push_if(b, nir_ieq_imm(b, nir_udiv_imm(b, sd->blocksize, num_components), 2)); {
          /* this is a single high/low swap per component */
-         nir_ssa_def *components[4];
+         nir_def *components[4];
          for (unsigned i = 0; i < 4; i++)
             components[i] = swap2(b, nir_channel(b, pixel, i));
-         nir_ssa_def *v = nir_vec(b, components, 4);
+         nir_def *v = nir_vec(b, components, 4);
          grab_components(b, v, buffer_offset, sd, weird_packed);
       } nir_push_else(b, NULL); {
          /* this is a pair of high/low swaps for each half of the component */
-         nir_ssa_def *components[4];
+         nir_def *components[4];
          for (unsigned i = 0; i < 4; i++)
             components[i] = swap4(b, nir_channel(b, pixel, i));
-         nir_ssa_def *v = nir_vec(b, components, 4);
+         nir_def *v = nir_vec(b, components, 4);
          grab_components(b, v, buffer_offset, sd, weird_packed);
       } nir_pop_if(b, NULL);
    } nir_push_else(b, NULL); {
@@ -481,28 +486,28 @@ handle_swap(nir_builder *b, nir_ssa_def *pixel, nir_ssa_def *buffer_offset,
    } nir_pop_if(b, NULL);
 }
 
-static nir_ssa_def *
+static nir_def *
 check_for_weird_packing(nir_builder *b, struct pbo_shader_data *sd, unsigned component)
 {
-   nir_ssa_def *c = nir_channel(b, sd->bits, component - 1);
+   nir_def *c = nir_channel(b, sd->bits, component - 1);
 
    return nir_bcsel(b,
-                    nir_ige(b, sd->channels, nir_imm_int(b, component)),
+                    nir_ige_imm(b, sd->channels, component),
                     nir_ior(b,
                             nir_ine(b, c, sd->bits1),
-                            nir_ine(b, nir_imod(b, c, nir_imm_int(b, 8)), nir_imm_int(b, 0))),
-                    nir_imm_bool(b, 0));
+                            nir_ine_imm(b, nir_imod_imm(b, c, 8), 0)),
+                    nir_imm_false(b));
 }
 
 /* convenience function for clamping signed integers */
-static inline nir_ssa_def *
-nir_imin_imax(nir_builder *build, nir_ssa_def *src, nir_ssa_def *clamp_to_min, nir_ssa_def *clamp_to_max)
+static inline nir_def *
+nir_imin_imax(nir_builder *build, nir_def *src, nir_def *clamp_to_min, nir_def *clamp_to_max)
 {
    return nir_imax(build, nir_imin(build, src, clamp_to_min), clamp_to_max);
 }
 
-static inline nir_ssa_def *
-nir_format_float_to_unorm_with_factor(nir_builder *b, nir_ssa_def *f, nir_ssa_def *factor)
+static inline nir_def *
+nir_format_float_to_unorm_with_factor(nir_builder *b, nir_def *f, nir_def *factor)
 {
    /* Clamp to the range [0, 1] */
    f = nir_fsat(b, f);
@@ -510,8 +515,8 @@ nir_format_float_to_unorm_with_factor(nir_builder *b, nir_ssa_def *f, nir_ssa_de
    return nir_f2u32(b, nir_fround_even(b, nir_fmul(b, f, factor)));
 }
 
-static inline nir_ssa_def *
-nir_format_float_to_snorm_with_factor(nir_builder *b, nir_ssa_def *f, nir_ssa_def *factor)
+static inline nir_def *
+nir_format_float_to_snorm_with_factor(nir_builder *b, nir_def *f, nir_def *factor)
 {
    /* Clamp to the range [-1, 1] */
    f = nir_fmin(b, nir_fmax(b, f, nir_imm_float(b, -1)), nir_imm_float(b, 1));
@@ -519,13 +524,13 @@ nir_format_float_to_snorm_with_factor(nir_builder *b, nir_ssa_def *f, nir_ssa_de
    return nir_f2i32(b, nir_fround_even(b, nir_fmul(b, f, factor)));
 }
 
-static nir_ssa_def *
-clamp_and_mask(nir_builder *b, nir_ssa_def *src, nir_ssa_def *channels)
+static nir_def *
+clamp_and_mask(nir_builder *b, nir_def *src, nir_def *channels)
 {
-   nir_ssa_def *one = nir_imm_ivec4(b, 1, 0, 0, 0);
-   nir_ssa_def *two = nir_imm_ivec4(b, 1, 1, 0, 0);
-   nir_ssa_def *three = nir_imm_ivec4(b, 1, 1, 1, 0);
-   nir_ssa_def *four = nir_imm_ivec4(b, 1, 1, 1, 1);
+   nir_def *one = nir_imm_ivec4(b, 1, 0, 0, 0);
+   nir_def *two = nir_imm_ivec4(b, 1, 1, 0, 0);
+   nir_def *three = nir_imm_ivec4(b, 1, 1, 1, 0);
+   nir_def *four = nir_imm_ivec4(b, 1, 1, 1, 1);
    /* avoid underflow by clamping to channel count */
    src = nir_bcsel(b,
                    nir_ieq(b, channels, one),
@@ -542,12 +547,12 @@ clamp_and_mask(nir_builder *b, nir_ssa_def *src, nir_ssa_def *channels)
 }
 
 static void
-convert_swap_write(nir_builder *b, nir_ssa_def *pixel, nir_ssa_def *buffer_offset,
+convert_swap_write(nir_builder *b, nir_def *pixel, nir_def *buffer_offset,
                    unsigned num_components,
                    struct pbo_shader_data *sd)
 {
 
-   nir_ssa_def *weird_packed = nir_ior(b,
+   nir_def *weird_packed = nir_ior(b,
                                        nir_ior(b,
                                                check_for_weird_packing(b, sd, 4),
                                                check_for_weird_packing(b, sd, 3)),
@@ -561,7 +566,7 @@ convert_swap_write(nir_builder *b, nir_ssa_def *pixel, nir_ssa_def *buffer_offse
                handle_swap(b, nir_pad_vec4(b, nir_format_pack_r9g9b9e5(b, pixel)), buffer_offset, sd, 1, true);
             nir_push_else(b, NULL);
                nir_push_if(b, nir_ieq_imm(b, sd->bits1, 32)); { //PIPE_FORMAT_Z32_FLOAT_S8X24_UINT
-                  nir_ssa_def *pack[2];
+                  nir_def *pack[2];
                   pack[0] = nir_format_pack_uint_unmasked_ssa(b, nir_channel(b, pixel, 0), nir_channel(b, sd->bits, 0));
                   pack[1] = nir_format_pack_uint_unmasked_ssa(b, nir_channels(b, pixel, 6), nir_channels(b, sd->bits, 6));
                   handle_swap(b, nir_pad_vec4(b, nir_vec2(b, pack[0], pack[1])), buffer_offset, sd, 2, true);
@@ -583,13 +588,13 @@ convert_swap_write(nir_builder *b, nir_ssa_def *pixel, nir_ssa_def *buffer_offse
 }
 
 static void
-do_shader_conversion(nir_builder *b, nir_ssa_def *pixel,
+do_shader_conversion(nir_builder *b, nir_def *pixel,
                      unsigned num_components,
-                     nir_ssa_def *coord, struct pbo_shader_data *sd)
+                     nir_def *coord, struct pbo_shader_data *sd)
 {
-   nir_ssa_def *buffer_offset = get_buffer_offset(b, coord, sd);
+   nir_def *buffer_offset = get_buffer_offset(b, coord, sd);
 
-   nir_ssa_def *signed_bit_mask = clamp_and_mask(b, sd->bits, sd->channels);
+   nir_def *signed_bit_mask = clamp_and_mask(b, sd->bits, sd->channels);
 
 #define CONVERT_SWAP_WRITE(PIXEL) \
    convert_swap_write(b, PIXEL, buffer_offset, num_components, sd);
@@ -605,7 +610,7 @@ do_shader_conversion(nir_builder *b, nir_ssa_def *pixel,
             nir_push_if(b, sd->clamp_uint); //uint -> sint
                CONVERT_SWAP_WRITE(nir_umin(b, pixel, signed_bit_mask));
             nir_push_else(b, NULL);
-               CONVERT_SWAP_WRITE(nir_imin_imax(b, pixel, signed_bit_mask, nir_isub(b, nir_ineg(b, signed_bit_mask), nir_imm_int(b, 1))));
+               CONVERT_SWAP_WRITE(nir_imin_imax(b, pixel, signed_bit_mask, nir_iadd_imm(b, nir_ineg(b, signed_bit_mask), -1)));
             nir_pop_if(b, NULL);
          nir_push_else(b, NULL);
             nir_push_if(b, sd->clamp_uint); //uint
@@ -625,7 +630,7 @@ do_shader_conversion(nir_builder *b, nir_ssa_def *pixel,
 static nir_shader *
 create_conversion_shader(struct st_context *st, enum pipe_texture_target target, unsigned num_components)
 {
-   const nir_shader_compiler_options *options = st_get_nir_compiler_options(st, MESA_SHADER_COMPUTE);
+   const nir_shader_compiler_options *options = st->screen->nir_options[MESA_SHADER_COMPUTE];
    nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, options, "%s", "convert");
    b.shader->info.workgroup_size[0] = target != PIPE_TEXTURE_1D ? 8 : 64;
    b.shader->info.workgroup_size[1] = target != PIPE_TEXTURE_1D ? 8 : 1;
@@ -642,18 +647,18 @@ create_conversion_shader(struct st_context *st, enum pipe_texture_target target,
    struct pbo_shader_data sd;
    init_pbo_shader_data(&b, &sd, coord_components);
 
-   nir_ssa_def *bsize = nir_imm_ivec4(&b,
+   nir_def *bsize = nir_imm_ivec4(&b,
                                       b.shader->info.workgroup_size[0],
                                       b.shader->info.workgroup_size[1],
                                       b.shader->info.workgroup_size[2],
                                       0);
-   nir_ssa_def *wid = nir_load_workgroup_id(&b, 32);
-   nir_ssa_def *iid = nir_load_local_invocation_id(&b);
-   nir_ssa_def *tile = nir_imul(&b, wid, bsize);
-   nir_ssa_def *global_id = nir_iadd(&b, tile, iid);
-   nir_ssa_def *start = nir_iadd(&b, nir_trim_vector(&b, global_id, 2), sd.offset);
+   nir_def *wid = nir_load_workgroup_id(&b);
+   nir_def *iid = nir_load_local_invocation_id(&b);
+   nir_def *tile = nir_imul(&b, wid, bsize);
+   nir_def *global_id = nir_iadd(&b, tile, iid);
+   nir_def *start = nir_iadd(&b, nir_trim_vector(&b, global_id, 2), sd.offset);
 
-   nir_ssa_def *coord;
+   nir_def *coord;
    if (coord_components < 3)
       coord = start;
    else {
@@ -664,11 +669,11 @@ create_conversion_shader(struct st_context *st, enum pipe_texture_target target,
                            nir_channel(&b, global_id, 2));
    }
    coord = nir_trim_vector(&b, coord, coord_components);
-   nir_ssa_def *offset = coord_components > 2 ?
+   nir_def *offset = coord_components > 2 ?
                          nir_pad_vector_imm_int(&b, sd.offset, 0, 3) :
                          nir_trim_vector(&b, sd.offset, coord_components);
-   nir_ssa_def *range = nir_trim_vector(&b, sd.range, coord_components);
-   nir_ssa_def *max = nir_iadd(&b, offset, range);
+   nir_def *range = nir_trim_vector(&b, sd.range, coord_components);
+   nir_def *max = nir_iadd(&b, offset, range);
    nir_push_if(&b, nir_ball(&b, nir_ilt(&b, coord, max)));
    nir_tex_instr *txf = nir_tex_instr_create(b.shader, 3);
    txf->is_array = glsl_sampler_type_is_array(sampler->type);
@@ -678,19 +683,18 @@ create_conversion_shader(struct st_context *st, enum pipe_texture_target target,
    txf->coord_components = coord_components;
    txf->texture_index = 0;
    txf->sampler_index = 0;
-   txf->src[0].src_type = nir_tex_src_coord;
-   txf->src[0].src = nir_src_for_ssa(coord);
-   txf->src[1].src_type = nir_tex_src_lod;
-   txf->src[1].src = nir_src_for_ssa(nir_imm_int(&b, 0));
+   txf->can_speculate = true;
+   txf->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, coord);
+   txf->src[1] = nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_int(&b, 0));
    txf->src[2].src_type = nir_tex_src_texture_deref;
    nir_deref_instr *sampler_deref = nir_build_deref_var(&b, sampler);
-   txf->src[2].src = nir_src_for_ssa(&sampler_deref->dest.ssa);
+   txf->src[2].src = nir_src_for_ssa(&sampler_deref->def);
 
-   nir_ssa_dest_init(&txf->instr, &txf->dest, 4, 32, NULL);
+   nir_def_init(&txf->instr, &txf->def, 4, 32);
    nir_builder_instr_insert(&b, &txf->instr);
 
    /* pass the grid offset as the coord to get the zero-indexed buffer offset */
-   do_shader_conversion(&b, &txf->dest.ssa, num_components, global_id, &sd);
+   do_shader_conversion(&b, &txf->def, num_components, global_id, &sd);
 
    nir_pop_if(&b, NULL);
 
@@ -842,7 +846,7 @@ add_spec_data(struct pbo_async_data *async, struct pbo_data *pd)
    struct pbo_spec_async_data *spec;
    struct set_entry *entry = _mesa_set_search_or_add(&async->specialized, pd, &found);
    if (!found) {
-      spec = calloc(1, sizeof(struct pbo_async_data));
+      spec = calloc(1, sizeof(struct pbo_spec_async_data));
       util_queue_fence_init(&spec->fence);
       memcpy(spec->data, pd, sizeof(struct pbo_data));
       entry->key = spec;
@@ -920,16 +924,18 @@ download_texture_compute(struct st_context *st,
       if (st->force_specialized_compute_transfer) {
          struct pbo_async_data *async = he->data;
          struct pbo_spec_async_data *spec = add_spec_data(async, &pd);
-         if (spec->cs) {
-            cs = spec->cs;
-         } else {
+         if (!spec->cs) {
             create_spec_shader_async(spec, NULL, 0);
             struct pipe_shader_state state = {
                .type = PIPE_SHADER_IR_NIR,
                .ir.nir = spec->nir,
             };
-            cs = spec->cs = st_create_nir_shader(st, &state);
+            spec->cs = st_create_nir_shader(st, &state);
+            if (!spec->cs)
+               return NULL;
+            spec->nir = NULL;
          }
+         cs = spec->cs;
          cb.buffer_size = 2 * sizeof(uint32_t);
       } else if (!st->force_compute_based_texture_transfer && screen->driver_thread_add_job) {
          struct pbo_async_data *async = he->data;
@@ -940,12 +946,10 @@ download_texture_compute(struct st_context *st,
          if (!async->cs) {
             /* cs job not yet started */
             assert(async->nir && !async->cs);
-            struct pipe_compute_state state = {0};
-            state.ir_type = PIPE_SHADER_IR_NIR;
-            state.static_shared_mem = async->nir->info.shared_size;
-            state.prog = async->nir;
+            async->cs = pipe_shader_from_nir(pipe, async->nir);
+            if (!async->cs)
+               return NULL;
             async->nir = NULL;
-            async->cs = pipe->create_compute_state(pipe, &state);
          }
          /* cs *may* be done */
          if (screen->is_parallel_shader_compilation_finished &&
@@ -955,12 +959,10 @@ download_texture_compute(struct st_context *st,
          if (spec->uses > SPEC_USES_THRESHOLD && util_queue_fence_is_signalled(&spec->fence)) {
             if (spec->created) {
                if (!spec->cs) {
-                  struct pipe_compute_state state = {0};
-                  state.ir_type = PIPE_SHADER_IR_NIR;
-                  state.static_shared_mem = spec->nir->info.shared_size;
-                  state.prog = spec->nir;
+                  spec->cs = pipe_shader_from_nir(pipe, spec->nir);
+                  if (!spec->cs)
+                     return NULL;
                   spec->nir = NULL;
-                  spec->cs = pipe->create_compute_state(pipe, &state);
                }
                if (screen->is_parallel_shader_compilation_finished &&
                    screen->is_parallel_shader_compilation_finished(screen, spec->cs, MESA_SHADER_COMPUTE)) {
@@ -991,8 +993,12 @@ download_texture_compute(struct st_context *st,
             .type = PIPE_SHADER_IR_NIR,
             .ir.nir = spec->nir,
          };
-         cs = spec->cs = st_create_nir_shader(st, &state);
+         spec->cs = st_create_nir_shader(st, &state);
+         if (!spec->cs)
+            return NULL;
+         spec->nir = NULL;
          cb.buffer_size = 2 * sizeof(uint32_t);
+         cs = spec->cs;
       } else {
          nir_shader *nir = create_conversion_shader(st, view_target, num_components);
          struct pipe_shader_state state = {
@@ -1000,21 +1006,24 @@ download_texture_compute(struct st_context *st,
             .ir.nir = nir,
          };
          cs = st_create_nir_shader(st, &state);
-         he = _mesa_hash_table_insert(st->pbo.shaders, (void*)(uintptr_t)hash_key, cs);
+         if (!cs)
+            return NULL;
+         _mesa_hash_table_insert(st->pbo.shaders, (void*)(uintptr_t)hash_key, cs);
       }
    }
    assert(cs);
    struct cso_context *cso = st->cso_context;
 
-   pipe->set_constant_buffer(pipe, PIPE_SHADER_COMPUTE, 0, false, &cb);
+   struct pipe_resource *releasebuf = NULL;
+   pipe_upload_constant_buffer0(st->pipe, MESA_SHADER_COMPUTE, &cb, &releasebuf);
 
    cso_save_compute_state(cso, CSO_BIT_COMPUTE_SHADER | CSO_BIT_COMPUTE_SAMPLERS);
    cso_set_compute_shader_handle(cso, cs);
 
    /* Set up the sampler_view */
+   struct pipe_sampler_view *sampler_view = NULL;
    {
       struct pipe_sampler_view templ;
-      struct pipe_sampler_view *sampler_view;
       struct pipe_sampler_state sampler = {0};
       const struct pipe_sampler_state *samplers[1] = {&sampler};
       const struct util_format_description *desc = util_format_description(dst_format);
@@ -1114,24 +1123,23 @@ download_texture_compute(struct st_context *st,
       if (sampler_view == NULL)
          goto fail;
 
-      pipe->set_sampler_views(pipe, PIPE_SHADER_COMPUTE, 0, 1, 0, false,
+      pipe->set_sampler_views(pipe, MESA_SHADER_COMPUTE, 0, 1, 0,
                               &sampler_view);
-      st->state.num_sampler_views[PIPE_SHADER_COMPUTE] =
-         MAX2(st->state.num_sampler_views[PIPE_SHADER_COMPUTE], 1);
+      st->state.num_sampler_views[MESA_SHADER_COMPUTE] =
+         MAX2(st->state.num_sampler_views[MESA_SHADER_COMPUTE], 1);
 
-      pipe_sampler_view_reference(&sampler_view, NULL);
-
-      cso_set_samplers(cso, PIPE_SHADER_COMPUTE, 1, samplers);
+      cso_set_samplers(cso, MESA_SHADER_COMPUTE, 1, samplers);
    }
 
    /* Set up destination buffer */
-   unsigned img_stride = src->target == PIPE_TEXTURE_3D ||
+   intptr_t img_stride = src->target == PIPE_TEXTURE_3D ||
                          src->target == PIPE_TEXTURE_2D_ARRAY ||
                          src->target == PIPE_TEXTURE_CUBE_ARRAY ?
                          /* only use image stride for 3d images to avoid pulling in IMAGE_HEIGHT pixelstore */
                          _mesa_image_image_stride(pack, width, height, format, type) :
-                         _mesa_image_row_stride(pack, width, format, type) * height;
-   unsigned buffer_size = (depth + (dim == 3 ? pack->SkipImages : 0)) * img_stride;
+                         (size_t)_mesa_image_row_stride(pack, width, format, type) * height;
+   intptr_t buffer_size = (depth + (dim == 3 ? pack->SkipImages : 0)) * img_stride;
+   assert(buffer_size <= UINT32_MAX);
    {
       struct pipe_shader_buffer buffer;
       memset(&buffer, 0, sizeof(buffer));
@@ -1146,7 +1154,7 @@ download_texture_compute(struct st_context *st,
       buffer.buffer = dst;
       buffer.buffer_size = buffer_size;
 
-      pipe->set_shader_buffers(pipe, PIPE_SHADER_COMPUTE, 0, 1, &buffer, 0x1);
+      pipe->set_shader_buffers(pipe, MESA_SHADER_COMPUTE, 0, 1, &buffer, 0x1);
    }
 
    struct pipe_grid_info info = { 0 };
@@ -1161,21 +1169,23 @@ download_texture_compute(struct st_context *st,
 
    pipe->launch_grid(pipe, &info);
 
+   st->pipe->sampler_view_release(st->pipe, sampler_view);
 fail:
    cso_restore_compute_state(cso);
 
    /* Unbind all because st/mesa won't do it if the current shader doesn't
     * use them.
     */
-   pipe->set_sampler_views(pipe, PIPE_SHADER_COMPUTE, 0, 0,
-                           st->state.num_sampler_views[PIPE_SHADER_COMPUTE],
-                           false, NULL);
-   st->state.num_sampler_views[PIPE_SHADER_COMPUTE] = 0;
-   pipe->set_shader_buffers(pipe, PIPE_SHADER_COMPUTE, 0, 1, NULL, 0);
+   pipe->set_sampler_views(pipe, MESA_SHADER_COMPUTE, 0, 0,
+                           st->state.num_sampler_views[MESA_SHADER_COMPUTE],
+                           NULL);
+   st->state.num_sampler_views[MESA_SHADER_COMPUTE] = 0;
+   pipe->set_shader_buffers(pipe, MESA_SHADER_COMPUTE, 0, 1, NULL, 0);
 
-   st->ctx->NewDriverState |= ST_NEW_CS_CONSTANTS |
-                              ST_NEW_CS_SSBOS |
-                              ST_NEW_CS_SAMPLER_VIEWS;
+   ST_SET_STATE3(st->ctx->NewDriverState, ST_NEW_CS_CONSTANTS,
+                 ST_NEW_CS_SSBOS, ST_NEW_CS_SAMPLER_VIEWS);
+
+   pipe_resource_release(pipe, releasebuf);
 
    return dst;
 }
@@ -1185,7 +1195,6 @@ copy_converted_buffer(struct gl_context * ctx,
                     struct gl_pixelstore_attrib *pack,
                     enum pipe_texture_target view_target,
                     struct pipe_resource *dst, enum pipe_format dst_format,
-                    GLint xoffset, GLint yoffset, GLint zoffset,
                     GLsizei width, GLsizei height, GLint depth,
                     GLenum format, GLenum type, void *pixels)
 {
@@ -1202,8 +1211,6 @@ copy_converted_buffer(struct gl_context * ctx,
       if (view_target == PIPE_TEXTURE_1D_ARRAY) {
          depth = height;
          height = 1;
-         zoffset = yoffset;
-         yoffset = 0;
       }
 
       struct gl_pixelstore_attrib packing = *pack;
@@ -1217,13 +1224,13 @@ copy_converted_buffer(struct gl_context * ctx,
 
       for (unsigned z = 0; z < depth; z++) {
          for (unsigned y = 0; y < height; y++) {
-            GLubyte *dst = _mesa_image_address(dim, pack, pixels,
-                                       width, height, format, type,
-                                       z, y, 0);
+            GLubyte *dstpx = _mesa_image_address(dim, pack, pixels,
+                                                 width, height, format, type,
+                                                 z, y, 0);
             GLubyte *srcpx = _mesa_image_address(dim, &packing, map,
                                                  width, height, format, type,
                                                  z, y, 0);
-            util_streaming_load_memcpy(dst, srcpx, util_format_get_stride(dst_format, width));
+            util_streaming_load_memcpy(dstpx, srcpx, util_format_get_stride(dst_format, width));
          }
       }
    } else {
@@ -1267,6 +1274,10 @@ st_GetTexSubImage_shader(struct gl_context * ctx,
    if (src_format == PIPE_FORMAT_NONE)
       return false;
 
+   /* special case for stencil extraction */
+   if (format == GL_STENCIL_INDEX && util_format_is_depth_and_stencil(src_format))
+      src_format = PIPE_FORMAT_X24S8_UINT;
+
    if (texImage->_BaseFormat != _mesa_get_format_base_format(texImage->TexFormat)) {
       /* special handling for drivers that don't support these formats natively */
       if (texImage->_BaseFormat == GL_LUMINANCE)
@@ -1303,11 +1314,12 @@ st_GetTexSubImage_shader(struct gl_context * ctx,
       return false;
 
    view_target = get_target_from_texture(src);
-   /* I don't know why this works
-    * only for the texture rects
-    * but that's how it is
-    */
-   if ((src->target != PIPE_TEXTURE_RECT &&
+
+   /* 64K x 64K aren't supported by the shader (pbo_data::width/height have 16 bits) */
+   if (width >= UINT16_MAX || height >= UINT16_MAX ||
+       /* I don't know why this works only for the texture rects
+        * but that's how it is. */
+       (src->target != PIPE_TEXTURE_RECT &&
        /* this would need multiple samplerviews */
        ((util_format_is_depth_and_stencil(src_format) && util_format_is_depth_and_stencil(dst_format)) ||
        /* these format just doesn't work and science can't explain why */
@@ -1323,8 +1335,8 @@ st_GetTexSubImage_shader(struct gl_context * ctx,
       return false;
 
    if (!can_copy_direct(&ctx->Pack) || !ctx->Pack.BufferObj) {
-      copy_converted_buffer(ctx, &ctx->Pack, view_target, dst, dst_format, xoffset, yoffset, zoffset,
-                          width, height, depth, format, type, pixels);
+      copy_converted_buffer(ctx, &ctx->Pack, view_target, dst, dst_format, width, height, depth, format,
+                            type, pixels);
 
       pipe_resource_reference(&dst, NULL);
    }
@@ -1346,6 +1358,7 @@ st_pbo_compute_deinit(struct st_context *st)
          if (async->cs)
             st->pipe->delete_compute_state(st->pipe, async->cs);
          util_queue_fence_destroy(&async->fence);
+         ralloc_free(async->nir);
          ralloc_free(async->copy);
          set_foreach_remove(&async->specialized, se) {
             struct pbo_spec_async_data *spec = (void*)se->key;
@@ -1357,7 +1370,7 @@ st_pbo_compute_deinit(struct st_context *st)
             }
             free(spec);
          }
-         ralloc_free(async->specialized.table);
+         _mesa_set_fini(&async->specialized, NULL);
          free(async);
       } else {
          st->pipe->delete_compute_state(st->pipe, entry->data);

@@ -26,17 +26,17 @@
 #include "st_program.h"
 #include "st_shader_cache.h"
 #include "st_util.h"
-#include "compiler/glsl/program.h"
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_serialize.h"
 #include "main/uniforms.h"
 #include "pipe/p_shader_tokens.h"
 #include "util/u_memory.h"
+#include "util/perf/cpu_trace.h"
 
 void
-st_get_program_binary_driver_sha1(struct gl_context *ctx, uint8_t *sha1)
+st_get_program_binary_driver_blake3(struct gl_context *ctx, uint8_t *blake3)
 {
-   disk_cache_compute_key(ctx->Cache, NULL, 0, sha1);
+   disk_cache_compute_key(ctx->Cache, NULL, 0, blake3);
 }
 
 static void
@@ -55,8 +55,7 @@ write_stream_out_to_cache(struct blob *blob,
 static void
 copy_blob_to_driver_cache_blob(struct blob *blob, struct gl_program *prog)
 {
-   prog->driver_cache_blob = ralloc_size(NULL, blob->size);
-   memcpy(prog->driver_cache_blob, blob->data, blob->size);
+   prog->driver_cache_blob = ralloc_memdup(NULL, blob->data, blob->size);
    prog->driver_cache_blob_size = blob->size;
 }
 
@@ -64,9 +63,14 @@ static void
 write_nir_to_cache(struct blob *blob, struct gl_program *prog)
 {
    st_serialize_nir(prog);
+   if (prog->info.stage == MESA_SHADER_VERTEX)
+      st_serialize_base_nir(prog, prog->nir);
 
    blob_write_intptr(blob, prog->serialized_nir_size);
    blob_write_bytes(blob, prog->serialized_nir, prog->serialized_nir_size);
+
+   blob_write_intptr(blob, prog->base_serialized_nir_size);
+   blob_write_bytes(blob, prog->base_serialized_nir, prog->base_serialized_nir_size);
 
    copy_blob_to_driver_cache_blob(blob, prog);
 }
@@ -111,8 +115,8 @@ st_store_nir_in_disk_cache(struct st_context *st, struct gl_program *prog)
    /* Exit early when we are dealing with a ff shader with no source file to
     * generate a source from.
     */
-   static const char zero[sizeof(prog->sh.data->sha1)] = {0};
-   if (memcmp(prog->sh.data->sha1, zero, sizeof(prog->sh.data->sha1)) == 0)
+   static const char zero[sizeof(prog->sh.data->blake3)] = {0};
+   if (memcmp(prog->sh.data->blake3, zero, sizeof(prog->sh.data->blake3)) == 0)
       return;
 
    st_serialise_nir_program(st->ctx, prog);
@@ -145,6 +149,8 @@ st_deserialise_nir_program(struct gl_context *ctx,
    struct st_context *st = st_context(ctx);
    size_t size = prog->driver_cache_blob_size;
    uint8_t *buffer = (uint8_t *) prog->driver_cache_blob;
+
+   MESA_TRACE_FUNC();
 
    st_set_prog_affected_state_flags(prog);
 
@@ -181,6 +187,9 @@ st_deserialise_nir_program(struct gl_context *ctx,
    prog->serialized_nir_size = blob_read_intptr(&blob_reader);
    prog->serialized_nir = malloc(prog->serialized_nir_size);
    blob_copy_bytes(&blob_reader, prog->serialized_nir, prog->serialized_nir_size);
+   prog->base_serialized_nir_size = blob_read_intptr(&blob_reader);
+   prog->base_serialized_nir = malloc(prog->base_serialized_nir_size);
+   blob_copy_bytes(&blob_reader, prog->base_serialized_nir, prog->base_serialized_nir_size);
    prog->shader_program = shProg;
 
    /* Make sure we don't try to read more data than we wrote. This should
@@ -196,7 +205,7 @@ st_deserialise_nir_program(struct gl_context *ctx,
       }
    }
 
-   st_finalize_program(st, prog);
+   st_finalize_program(st, prog, false);
 }
 
 bool
@@ -212,7 +221,7 @@ st_load_nir_from_disk_cache(struct gl_context *ctx,
    if (prog->data->LinkStatus != LINKING_SKIPPED)
       return false;
 
-   for (unsigned i = 0; i < MESA_SHADER_STAGES; i++) {
+   for (unsigned i = 0; i < MESA_SHADER_MESH_STAGES; i++) {
       if (prog->_LinkedShaders[i] == NULL)
          continue;
 

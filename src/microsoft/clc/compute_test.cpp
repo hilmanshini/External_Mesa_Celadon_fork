@@ -39,7 +39,7 @@
 
 #include <spirv-tools/libspirv.hpp>
 
-#if (defined(_WIN32) && defined(_MSC_VER)) || D3D12_SDK_VERSION < 606
+#if (defined(_WIN32) && defined(_MSC_VER))
 inline D3D12_CPU_DESCRIPTOR_HANDLE
 GetCPUDescriptorHandleForHeapStart(ID3D12DescriptorHeap *heap)
 {
@@ -478,11 +478,13 @@ ComputeTest::run_shader_with_raw_args(Shader shader,
    if (args.size() != shader.dxil->kernel->num_args)
       throw runtime_error("incorrect number of inputs");
 
-   struct clc_runtime_kernel_conf conf = { 0 };
+   struct clc_runtime_kernel_conf conf = {};
 
    // Older WARP and some hardware doesn't support int64, so for these tests, unconditionally lower away int64
    // A more complex runtime can be smarter about detecting when this needs to be done
    conf.lower_bit_size = 64;
+   conf.max_shader_model = SHADER_MODEL_6_2;
+   conf.validator_version = DXIL_VALIDATOR_1_4;
 
    if (!shader.dxil->metadata.local_size[0])
       conf.local_size[0] = compile_args.x;
@@ -590,8 +592,10 @@ ComputeTest::run_shader_with_raw_args(Shader shader,
       }
    }
 
-   if (dxil->metadata.printf.uav_id > 0)
-      add_uav_resource(resources, 0, dxil->metadata.printf.uav_id, NULL, 1024 * 1024 / 4, 4);
+   if (dxil->metadata.printf.uav_id > 0) {
+      static constexpr uint32_t printf_initial_data[1024 * 1024 / 4] = { sizeof(uint32_t) };
+      add_uav_resource(resources, 0, dxil->metadata.printf.uav_id, printf_initial_data, ARRAY_SIZE(printf_initial_data), sizeof(printf_initial_data[0]));
+   }
 
    for (unsigned i = 0; i < dxil->metadata.num_consts; ++i)
       add_uav_resource(resources, 0, dxil->metadata.consts[i].uav_id,
@@ -738,7 +742,7 @@ ComputeTest::SetUp()
 
    uav_heap_incr = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
-   event = CreateEvent(NULL, FALSE, FALSE, NULL);
+   event = CreateEvent(NULL, false, false, NULL);
    if (!event)
       throw runtime_error("Failed to create event");
    fence_value = 1;
@@ -808,7 +812,7 @@ ComputeTest::compile(const std::vector<const char *> &sources,
       args.source.value = sources[i];
 
       clc_binary spirv{};
-      if (!clc_compile_c_to_spirv(&args, &logger, &spirv))
+      if (!clc_compile_c_to_spirv(&args, &logger, &spirv, NULL))
          throw runtime_error("failed to compile object!");
 
       Shader shader;

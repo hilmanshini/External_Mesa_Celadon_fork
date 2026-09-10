@@ -66,12 +66,11 @@
  */
 
 #include <string.h>
-#include <sys/param.h>
 
-#include "vl/vl_decoder.h"
 #include "vl/vl_video_buffer.h"
 #include "util/u_video.h"
 #include "util/u_memory.h"
+#include "util/macros.h"
 
 #include "virgl_screen.h"
 #include "virgl_resource.h"
@@ -106,7 +105,7 @@ static int fill_base_picture_desc(const struct pipe_picture_desc *desc,
     ITEM_SET(vbase, desc, protected_playback);
     ITEM_SET(vbase, desc, key_size);
     memcpy(vbase->decrypt_key, desc->decrypt_key,
-           MIN(desc->key_size, sizeof(vbase->decrypt_key)));
+           MIN2(desc->key_size, sizeof(vbase->decrypt_key)));
 
     return 0;
 }
@@ -229,9 +228,6 @@ static int fill_h264_enc_picture_desc(const struct pipe_picture_desc *desc,
         ITEM_SET(vh264, h264, rate_ctrl[i].frame_rate_den);
         ITEM_SET(vh264, h264, rate_ctrl[i].vbv_buffer_size);
         ITEM_SET(vh264, h264, rate_ctrl[i].vbv_buf_lv);
-        ITEM_SET(vh264, h264, rate_ctrl[i].target_bits_picture);
-        ITEM_SET(vh264, h264, rate_ctrl[i].peak_bits_picture_integer);
-        ITEM_SET(vh264, h264, rate_ctrl[i].peak_bits_picture_fraction);
         ITEM_SET(vh264, h264, rate_ctrl[i].fill_data_enable);
         ITEM_SET(vh264, h264, rate_ctrl[i].skip_frame_enable);
         ITEM_SET(vh264, h264, rate_ctrl[i].enforce_hrd);
@@ -380,7 +376,6 @@ static int fill_h265_picture_desc(const struct pipe_picture_desc *desc,
     ITEM_SET(&vh265->pps, h265->pps, lists_modification_present_flag);
     ITEM_SET(&vh265->pps, h265->pps, log2_parallel_merge_level_minus2);
     ITEM_SET(&vh265->pps, h265->pps, slice_segment_header_extension_present_flag);
-    ITEM_SET(&vh265->pps, h265->pps, st_rps_bits);
 
     ITEM_SET(vh265, h265, IDRPicFlag);
     ITEM_SET(vh265, h265, RAPPicFlag);
@@ -404,8 +399,6 @@ static int fill_h265_picture_desc(const struct pipe_picture_desc *desc,
     ITEM_CPY(vh265, h265, RefPicSetStCurrAfter);
     ITEM_CPY(vh265, h265, RefPicSetLtCurr);
     ITEM_CPY(vh265, h265, RefPicList);
-    ITEM_SET(vh265, h265, UseRefPicList);
-    ITEM_SET(vh265, h265, UseStRpsBits);
 
     return 0;
 }
@@ -469,25 +462,22 @@ static int fill_h265_enc_picture_desc(const struct pipe_picture_desc *desc,
     ITEM_SET(vh265, h265, slice.slice_deblocking_filter_disabled_flag);
     ITEM_SET(vh265, h265, slice.slice_loop_filter_across_slices_enabled_flag);
 
-    ITEM_SET(vh265, h265, rc.rate_ctrl_method);
-    ITEM_SET(vh265, h265, rc.target_bitrate);
-    ITEM_SET(vh265, h265, rc.peak_bitrate);
-    ITEM_SET(vh265, h265, rc.frame_rate_num);
-    ITEM_SET(vh265, h265, rc.frame_rate_den);
-    ITEM_SET(vh265, h265, rc.quant_i_frames);
-    ITEM_SET(vh265, h265, rc.quant_p_frames);
-    ITEM_SET(vh265, h265, rc.quant_b_frames);
-    ITEM_SET(vh265, h265, rc.vbv_buffer_size);
-    ITEM_SET(vh265, h265, rc.vbv_buf_lv);
-    ITEM_SET(vh265, h265, rc.target_bits_picture);
-    ITEM_SET(vh265, h265, rc.peak_bits_picture_integer);
-    ITEM_SET(vh265, h265, rc.peak_bits_picture_fraction);
-    ITEM_SET(vh265, h265, rc.fill_data_enable);
-    ITEM_SET(vh265, h265, rc.skip_frame_enable);
-    ITEM_SET(vh265, h265, rc.enforce_hrd);
-    ITEM_SET(vh265, h265, rc.max_au_size);
-    ITEM_SET(vh265, h265, rc.max_qp);
-    ITEM_SET(vh265, h265, rc.min_qp);
+    vh265->rc.rate_ctrl_method = h265->rc[0].rate_ctrl_method;
+    vh265->rc.target_bitrate = h265->rc[0].target_bitrate;
+    vh265->rc.peak_bitrate = h265->rc[0].peak_bitrate;
+    vh265->rc.frame_rate_num = h265->rc[0].frame_rate_num;
+    vh265->rc.frame_rate_den = h265->rc[0].frame_rate_den;
+    vh265->rc.quant_i_frames = h265->rc[0].quant_i_frames;
+    vh265->rc.quant_p_frames = h265->rc[0].quant_p_frames;
+    vh265->rc.quant_b_frames = h265->rc[0].quant_b_frames;
+    vh265->rc.vbv_buffer_size = h265->rc[0].vbv_buffer_size;
+    vh265->rc.vbv_buf_lv = h265->rc[0].vbv_buf_lv;
+    vh265->rc.fill_data_enable = h265->rc[0].fill_data_enable;
+    vh265->rc.skip_frame_enable = h265->rc[0].skip_frame_enable;
+    vh265->rc.enforce_hrd = h265->rc[0].enforce_hrd;
+    vh265->rc.max_au_size = h265->rc[0].max_au_size;
+    vh265->rc.max_qp = h265->rc[0].max_qp;
+    vh265->rc.min_qp = h265->rc[0].min_qp;
 
     ITEM_SET(vh265, h265, picture_type);
     ITEM_SET(vh265, h265, decoded_curr_pic);
@@ -525,36 +515,380 @@ static int fill_h265_enc_picture_desc(const struct pipe_picture_desc *desc,
     return 0;
 }
 
-static int fill_mpeg4_picture_desc(const struct pipe_picture_desc *desc,
+static int fill_mpeg12_picture_desc(const struct pipe_picture_desc *desc,
+                                    union virgl_picture_desc *vdsc)
+{
+    unsigned i;
+    struct virgl_video_buffer *vbuf;
+    struct virgl_mpeg12_picture_desc *vmpeg12 = &vdsc->mpeg12;
+    struct pipe_mpeg12_picture_desc *mpeg12 = (struct pipe_mpeg12_picture_desc *)desc;
+
+    fill_base_picture_desc(desc, &vmpeg12->base);
+
+    for (i = 0; i < 2; i++) {
+        vbuf = virgl_video_buffer(mpeg12->ref[i]);
+        vmpeg12->ref[i] = vbuf ? vbuf->handle : 0;
+    }
+
+    memcpy(vmpeg12->intra_matrix, mpeg12->intra_matrix, 64);
+    memcpy(vmpeg12->non_intra_matrix, mpeg12->non_intra_matrix, 64);
+
+    ITEM_SET(vmpeg12, mpeg12, picture_coding_type);
+    vmpeg12->f_code[0][0]  = mpeg12->f_code[0][0] ;
+    vmpeg12->f_code[0][1]  = mpeg12->f_code[0][1] ;
+    vmpeg12->f_code[1][0]  = mpeg12->f_code[1][0] ;
+    vmpeg12->f_code[1][1]  = mpeg12->f_code[1][1] ;
+    ITEM_SET(vmpeg12, mpeg12, intra_dc_precision);
+    ITEM_SET(vmpeg12, mpeg12, picture_structure);
+    ITEM_SET(vmpeg12, mpeg12, top_field_first);
+    ITEM_SET(vmpeg12, mpeg12, frame_pred_frame_dct);
+    ITEM_SET(vmpeg12, mpeg12, concealment_motion_vectors);
+    ITEM_SET(vmpeg12, mpeg12, q_scale_type);
+    ITEM_SET(vmpeg12, mpeg12, intra_vlc_format);
+    ITEM_SET(vmpeg12, mpeg12, alternate_scan);
+    return 0;
+}
+
+
+static int fill_vc1_picture_desc(const struct pipe_picture_desc *desc,
+                                 union virgl_picture_desc *vdsc)
+{
+    unsigned i;
+    struct virgl_video_buffer *vbuf;
+    struct virgl_vc1_picture_desc *vvc1 = &vdsc->vc1;
+    struct pipe_vc1_picture_desc *vc1 = (struct pipe_vc1_picture_desc *)desc;
+
+    fill_base_picture_desc(desc, &vvc1->base);
+
+    for (i = 0; i < 2; i++) {
+        vbuf = virgl_video_buffer(vc1->ref[i]);
+        vvc1->ref[i] = vbuf ? vbuf->handle : 0;
+    }
+    ITEM_SET(vvc1, vc1, picture_type);
+    ITEM_SET(vvc1, vc1, pulldown);
+    ITEM_SET(vvc1, vc1, interlace);
+    ITEM_SET(vvc1, vc1, tfcntrflag);
+    ITEM_SET(vvc1, vc1, finterpflag);
+    ITEM_SET(vvc1, vc1, psf);
+    ITEM_SET(vvc1, vc1, dquant);
+    ITEM_SET(vvc1, vc1, panscan_flag);
+    ITEM_SET(vvc1, vc1, refdist_flag);
+    ITEM_SET(vvc1, vc1, quantizer);
+    ITEM_SET(vvc1, vc1, extended_mv);
+    ITEM_SET(vvc1, vc1, extended_dmv);
+    ITEM_SET(vvc1, vc1, overlap);
+    ITEM_SET(vvc1, vc1, vstransform);
+    ITEM_SET(vvc1, vc1, loopfilter);
+    ITEM_SET(vvc1, vc1, fastuvmc);
+    ITEM_SET(vvc1, vc1, range_mapy_flag);
+    ITEM_SET(vvc1, vc1, range_mapy);
+    ITEM_SET(vvc1, vc1, range_mapuv_flag);
+    ITEM_SET(vvc1, vc1, range_mapuv);
+    ITEM_SET(vvc1, vc1, multires);
+    ITEM_SET(vvc1, vc1, syncmarker);
+    ITEM_SET(vvc1, vc1, rangered);
+    ITEM_SET(vvc1, vc1, maxbframes);
+    ITEM_SET(vvc1, vc1, deblockEnable);
+    ITEM_SET(vvc1, vc1, pquant);
+    ITEM_SET(vvc1, vc1, slice_count);
+
+    return 0;
+}
+
+static int fill_mjpeg_picture_desc(const struct pipe_picture_desc *desc,
+                                   union virgl_picture_desc *vdsc)
+{
+    unsigned i;
+    struct virgl_mjpeg_picture_desc *vmjpeg = &vdsc->mjpeg;
+    struct pipe_mjpeg_picture_desc *mjpeg = (struct pipe_mjpeg_picture_desc *)desc;
+
+    fill_base_picture_desc(desc, &vmjpeg->base);
+
+    ITEM_SET(&vmjpeg->picture_parameter, &mjpeg->picture_parameter, picture_width);
+    ITEM_SET(&vmjpeg->picture_parameter, &mjpeg->picture_parameter, picture_height);
+    ITEM_SET(&vmjpeg->picture_parameter, &mjpeg->picture_parameter, crop_x);
+    ITEM_SET(&vmjpeg->picture_parameter, &mjpeg->picture_parameter, crop_y);
+    ITEM_SET(&vmjpeg->picture_parameter, &mjpeg->picture_parameter, crop_width);
+    ITEM_SET(&vmjpeg->picture_parameter, &mjpeg->picture_parameter, crop_height);
+
+    ITEM_SET(&vmjpeg->picture_parameter, &mjpeg->picture_parameter, num_components);
+    for (i = 0; i < mjpeg->picture_parameter.num_components; ++i) {
+        ITEM_SET(&vmjpeg->picture_parameter.components[i], &mjpeg->picture_parameter.components[i], component_id);
+        ITEM_SET(&vmjpeg->picture_parameter.components[i], &mjpeg->picture_parameter.components[i], h_sampling_factor);
+        ITEM_SET(&vmjpeg->picture_parameter.components[i], &mjpeg->picture_parameter.components[i], v_sampling_factor);
+        ITEM_SET(&vmjpeg->picture_parameter.components[i], &mjpeg->picture_parameter.components[i], quantiser_table_selector);
+    }
+
+    ITEM_SET(&vmjpeg->slice_parameter, &mjpeg->slice_parameter, slice_data_size);
+    ITEM_SET(&vmjpeg->slice_parameter, &mjpeg->slice_parameter, slice_data_offset);
+    ITEM_SET(&vmjpeg->slice_parameter, &mjpeg->slice_parameter, slice_data_flag);
+    ITEM_SET(&vmjpeg->slice_parameter, &mjpeg->slice_parameter, slice_horizontal_position);
+    ITEM_SET(&vmjpeg->slice_parameter, &mjpeg->slice_parameter, slice_vertical_position);
+
+    ITEM_SET(&vmjpeg->slice_parameter, &mjpeg->slice_parameter, num_components);
+    for (i = 0; i < mjpeg->slice_parameter.num_components; ++i) {
+        ITEM_SET(&vmjpeg->slice_parameter.components[i], &mjpeg->slice_parameter.components[i], component_selector);
+        ITEM_SET(&vmjpeg->slice_parameter.components[i], &mjpeg->slice_parameter.components[i], dc_table_selector);
+        ITEM_SET(&vmjpeg->slice_parameter.components[i], &mjpeg->slice_parameter.components[i], ac_table_selector);
+    }
+    
+    ITEM_SET(&vmjpeg->slice_parameter, &mjpeg->slice_parameter, restart_interval);
+    ITEM_SET(&vmjpeg->slice_parameter, &mjpeg->slice_parameter, num_mcus);
+
+    ITEM_CPY(&vmjpeg->quantization_table, &mjpeg->quantization_table, load_quantiser_table);
+    ITEM_CPY(&vmjpeg->quantization_table, &mjpeg->quantization_table, quantiser_table);
+
+    for (i = 0; i < 2; ++i) {
+        ITEM_SET(&vmjpeg->huffman_table, &mjpeg->huffman_table, load_huffman_table[i]);
+        ITEM_CPY(&vmjpeg->huffman_table.table[i], &mjpeg->huffman_table.table[i], num_dc_codes);
+        ITEM_CPY(&vmjpeg->huffman_table.table[i], &mjpeg->huffman_table.table[i], dc_values);
+        ITEM_CPY(&vmjpeg->huffman_table.table[i], &mjpeg->huffman_table.table[i], num_ac_codes);
+        ITEM_CPY(&vmjpeg->huffman_table.table[i], &mjpeg->huffman_table.table[i], ac_values);
+        ITEM_CPY(&vmjpeg->huffman_table.table[i], &mjpeg->huffman_table.table[i], pad);
+    }
+    return 0;
+}
+
+static int fill_vp9_picture_desc(const struct pipe_picture_desc *desc,
                                    union virgl_picture_desc *vdsc)
 {
     unsigned i;
     struct virgl_video_buffer *vbuf;
-    struct virgl_mpeg4_picture_desc *vmpeg4 = &vdsc->mpeg4;
-    struct pipe_mpeg4_picture_desc *mpeg4 = (struct pipe_mpeg4_picture_desc *)desc;
+    struct virgl_vp9_picture_desc *vvp9 = &vdsc->vp9;
+    struct pipe_vp9_picture_desc *vp9 = (struct pipe_vp9_picture_desc *)desc;
 
-    fill_base_picture_desc(desc, &vmpeg4->base);
+    fill_base_picture_desc(desc, &vvp9->base);
 
-    ITEM_CPY(vmpeg4, mpeg4, trd);
-    ITEM_CPY(vmpeg4, mpeg4, trb);
-    ITEM_SET(vmpeg4, mpeg4, vop_time_increment_resolution);
-    ITEM_SET(vmpeg4, mpeg4, vop_coding_type);
-    ITEM_SET(vmpeg4, mpeg4, vop_fcode_forward);
-    ITEM_SET(vmpeg4, mpeg4, vop_fcode_backward);
-    ITEM_SET(vmpeg4, mpeg4, resync_marker_disable);
-    ITEM_SET(vmpeg4, mpeg4, interlaced);
-    ITEM_SET(vmpeg4, mpeg4, quant_type);
-    ITEM_SET(vmpeg4, mpeg4, quarter_sample);
-    ITEM_SET(vmpeg4, mpeg4, short_video_header);
-    ITEM_SET(vmpeg4, mpeg4, rounding_control);
-    ITEM_SET(vmpeg4, mpeg4, alternate_vertical_scan_flag);
-    ITEM_SET(vmpeg4, mpeg4, top_field_first);
-    ITEM_CPY(vmpeg4, mpeg4, intra_matrix);
-    ITEM_CPY(vmpeg4, mpeg4, non_intra_matrix);
     for (i = 0; i < 16; i++) {
-        vbuf = virgl_video_buffer(mpeg4->ref[i]);
-        vmpeg4->ref[i] = vbuf ? vbuf->handle : 0;
+        vbuf = virgl_video_buffer(vp9->ref[i]);
+        vvp9->ref[i] = vbuf ? vbuf->handle : 0;
     }
+
+    ITEM_SET(vvp9, vp9, picture_parameter.frame_width);
+    ITEM_SET(vvp9, vp9, picture_parameter.frame_height);
+    ITEM_SET(vvp9, vp9, picture_parameter.pic_fields.subsampling_x);
+    ITEM_SET(vvp9, vp9, picture_parameter.pic_fields.subsampling_y);
+    ITEM_SET(vvp9, vp9, picture_parameter.pic_fields.frame_type);
+    ITEM_SET(vvp9, vp9, picture_parameter.pic_fields.show_frame);
+    ITEM_SET(vvp9, vp9, picture_parameter.pic_fields.error_resilient_mode);
+    ITEM_SET(vvp9, vp9, picture_parameter.pic_fields.intra_only);
+    ITEM_SET(vvp9, vp9, picture_parameter.pic_fields.allow_high_precision_mv);
+    ITEM_SET(vvp9, vp9, picture_parameter.pic_fields.mcomp_filter_type);
+    ITEM_SET(vvp9, vp9, picture_parameter.pic_fields.frame_parallel_decoding_mode);
+    ITEM_SET(vvp9, vp9, picture_parameter.pic_fields.reset_frame_context);
+    ITEM_SET(vvp9, vp9, picture_parameter.pic_fields.refresh_frame_context);
+    ITEM_SET(vvp9, vp9, picture_parameter.pic_fields.frame_context_idx);
+    ITEM_SET(vvp9, vp9, picture_parameter.pic_fields.segmentation_enabled);
+    ITEM_SET(vvp9, vp9, picture_parameter.pic_fields.segmentation_temporal_update);
+    ITEM_SET(vvp9, vp9, picture_parameter.pic_fields.segmentation_update_map);
+    ITEM_SET(vvp9, vp9, picture_parameter.pic_fields.last_ref_frame);
+    ITEM_SET(vvp9, vp9, picture_parameter.pic_fields.last_ref_frame_sign_bias);
+    ITEM_SET(vvp9, vp9, picture_parameter.pic_fields.golden_ref_frame);
+    ITEM_SET(vvp9, vp9, picture_parameter.pic_fields.golden_ref_frame_sign_bias);
+    ITEM_SET(vvp9, vp9, picture_parameter.pic_fields.alt_ref_frame);
+    ITEM_SET(vvp9, vp9, picture_parameter.pic_fields.alt_ref_frame_sign_bias);
+    ITEM_SET(vvp9, vp9, picture_parameter.pic_fields.lossless_flag);
+    ITEM_SET(vvp9, vp9, picture_parameter.filter_level);
+    ITEM_SET(vvp9, vp9, picture_parameter.sharpness_level);
+    ITEM_SET(vvp9, vp9, picture_parameter.log2_tile_rows);
+    ITEM_SET(vvp9, vp9, picture_parameter.log2_tile_columns);
+    ITEM_SET(vvp9, vp9, picture_parameter.frame_header_length_in_bytes);
+    ITEM_SET(vvp9, vp9, picture_parameter.first_partition_size);
+    ITEM_CPY(vvp9, vp9, picture_parameter.mb_segment_tree_probs);
+    ITEM_CPY(vvp9, vp9, picture_parameter.segment_pred_probs);
+    ITEM_SET(vvp9, vp9, picture_parameter.profile);
+    ITEM_SET(vvp9, vp9, picture_parameter.bit_depth);
+    ITEM_SET(vvp9, vp9, picture_parameter.mode_ref_delta_enabled);
+    ITEM_SET(vvp9, vp9, picture_parameter.mode_ref_delta_update);
+    ITEM_SET(vvp9, vp9, picture_parameter.base_qindex);
+    ITEM_SET(vvp9, vp9, picture_parameter.y_dc_delta_q);
+    ITEM_SET(vvp9, vp9, picture_parameter.uv_ac_delta_q);
+    ITEM_SET(vvp9, vp9, picture_parameter.uv_dc_delta_q);
+    ITEM_SET(vvp9, vp9, picture_parameter.abs_delta);
+    ITEM_CPY(vvp9, vp9, picture_parameter.ref_deltas);
+    ITEM_CPY(vvp9, vp9, picture_parameter.mode_deltas);
+    
+    vvp9->slice_parameter.slice_data_size = vp9->slice_parameter.slice_data_size[0];
+    vvp9->slice_parameter.slice_data_offset = vp9->slice_parameter.slice_data_offset[0];
+    vvp9->slice_parameter.slice_data_flag = vp9->slice_parameter.slice_data_flag[0];
+
+    for (i = 0; i < 8; i++) {
+        ITEM_SET(vvp9, vp9, slice_parameter.seg_param[i].segment_flags.segment_reference_enabled);
+        ITEM_SET(vvp9, vp9, slice_parameter.seg_param[i].segment_flags.segment_reference);
+        ITEM_SET(vvp9, vp9, slice_parameter.seg_param[i].segment_flags.segment_reference_skipped);
+        ITEM_CPY(vvp9, vp9, slice_parameter.seg_param[i].filter_level);
+        ITEM_SET(vvp9, vp9, slice_parameter.seg_param[i].luma_ac_quant_scale);
+        ITEM_SET(vvp9, vp9, slice_parameter.seg_param[i].luma_dc_quant_scale);
+        ITEM_SET(vvp9, vp9, slice_parameter.seg_param[i].chroma_ac_quant_scale);
+        ITEM_SET(vvp9, vp9, slice_parameter.seg_param[i].chroma_dc_quant_scale);
+    }
+
+    return 0;
+}
+
+static int fill_av1_picture_desc(const struct pipe_picture_desc *desc,
+                                 union virgl_picture_desc *vdsc)
+{
+    unsigned i;
+    struct virgl_video_buffer *vbuf;
+    struct virgl_av1_picture_desc *vav1 = &vdsc->av1;
+    struct pipe_av1_picture_desc *av1 = (struct pipe_av1_picture_desc *)desc;
+
+    fill_base_picture_desc(desc, &vav1->base);
+
+    for (i = 0; i < ARRAY_SIZE(vav1->ref); i++) {
+        vbuf = virgl_video_buffer(av1->ref[i]);
+        vav1->ref[i] = vbuf ? vbuf->handle : 0;
+    }
+    vbuf = virgl_video_buffer(av1->film_grain_target);
+    vav1->film_grain_target = vbuf ? vbuf->handle : 0;
+
+    ITEM_SET(vav1, av1, picture_parameter.profile);
+    ITEM_SET(vav1, av1, picture_parameter.order_hint_bits_minus_1);
+    ITEM_SET(vav1, av1, picture_parameter.bit_depth_idx);
+
+    ITEM_SET(vav1, av1, picture_parameter.seq_info_fields.use_128x128_superblock);
+    ITEM_SET(vav1, av1, picture_parameter.seq_info_fields.enable_filter_intra);
+    ITEM_SET(vav1, av1, picture_parameter.seq_info_fields.enable_intra_edge_filter);
+    ITEM_SET(vav1, av1, picture_parameter.seq_info_fields.enable_interintra_compound);
+    ITEM_SET(vav1, av1, picture_parameter.seq_info_fields.enable_masked_compound);
+    ITEM_SET(vav1, av1, picture_parameter.seq_info_fields.enable_dual_filter);
+    ITEM_SET(vav1, av1, picture_parameter.seq_info_fields.enable_order_hint);
+    ITEM_SET(vav1, av1, picture_parameter.seq_info_fields.enable_jnt_comp);
+    ITEM_SET(vav1, av1, picture_parameter.seq_info_fields.enable_cdef);
+    ITEM_SET(vav1, av1, picture_parameter.seq_info_fields.mono_chrome);
+    ITEM_SET(vav1, av1, picture_parameter.seq_info_fields.ref_frame_mvs);
+    ITEM_SET(vav1, av1, picture_parameter.seq_info_fields.film_grain_params_present);
+
+    ITEM_SET(vav1, av1, picture_parameter.current_frame_id);
+    ITEM_SET(vav1, av1, picture_parameter.frame_width);
+    ITEM_SET(vav1, av1, picture_parameter.frame_height);
+    ITEM_SET(vav1, av1, picture_parameter.max_width);
+    ITEM_SET(vav1, av1, picture_parameter.max_height);
+    ITEM_CPY(vav1, av1, picture_parameter.ref_frame_idx);
+    ITEM_SET(vav1, av1, picture_parameter.primary_ref_frame);
+    ITEM_SET(vav1, av1, picture_parameter.order_hint);
+
+    ITEM_SET(vav1, av1, picture_parameter.seg_info.segment_info_fields.enabled);
+    ITEM_SET(vav1, av1, picture_parameter.seg_info.segment_info_fields.update_map);
+    ITEM_SET(vav1, av1, picture_parameter.seg_info.segment_info_fields.update_data);
+    ITEM_SET(vav1, av1, picture_parameter.seg_info.segment_info_fields.temporal_update);
+    ITEM_CPY(vav1, av1, picture_parameter.seg_info.feature_data);
+    ITEM_CPY(vav1, av1, picture_parameter.seg_info.feature_mask);
+
+    ITEM_SET(vav1, av1, picture_parameter.film_grain_info.film_grain_info_fields.apply_grain);
+    ITEM_SET(vav1, av1, picture_parameter.film_grain_info.film_grain_info_fields.chroma_scaling_from_luma);
+    ITEM_SET(vav1, av1, picture_parameter.film_grain_info.film_grain_info_fields.grain_scaling_minus_8);
+    ITEM_SET(vav1, av1, picture_parameter.film_grain_info.film_grain_info_fields.ar_coeff_lag);
+    ITEM_SET(vav1, av1, picture_parameter.film_grain_info.film_grain_info_fields.ar_coeff_shift_minus_6);
+    ITEM_SET(vav1, av1, picture_parameter.film_grain_info.film_grain_info_fields.grain_scale_shift);
+    ITEM_SET(vav1, av1, picture_parameter.film_grain_info.film_grain_info_fields.overlap_flag);
+    ITEM_SET(vav1, av1, picture_parameter.film_grain_info.film_grain_info_fields.clip_to_restricted_range);
+
+    ITEM_SET(vav1, av1, picture_parameter.film_grain_info.grain_seed);
+    ITEM_SET(vav1, av1, picture_parameter.film_grain_info.num_y_points);
+    ITEM_CPY(vav1, av1, picture_parameter.film_grain_info.point_y_value);
+    ITEM_CPY(vav1, av1, picture_parameter.film_grain_info.point_y_scaling);
+    ITEM_SET(vav1, av1, picture_parameter.film_grain_info.num_cb_points);
+    ITEM_CPY(vav1, av1, picture_parameter.film_grain_info.point_cb_value);
+    ITEM_CPY(vav1, av1, picture_parameter.film_grain_info.point_cb_scaling);
+    ITEM_SET(vav1, av1, picture_parameter.film_grain_info.num_cr_points);
+    ITEM_CPY(vav1, av1, picture_parameter.film_grain_info.point_cr_value);
+    ITEM_CPY(vav1, av1, picture_parameter.film_grain_info.point_cr_scaling);
+    ITEM_CPY(vav1, av1, picture_parameter.film_grain_info.ar_coeffs_y);
+    ITEM_CPY(vav1, av1, picture_parameter.film_grain_info.ar_coeffs_cb);
+    ITEM_CPY(vav1, av1, picture_parameter.film_grain_info.ar_coeffs_cr);
+    ITEM_SET(vav1, av1, picture_parameter.film_grain_info.cb_mult);
+    ITEM_SET(vav1, av1, picture_parameter.film_grain_info.cb_luma_mult);
+    ITEM_SET(vav1, av1, picture_parameter.film_grain_info.cb_offset);
+    ITEM_SET(vav1, av1, picture_parameter.film_grain_info.cr_mult);
+    ITEM_SET(vav1, av1, picture_parameter.film_grain_info.cr_luma_mult);
+    ITEM_SET(vav1, av1, picture_parameter.film_grain_info.cr_offset);
+
+    ITEM_SET(vav1, av1, picture_parameter.tile_cols);
+    ITEM_SET(vav1, av1, picture_parameter.tile_rows);
+    ITEM_CPY(vav1, av1, picture_parameter.tile_col_start_sb);
+    ITEM_CPY(vav1, av1, picture_parameter.tile_row_start_sb);
+    ITEM_CPY(vav1, av1, picture_parameter.width_in_sbs);
+    ITEM_CPY(vav1, av1, picture_parameter.height_in_sbs);
+    ITEM_SET(vav1, av1, picture_parameter.context_update_tile_id);
+
+    ITEM_SET(vav1, av1, picture_parameter.pic_info_fields.frame_type);
+    ITEM_SET(vav1, av1, picture_parameter.pic_info_fields.show_frame);
+    ITEM_SET(vav1, av1, picture_parameter.pic_info_fields.showable_frame);
+    ITEM_SET(vav1, av1, picture_parameter.pic_info_fields.error_resilient_mode);
+    ITEM_SET(vav1, av1, picture_parameter.pic_info_fields.disable_cdf_update);
+    ITEM_SET(vav1, av1, picture_parameter.pic_info_fields.allow_screen_content_tools);
+    ITEM_SET(vav1, av1, picture_parameter.pic_info_fields.force_integer_mv);
+    ITEM_SET(vav1, av1, picture_parameter.pic_info_fields.allow_intrabc);
+    ITEM_SET(vav1, av1, picture_parameter.pic_info_fields.use_superres);
+    ITEM_SET(vav1, av1, picture_parameter.pic_info_fields.allow_high_precision_mv);
+    ITEM_SET(vav1, av1, picture_parameter.pic_info_fields.is_motion_mode_switchable);
+    ITEM_SET(vav1, av1, picture_parameter.pic_info_fields.use_ref_frame_mvs);
+    ITEM_SET(vav1, av1, picture_parameter.pic_info_fields.disable_frame_end_update_cdf);
+    ITEM_SET(vav1, av1, picture_parameter.pic_info_fields.uniform_tile_spacing_flag);
+    ITEM_SET(vav1, av1, picture_parameter.pic_info_fields.allow_warped_motion);
+    ITEM_SET(vav1, av1, picture_parameter.pic_info_fields.large_scale_tile);
+
+    ITEM_SET(vav1, av1, picture_parameter.superres_scale_denominator);
+    ITEM_SET(vav1, av1, picture_parameter.interp_filter);
+    ITEM_CPY(vav1, av1, picture_parameter.filter_level);
+    ITEM_SET(vav1, av1, picture_parameter.filter_level_u);
+    ITEM_SET(vav1, av1, picture_parameter.filter_level_v);
+    ITEM_SET(vav1, av1, picture_parameter.loop_filter_info_fields.sharpness_level);
+    ITEM_SET(vav1, av1, picture_parameter.loop_filter_info_fields.mode_ref_delta_enabled);
+    ITEM_SET(vav1, av1, picture_parameter.loop_filter_info_fields.mode_ref_delta_update);
+
+    ITEM_CPY(vav1, av1, picture_parameter.ref_deltas);
+    ITEM_CPY(vav1, av1, picture_parameter.mode_deltas);
+    ITEM_SET(vav1, av1, picture_parameter.base_qindex);
+    ITEM_SET(vav1, av1, picture_parameter.y_dc_delta_q);
+    ITEM_SET(vav1, av1, picture_parameter.u_dc_delta_q);
+    ITEM_SET(vav1, av1, picture_parameter.u_ac_delta_q);
+    ITEM_SET(vav1, av1, picture_parameter.v_dc_delta_q);
+    ITEM_SET(vav1, av1, picture_parameter.v_ac_delta_q);
+
+    ITEM_SET(vav1, av1, picture_parameter.qmatrix_fields.using_qmatrix);
+    ITEM_SET(vav1, av1, picture_parameter.qmatrix_fields.qm_y);
+    ITEM_SET(vav1, av1, picture_parameter.qmatrix_fields.qm_u);
+    ITEM_SET(vav1, av1, picture_parameter.qmatrix_fields.qm_v);
+
+    ITEM_SET(vav1, av1, picture_parameter.mode_control_fields.delta_q_present_flag);
+    ITEM_SET(vav1, av1, picture_parameter.mode_control_fields.log2_delta_q_res);
+    ITEM_SET(vav1, av1, picture_parameter.mode_control_fields.delta_lf_present_flag);
+    ITEM_SET(vav1, av1, picture_parameter.mode_control_fields.log2_delta_lf_res);
+    ITEM_SET(vav1, av1, picture_parameter.mode_control_fields.delta_lf_multi);
+    ITEM_SET(vav1, av1, picture_parameter.mode_control_fields.tx_mode);
+    ITEM_SET(vav1, av1, picture_parameter.mode_control_fields.reference_select);
+    ITEM_SET(vav1, av1, picture_parameter.mode_control_fields.reduced_tx_set_used);
+    ITEM_SET(vav1, av1, picture_parameter.mode_control_fields.skip_mode_present);
+
+    ITEM_SET(vav1, av1, picture_parameter.cdef_damping_minus_3);
+    ITEM_SET(vav1, av1, picture_parameter.cdef_bits);
+    ITEM_CPY(vav1, av1, picture_parameter.cdef_y_strengths);
+    ITEM_CPY(vav1, av1, picture_parameter.cdef_uv_strengths);
+
+    ITEM_SET(vav1, av1, picture_parameter.loop_restoration_fields.yframe_restoration_type);
+    ITEM_SET(vav1, av1, picture_parameter.loop_restoration_fields.cbframe_restoration_type);
+    ITEM_SET(vav1, av1, picture_parameter.loop_restoration_fields.crframe_restoration_type);
+    ITEM_SET(vav1, av1, picture_parameter.loop_restoration_fields.lr_unit_shift);
+    ITEM_SET(vav1, av1, picture_parameter.loop_restoration_fields.lr_uv_shift);
+
+    for (i = 0; i < ARRAY_SIZE(vav1->picture_parameter.wm); i++) {
+        ITEM_SET(vav1, av1, picture_parameter.wm[i].wmtype);
+        ITEM_SET(vav1, av1, picture_parameter.wm[i].invalid);
+        ITEM_CPY(vav1, av1, picture_parameter.wm[i].wmmat);
+    }
+
+    ITEM_SET(vav1, av1, picture_parameter.refresh_frame_flags);
+    ITEM_SET(vav1, av1, picture_parameter.matrix_coefficients);
+
+    ITEM_CPY(vav1, av1, slice_parameter.slice_data_size);
+    ITEM_CPY(vav1, av1, slice_parameter.slice_data_offset);
+    ITEM_CPY(vav1, av1, slice_parameter.slice_data_row);
+    ITEM_CPY(vav1, av1, slice_parameter.slice_data_col);
+    ITEM_CPY(vav1, av1, slice_parameter.slice_data_anchor_frame_idx);
+    ITEM_SET(vav1, av1, slice_parameter.slice_count);
 
     return 0;
 }
@@ -566,12 +900,20 @@ static int fill_picture_desc(const struct pipe_picture_desc *desc,
                              union virgl_picture_desc *vdsc)
 {
     switch (u_reduce_video_profile(desc->profile)) {
-    case PIPE_VIDEO_FORMAT_MPEG4:
-        return fill_mpeg4_picture_desc(desc, vdsc);
     case PIPE_VIDEO_FORMAT_MPEG4_AVC:
         return fill_h264_picture_desc(desc, vdsc);
     case PIPE_VIDEO_FORMAT_HEVC:
         return fill_h265_picture_desc(desc, vdsc);
+    case PIPE_VIDEO_FORMAT_MPEG12:
+        return fill_mpeg12_picture_desc(desc, vdsc);
+    case PIPE_VIDEO_FORMAT_VC1:
+        return fill_vc1_picture_desc(desc, vdsc);
+    case PIPE_VIDEO_FORMAT_JPEG:
+        return fill_mjpeg_picture_desc(desc, vdsc);
+    case PIPE_VIDEO_FORMAT_VP9:
+        return fill_vp9_picture_desc(desc, vdsc);
+    case PIPE_VIDEO_FORMAT_AV1:
+        return fill_av1_picture_desc(desc, vdsc);
     default:
         return -1;
     }
@@ -652,7 +994,7 @@ static void virgl_video_decode_bitstream(struct pipe_video_codec *codec,
     if (!ptr)
         return;
     for (i = 0, vcdc->bs_size = 0; i < num_buffers; i++) {
-        memcpy(ptr + vcdc->bs_size, buffers[i], sizes[i]);
+        memcpy((uint8_t *)ptr + vcdc->bs_size, buffers[i], sizes[i]);
         vcdc->bs_size += sizes[i];
     }
     pipe_buffer_unmap(&vctx->base, xfer);
@@ -716,18 +1058,19 @@ static void virgl_video_encode_bitstream(struct pipe_video_codec *codec,
                                   virgl_resource(target));
 }
 
-static void virgl_video_end_frame(struct pipe_video_codec *codec,
-                                  struct pipe_video_buffer *target,
-                                  struct pipe_picture_desc *picture)
+static int virgl_video_end_frame(struct pipe_video_codec *codec,
+                                 struct pipe_video_buffer *target,
+                                 struct pipe_picture_desc *picture)
 {
     struct virgl_video_codec *vcdc = virgl_video_codec(codec);
     struct virgl_context *vctx = virgl_context(vcdc->base.context);
     struct virgl_video_buffer *vbuf = virgl_video_buffer(target);
 
     virgl_encode_end_frame(vctx, vcdc, vbuf);
-    virgl_flush_eq(vctx, vctx, picture->fence);
+    virgl_flush_eq(vctx, vctx, NULL);
 
     switch_buffer(vcdc);
+    return 0;
 }
 
 static int virgl_video_get_decoder_fence(struct pipe_video_codec *decoder,
@@ -747,14 +1090,15 @@ static void virgl_video_flush(struct pipe_video_codec *codec)
 
     ctx->flush(ctx, &fence, 0);
     if (fence) {
-        ctx->screen->fence_finish(ctx->screen, NULL, fence, PIPE_TIMEOUT_INFINITE);
+        ctx->screen->fence_finish(ctx->screen, NULL, fence, OS_TIMEOUT_INFINITE);
         ctx->screen->fence_reference(ctx->screen, &fence, NULL);
     }
 }
 
 static void virgl_video_get_feedback(struct pipe_video_codec *codec,
                                      void *feedback,
-                                     unsigned *size)
+                                     unsigned *size,
+                                     struct pipe_enc_feedback_metadata* metadata)
 {
     struct virgl_video_codec *vcdc = virgl_video_codec(codec);
     struct virgl_context *vctx = vcdc->vctx;
@@ -813,18 +1157,21 @@ virgl_video_create_codec(struct pipe_context *ctx,
 
     if (virgl_debug & VIRGL_DEBUG_VIDEO)
         debug_printf("VIDEO: create codec. profile=%d, level=%u, entryp=%d, "
-                     "chroma_fmt=%d, size=%ux%u, max_ref=%u, expect=%d\n",
+                     "size=%ux%u, max_ref=%u\n",
                      templ->profile, templ->level, templ->entrypoint,
-                     templ->chroma_format, templ->width, templ->height,
-                     templ->max_references, templ->expect_chunked_decode);
+                     templ->width, templ->height, templ->max_references);
 
     switch (u_reduce_video_profile(templ->profile)) {
-    case PIPE_VIDEO_FORMAT_MPEG4: /* fall through */
     case PIPE_VIDEO_FORMAT_MPEG4_AVC:
         width = align(width, VL_MACROBLOCK_WIDTH);
         height = align(height, VL_MACROBLOCK_HEIGHT);
         break;
-    case PIPE_VIDEO_FORMAT_HEVC: /* fall through */
+    case PIPE_VIDEO_FORMAT_HEVC: 
+    case PIPE_VIDEO_FORMAT_MPEG12:
+    case PIPE_VIDEO_FORMAT_VC1:
+    case PIPE_VIDEO_FORMAT_JPEG:
+    case PIPE_VIDEO_FORMAT_VP9:
+    case PIPE_VIDEO_FORMAT_AV1: /* fall through */
     default:
         break;
     }
@@ -846,7 +1193,6 @@ virgl_video_create_codec(struct pipe_context *ctx,
     vcdc->base.end_frame = virgl_video_end_frame;
     vcdc->base.flush = virgl_video_flush;
     vcdc->base.get_feedback = virgl_video_get_feedback;
-    vcdc->base.get_decoder_fence = virgl_video_get_decoder_fence;
 
     vcdc->bs_size = 0;
     vcdc->cur_buffer = 0;

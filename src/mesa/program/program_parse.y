@@ -128,11 +128,11 @@ static struct asm_instruction *asm_instruction_copy_ctor(
    } while(0)
 %}
 
-%pure-parser
+%define api.pure
 %locations
 %lex-param   { struct asm_parser_state *state }
 %parse-param { struct asm_parser_state *state }
-%error-verbose
+%define parse.error verbose
 
 %union {
    struct asm_instruction *inst;
@@ -290,6 +290,11 @@ yylex(YYSTYPE *yylval_param, YYLTYPE *yylloc_param,
 }
 %}
 
+/* The directive: %destructor is called to clean up the stack
+ * after a parser error.
+ */
+%destructor { free($$); } IDENTIFIER USED_IDENTIFIER
+
 %%
 
 program: language optionSequence statementSequence END
@@ -297,7 +302,7 @@ program: language optionSequence statementSequence END
 
 language: ARBvp_10
    {
-      if (state->prog->Target != GL_VERTEX_PROGRAM_ARB) {
+      if (state->prog->info.stage != MESA_SHADER_VERTEX) {
          yyerror(& @1, state, "invalid fragment program header");
 
       }
@@ -305,7 +310,7 @@ language: ARBvp_10
    }
    | ARBfp_10
    {
-      if (state->prog->Target != GL_FRAGMENT_PROGRAM_ARB) {
+      if (state->prog->info.stage != MESA_SHADER_FRAGMENT) {
          yyerror(& @1, state, "invalid vertex program header");
       }
       state->mode = ARB_fragment;
@@ -435,7 +440,7 @@ SAMPLE_instruction: SAMPLE_OP maskedDstReg ',' swizzleSrcReg ',' texImageUnit ',
       if ($$ != NULL) {
          const GLbitfield tex_mask = (1U << $6);
          GLbitfield shadow_tex = 0;
-         GLbitfield target_mask = 0;
+         GLbitfield target_mask;
 
 
          $$->Base.TexSrcUnit = $6;
@@ -463,6 +468,7 @@ SAMPLE_instruction: SAMPLE_OP maskedDstReg ',' swizzleSrcReg ',' texImageUnit ',
                      != shadow_tex))) {
             yyerror(& @8, state,
                     "multiple targets used on one texture image unit");
+            free($$);
             YYERROR;
          }
 
@@ -486,7 +492,7 @@ TXD_instruction: TXD_OP maskedDstReg ',' swizzleSrcReg ',' swizzleSrcReg ',' swi
       if ($$ != NULL) {
          const GLbitfield tex_mask = (1U << $10);
          GLbitfield shadow_tex = 0;
-         GLbitfield target_mask = 0;
+         GLbitfield target_mask;
 
 
          $$->Base.TexSrcUnit = $10;
@@ -514,6 +520,7 @@ TXD_instruction: TXD_OP maskedDstReg ',' swizzleSrcReg ',' swizzleSrcReg ',' swi
                      != shadow_tex))) {
             yyerror(& @12, state,
                "multiple targets used on one texture image unit");
+            free($$);
             YYERROR;
          }
 
@@ -679,6 +686,7 @@ extSwizSel: INTEGER
 
       if (strlen($1) > 1) {
          yyerror(& @1, state, "invalid extended swizzle selector");
+         free($1);
          YYERROR;
       }
 
@@ -2060,6 +2068,7 @@ ALIAS_statement: ALIAS IDENTIFIER '=' USED_IDENTIFIER
          YYERROR;
       } else {
          _mesa_symbol_table_add_symbol(state->st, $2, target);
+         free($2);
       }
       (void)yynerrs;
    }
@@ -2521,9 +2530,7 @@ yyerror(YYLTYPE *locp, struct asm_parser_state *state, const char *s)
                                locp->first_line, locp->first_column, s);
    _mesa_set_program_error(state->ctx, locp->position, err_str);
 
-   if (err_str) {
-      free(err_str);
-   }
+   free(err_str);
 }
 
 
@@ -2537,9 +2544,10 @@ _mesa_parse_arb_program(struct gl_context *ctx, GLenum target, const GLubyte *st
    GLboolean result = GL_FALSE;
    void *temp;
    struct asm_symbol *sym;
+   unsigned stage = _mesa_program_enum_to_shader_stage(target);
 
    state->ctx = ctx;
-   state->prog->Target = target;
+   state->prog->info.stage = stage;
    state->prog->Parameters = _mesa_new_parameter_list();
 
    /* Make a copy of the program string and force it to be newline and NUL-terminated.
@@ -2561,9 +2569,7 @@ _mesa_parse_arb_program(struct gl_context *ctx, GLenum target, const GLubyte *st
 
    state->st = _mesa_symbol_table_ctor();
 
-   state->limits = (target == GL_VERTEX_PROGRAM_ARB)
-      ? & ctx->Const.Program[MESA_SHADER_VERTEX]
-      : & ctx->Const.Program[MESA_SHADER_FRAGMENT];
+   state->limits = &ctx->Const.Program[stage];
 
    state->MaxTextureImageUnits = ctx->Const.Program[MESA_SHADER_FRAGMENT].MaxTextureImageUnits;
    state->MaxTextureCoordUnits = ctx->Const.MaxTextureCoordUnits;
@@ -2616,10 +2622,10 @@ _mesa_parse_arb_program(struct gl_context *ctx, GLenum target, const GLubyte *st
 
    inst = state->inst_head;
    for (i = 0; i < state->prog->arb.NumInstructions; i++) {
-      struct asm_instruction *const temp = inst->next;
+      struct asm_instruction *const next_inst = inst->next;
 
       state->prog->arb.Instructions[i] = inst->Base;
-      inst = temp;
+      inst = next_inst;
    }
 
    /* Finally, tag on an OPCODE_END instruction */
@@ -2633,16 +2639,6 @@ _mesa_parse_arb_program(struct gl_context *ctx, GLenum target, const GLubyte *st
    state->prog->arb.NumParameters = state->prog->Parameters->NumParameters;
    state->prog->arb.NumAttributes =
       util_bitcount64(state->prog->info.inputs_read);
-
-   /*
-    * Initialize native counts to logical counts.  The device driver may
-    * change them if program is translated into a hardware program.
-    */
-   state->prog->arb.NumNativeInstructions = state->prog->arb.NumInstructions;
-   state->prog->arb.NumNativeTemporaries = state->prog->arb.NumTemporaries;
-   state->prog->arb.NumNativeParameters = state->prog->arb.NumParameters;
-   state->prog->arb.NumNativeAttributes = state->prog->arb.NumAttributes;
-   state->prog->arb.NumNativeAddressRegs = state->prog->arb.NumAddressRegs;
 
    result = GL_TRUE;
 

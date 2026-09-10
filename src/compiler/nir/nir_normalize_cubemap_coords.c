@@ -19,9 +19,6 @@
  * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
- *
- * Authors:
- *    Jason Ekstrand <jason@jlekstrand.net>
  */
 
 #include "nir.h"
@@ -32,28 +29,32 @@
  * magnitude component is -1.0 or 1.0.
  */
 static bool
-normalize_cubemap_coords(nir_builder *b, nir_instr *instr, void *data)
+normalize_cubemap_coords(nir_builder *b, nir_tex_instr *tex, void *data)
 {
-   if (instr->type != nir_instr_type_tex)
-      return false;
-
-   nir_tex_instr *tex = nir_instr_as_tex(instr);
    if (tex->sampler_dim != GLSL_SAMPLER_DIM_CUBE)
       return false;
 
-   b->cursor = nir_before_instr(instr);
+   b->cursor = nir_before_instr(&tex->instr);
 
    int idx = nir_tex_instr_src_index(tex, nir_tex_src_coord);
    if (idx < 0)
       return false;
 
-   nir_ssa_def *orig_coord =
-      nir_ssa_for_src(b, tex->src[idx].src, nir_tex_instr_src_size(tex, idx));
+   nir_def *orig_coord = tex->src[idx].src.ssa;
    assert(orig_coord->num_components >= 3);
 
-   nir_ssa_def *orig_xyz = nir_trim_vector(b, orig_coord, 3);
-   nir_ssa_def *norm = nir_fmax_abs_vec_comp(b, orig_xyz);
-   nir_ssa_def *normalized = nir_fmul(b, orig_coord, nir_frcp(b, norm));
+   /* Handle the projection first, as applying it after the normalization
+    * will give incorrect results.
+    */
+   nir_def *proj = nir_steal_tex_src(tex, nir_tex_src_projector);
+   if (proj) {
+      nir_def *inv_proj = nir_frcp(b, proj);
+      orig_coord = nir_fmul(b, orig_coord, inv_proj);
+   }
+
+   nir_def *orig_xyz = nir_trim_vector(b, orig_coord, 3);
+   nir_def *norm = nir_fmax_abs_vec_comp(b, orig_xyz);
+   nir_def *normalized = nir_fmul(b, orig_coord, nir_frcp(b, norm));
 
    /* Array indices don't have to be normalized, so make a new vector
     * with the coordinate's array index untouched.
@@ -63,15 +64,13 @@ normalize_cubemap_coords(nir_builder *b, nir_instr *instr, void *data)
                                          nir_channel(b, orig_coord, 3), 3);
    }
 
-   nir_instr_rewrite_src_ssa(instr, &tex->src[idx].src, normalized);
+   nir_src_rewrite(&tex->src[idx].src, normalized);
    return true;
 }
 
 bool
 nir_normalize_cubemap_coords(nir_shader *shader)
 {
-   return nir_shader_instructions_pass(shader, normalize_cubemap_coords,
-                                       nir_metadata_block_index |
-                                       nir_metadata_dominance,
-                                       NULL);
+   return nir_shader_tex_pass(shader, normalize_cubemap_coords,
+                              nir_metadata_control_flow, NULL);
 }

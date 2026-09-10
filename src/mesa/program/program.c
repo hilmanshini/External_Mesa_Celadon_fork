@@ -89,9 +89,10 @@ _mesa_init_program(struct gl_context *ctx)
    ctx->Program.ErrorPos = -1;
    ctx->Program.ErrorString = strdup("");
 
+   ctx->VertexProgram._VaryingInputs = VERT_BIT_ALL;
    ctx->VertexProgram.Enabled = GL_FALSE;
    ctx->VertexProgram.PointSizeEnabled =
-      (ctx->API == API_OPENGLES2) ? GL_TRUE : GL_FALSE;
+      _mesa_is_gles2(ctx) ? GL_TRUE : GL_FALSE;
    ctx->VertexProgram.TwoSideEnabled = GL_FALSE;
    _mesa_reference_program(ctx, &ctx->VertexProgram.Current,
                            ctx->Shared->DefaultVertexProgram);
@@ -122,7 +123,7 @@ _mesa_free_program_data(struct gl_context *ctx)
    _mesa_reference_program(ctx, &ctx->VertexProgram.Current, NULL);
    _mesa_delete_program_cache(ctx, ctx->VertexProgram.Cache);
    _mesa_reference_program(ctx, &ctx->FragmentProgram.Current, NULL);
-   _mesa_delete_shader_cache(ctx, ctx->FragmentProgram.Cache);
+   _mesa_delete_program_cache(ctx, ctx->FragmentProgram.Cache);
 
    /* XXX probably move this stuff */
    if (ctx->ATIFragmentShader.Current) {
@@ -184,7 +185,7 @@ _mesa_set_program_error(struct gl_context *ctx, GLint pos, const char *string)
  * Initialize a new gl_program object.
  */
 struct gl_program *
-_mesa_init_gl_program(struct gl_program *prog, gl_shader_stage stage,
+_mesa_init_gl_program(struct gl_program *prog, mesa_shader_stage stage,
                       GLuint id, bool is_arb_asm)
 {
    if (!prog)
@@ -192,11 +193,11 @@ _mesa_init_gl_program(struct gl_program *prog, gl_shader_stage stage,
 
    memset(prog, 0, sizeof(*prog));
    prog->Id = id;
-   prog->Target = _mesa_shader_stage_to_program(stage);
    prog->RefCount = 1;
    prog->Format = GL_PROGRAM_FORMAT_ASCII_ARB;
    prog->info.stage = stage;
    prog->info.use_legacy_math_rules = is_arb_asm;
+   prog->is_arb_asm = is_arb_asm;
 
    /* Uniforms that lack an initializer in the shader code have an initial
     * value of zero.  This includes sampler uniforms.
@@ -219,7 +220,7 @@ _mesa_init_gl_program(struct gl_program *prog, gl_shader_stage stage,
 }
 
 struct gl_program *
-_mesa_new_program(struct gl_context *ctx, gl_shader_stage stage, GLuint id,
+_mesa_new_program(struct gl_context *ctx, mesa_shader_stage stage, GLuint id,
                   bool is_arb_asm)
 {
    struct gl_program *prog;
@@ -250,6 +251,7 @@ _mesa_delete_program(struct gl_context *ctx, struct gl_program *prog)
    st_release_variants(st, prog);
 
    free(prog->serialized_nir);
+   free(prog->base_serialized_nir);
 
    if (prog == &_mesa_DummyProgram)
       return;
@@ -258,25 +260,23 @@ _mesa_delete_program(struct gl_context *ctx, struct gl_program *prog)
       _mesa_free_parameter_list(prog->Parameters);
    }
 
-   if (prog->nir) {
-      ralloc_free(prog->nir);
-   }
-
-   if (prog->sh.BindlessSamplers) {
+   ralloc_free(prog->nir);
+   if (!prog->is_arb_asm) {
       ralloc_free(prog->sh.BindlessSamplers);
-   }
-
-   if (prog->sh.BindlessImages) {
       ralloc_free(prog->sh.BindlessImages);
    }
-
-   if (prog->driver_cache_blob) {
-      ralloc_free(prog->driver_cache_blob);
-   }
-
+   ralloc_free(prog->driver_cache_blob);
    ralloc_free(prog);
 }
 
+struct gl_program *
+_mesa_lookup_program_locked(struct gl_context *ctx, GLuint id)
+{
+   if (id)
+      return (struct gl_program *) _mesa_HashLookupLocked(&ctx->Shared->Programs, id);
+   else
+      return NULL;
+}
 
 /**
  * Return the gl_program object for a given ID.
@@ -287,7 +287,7 @@ struct gl_program *
 _mesa_lookup_program(struct gl_context *ctx, GLuint id)
 {
    if (id)
-      return (struct gl_program *) _mesa_HashLookup(ctx->Shared->Programs, id);
+      return (struct gl_program *) _mesa_HashLookup(&ctx->Shared->Programs, id);
    else
       return NULL;
 }
@@ -307,13 +307,7 @@ _mesa_reference_program_(struct gl_context *ctx,
    assert(ptr);
    if (*ptr && prog) {
       /* sanity check */
-      if ((*ptr)->Target == GL_VERTEX_PROGRAM_ARB)
-         assert(prog->Target == GL_VERTEX_PROGRAM_ARB);
-      else if ((*ptr)->Target == GL_FRAGMENT_PROGRAM_ARB)
-         assert(prog->Target == GL_FRAGMENT_PROGRAM_ARB ||
-                prog->Target == GL_FRAGMENT_PROGRAM_NV);
-      else if ((*ptr)->Target == GL_GEOMETRY_PROGRAM_NV)
-         assert(prog->Target == GL_GEOMETRY_PROGRAM_NV);
+      assert((*ptr)->info.stage == prog->info.stage);
    }
 #endif
 
@@ -324,7 +318,8 @@ _mesa_reference_program_(struct gl_context *ctx,
 
       if (p_atomic_dec_zero(&oldProg->RefCount)) {
          assert(ctx);
-         _mesa_reference_shader_program_data(&oldProg->sh.data, NULL);
+         if (!oldProg->is_arb_asm)
+            _mesa_reference_shader_program_data(&oldProg->sh.data, NULL);
          _mesa_delete_program(ctx, oldProg);
       }
 
@@ -383,6 +378,7 @@ gl_external_samplers(const struct gl_program *prog)
    GLbitfield external_samplers = 0;
    GLbitfield mask = prog->SamplersUsed;
 
+   assert(!prog->is_arb_asm);
    while (mask) {
       int idx = u_bit_scan(&mask);
       if (prog->sh.SamplerTargets[idx] == TEXTURE_EXTERNAL_INDEX)
@@ -411,6 +407,9 @@ _mesa_add_separate_state_parameters(struct gl_program *prog,
                                     struct gl_program_parameter_list *state_params)
 {
    unsigned num_state_params = state_params->NumParameters;
+
+   if (num_state_params == 0)
+      return;
 
    /* All state parameters should be vec4s. */
    for (unsigned i = 0; i < num_state_params; i++) {

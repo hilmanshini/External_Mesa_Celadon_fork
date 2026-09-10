@@ -30,7 +30,7 @@
 
 #include "pipe/p_defines.h"
 #include "util/format/u_formats.h"
-#include "pipe/p_compiler.h"
+#include "util/compiler.h"
 #include "pipe/p_shader_tokens.h"
 #include "util/u_debug.h"
 
@@ -97,10 +97,10 @@ struct ureg_dst
 struct pipe_context;
 
 struct ureg_program *
-ureg_create(enum pipe_shader_type processor);
+ureg_create(mesa_shader_stage processor);
 
 struct ureg_program *
-ureg_create_with_screen(enum pipe_shader_type processor,
+ureg_create_with_screen(mesa_shader_stage processor,
                         struct pipe_screen *screen);
 
 const struct tgsi_token *
@@ -239,7 +239,7 @@ ureg_DECL_output_layout(struct ureg_program *,
                         unsigned usage_mask,
                         unsigned array_id,
                         unsigned array_size,
-                        boolean invariant);
+                        bool invariant);
 
 struct ureg_dst
 ureg_DECL_output_masked(struct ureg_program *,
@@ -330,7 +330,7 @@ ureg_DECL_local_temporary( struct ureg_program * );
 struct ureg_dst
 ureg_DECL_array_temporary( struct ureg_program *,
                            unsigned size,
-                           boolean local );
+                           bool local );
 
 void 
 ureg_release_temporary( struct ureg_program *ureg,
@@ -362,8 +362,8 @@ ureg_DECL_image(struct ureg_program *ureg,
                 unsigned index,
                 enum tgsi_texture_type target,
                 enum pipe_format format,
-                boolean wr,
-                boolean raw);
+                bool wr,
+                bool raw);
 
 struct ureg_src
 ureg_DECL_buffer(struct ureg_program *ureg, unsigned nr, bool atomic);
@@ -502,7 +502,7 @@ ureg_imm1i( struct ureg_program *ureg,
 /* Where the destination register has a valid file, but an empty
  * writemask.
  */
-static inline boolean
+static inline bool
 ureg_dst_is_empty( struct ureg_dst dst )
 {
    return dst.File != TGSI_FILE_NULL &&
@@ -553,7 +553,6 @@ ureg_tex_insn(struct ureg_program *ureg,
               const struct ureg_dst *dst,
               unsigned nr_dst,
               enum tgsi_texture_type target,
-              enum tgsi_return_type return_type,
               const struct tgsi_texture_offset *texoffsets,
               unsigned nr_offset,
               const struct ureg_src *src,
@@ -583,7 +582,7 @@ struct ureg_emit_insn_result {
 struct ureg_emit_insn_result
 ureg_emit_insn(struct ureg_program *ureg,
                enum tgsi_opcode opcode,
-               boolean saturate,
+               bool saturate,
                unsigned precise,
                unsigned num_dst,
                unsigned num_src);
@@ -597,7 +596,6 @@ void
 ureg_emit_texture(struct ureg_program *ureg,
                   unsigned insn_token,
                   enum tgsi_texture_type target,
-                  enum tgsi_return_type return_type,
                   unsigned num_offsets);
 
 void
@@ -631,7 +629,7 @@ static inline void ureg_##op( struct ureg_program *ureg )       \
    struct ureg_emit_insn_result insn;                           \
    insn = ureg_emit_insn(ureg,                                  \
                          opcode,                                \
-                         FALSE,                                 \
+                         false,                                 \
                          0,                                     \
                          0,                                     \
                          0);                                    \
@@ -646,7 +644,7 @@ static inline void ureg_##op( struct ureg_program *ureg,        \
    struct ureg_emit_insn_result insn;                           \
    insn = ureg_emit_insn(ureg,                                  \
                          opcode,                                \
-                         FALSE,                                 \
+                         false,                                 \
                          0,                                     \
                          0,                                     \
                          1);                                    \
@@ -662,7 +660,7 @@ static inline void ureg_##op( struct ureg_program *ureg,        \
    struct ureg_emit_insn_result insn;                           \
    insn = ureg_emit_insn(ureg,                                  \
                          opcode,                                \
-                         FALSE,                                 \
+                         false,                                 \
                          0,                                     \
                          0,                                     \
                          0);                                    \
@@ -679,7 +677,7 @@ static inline void ureg_##op( struct ureg_program *ureg,        \
    struct ureg_emit_insn_result insn;                           \
    insn = ureg_emit_insn(ureg,                                  \
                          opcode,                                \
-                         FALSE,                                 \
+                         false,                                 \
                          0,                                     \
                          0,                                     \
                          1);                                    \
@@ -757,7 +755,6 @@ static inline void ureg_##op( struct ureg_program *ureg,                \
                               struct ureg_src src1 )                    \
 {                                                                       \
    enum tgsi_opcode opcode = TGSI_OPCODE_##op;                          \
-   enum tgsi_return_type return_type = TGSI_RETURN_TYPE_UNKNOWN;        \
    struct ureg_emit_insn_result insn;                                   \
    if (ureg_dst_is_empty(dst))                                          \
       return;                                                           \
@@ -767,8 +764,7 @@ static inline void ureg_##op( struct ureg_program *ureg,                \
                          0,                                             \
                          1,                                             \
                          2);                                            \
-   ureg_emit_texture( ureg, insn.extended_token, target,                \
-                      return_type, 0 );                                 \
+   ureg_emit_texture( ureg, insn.extended_token, target, 0 );           \
    ureg_emit_dst( ureg, dst );                                          \
    ureg_emit_src( ureg, src0 );                                         \
    ureg_emit_src( ureg, src1 );                                         \
@@ -835,7 +831,6 @@ static inline void ureg_##op( struct ureg_program *ureg,                \
                               struct ureg_src src3 )                    \
 {                                                                       \
    enum tgsi_opcode opcode = TGSI_OPCODE_##op;                          \
-   enum tgsi_return_type return_type = TGSI_RETURN_TYPE_UNKNOWN;        \
    struct ureg_emit_insn_result insn;                                   \
    if (ureg_dst_is_empty(dst))                                          \
       return;                                                           \
@@ -845,8 +840,7 @@ static inline void ureg_##op( struct ureg_program *ureg,                \
                          0,                                             \
                          1,                                             \
                          4);                                            \
-   ureg_emit_texture( ureg, insn.extended_token, target,                \
-                      return_type, 0 );                                 \
+   ureg_emit_texture( ureg, insn.extended_token, target, 0 );           \
    ureg_emit_dst( ureg, dst );                                          \
    ureg_emit_src( ureg, src0 );                                         \
    ureg_emit_src( ureg, src1 );                                         \
@@ -1189,13 +1183,13 @@ ureg_src_undef( void )
    return src;
 }
 
-static inline boolean
+static inline bool
 ureg_src_is_undef( struct ureg_src src )
 {
    return src.File == TGSI_FILE_NULL;
 }
 
-static inline boolean
+static inline bool
 ureg_dst_is_undef( struct ureg_dst dst )
 {
    return dst.File == TGSI_FILE_NULL;

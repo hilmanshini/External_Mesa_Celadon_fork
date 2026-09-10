@@ -1,6 +1,10 @@
+// Copyright 2022 Red Hat.
+// SPDX-License-Identifier: MIT
+
+use libc_rust_gen::free;
 use mesa_rust_gen::*;
 
-use std::ffi::CString;
+use std::ffi::{c_void, CStr};
 use std::ops::Deref;
 use std::ptr;
 use std::ptr::NonNull;
@@ -34,7 +38,7 @@ impl DiskCacheBorrowed {
         }
     }
 
-    pub fn get(&self, key: &mut cache_key) -> Option<DiskCacheEntry> {
+    pub fn get(&self, key: &mut cache_key) -> Option<DiskCacheEntry<'_>> {
         let mut size = 0;
 
         unsafe {
@@ -74,10 +78,23 @@ impl DiskCacheBorrowed {
 }
 
 impl DiskCache {
-    pub fn new(name: &str, driver_id: &str, flags: u64) -> Option<Self> {
-        let c_name = CString::new(name).unwrap();
-        let c_id = CString::new(driver_id).unwrap();
-        let cache = unsafe { disk_cache_create(c_name.as_ptr(), c_id.as_ptr(), flags) };
+    pub fn new(name: &CStr, func_ptrs: &[*mut c_void], flags: u64) -> Option<Self> {
+        let mut blake3_ctx = blake3_hasher::default();
+        let mut blake3 = [0; BLAKE3_KEY_LEN as usize];
+        let mut cache_id = [0; BLAKE3_HEX_LEN as usize];
+
+        let cache = unsafe {
+            _mesa_blake3_init(&mut blake3_ctx);
+
+            for &func_ptr in func_ptrs {
+                if !disk_cache_get_function_identifier(func_ptr, &mut blake3_ctx) {
+                    return None;
+                }
+            }
+            _mesa_blake3_final(&mut blake3_ctx, &mut blake3);
+            mesa_bytes_to_hex(cache_id.as_mut_ptr(), blake3.as_ptr(), blake3.len() as u32);
+            disk_cache_create(name.as_ptr(), cache_id.as_ptr(), flags)
+        };
 
         DiskCacheBorrowed::from_ptr(cache).map(|c| Self { inner: c })
     }
@@ -103,7 +120,7 @@ pub struct DiskCacheEntry<'a> {
     data: &'a mut [u8],
 }
 
-impl<'a> Deref for DiskCacheEntry<'a> {
+impl Deref for DiskCacheEntry<'_> {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
@@ -111,7 +128,7 @@ impl<'a> Deref for DiskCacheEntry<'a> {
     }
 }
 
-impl<'a> Drop for DiskCacheEntry<'a> {
+impl Drop for DiskCacheEntry<'_> {
     fn drop(&mut self) {
         unsafe {
             free(self.data.as_mut_ptr().cast());

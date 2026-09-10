@@ -29,7 +29,7 @@
 #define TR_TEXTURE_H_
 
 
-#include "pipe/p_compiler.h"
+#include "util/compiler.h"
 #include "pipe/p_state.h"
 
 #include "tr_screen.h"
@@ -43,16 +43,6 @@ struct tr_list
    struct tr_list *next;
    struct tr_list *prev;
 };
-
-struct trace_surface
-{
-   struct pipe_surface base;
-
-   struct pipe_surface *surface;
-
-   struct tr_list list;
-};
-
 
 struct trace_sampler_view
 {
@@ -75,16 +65,6 @@ struct trace_transfer
    void *map;
 };
 
-
-static inline struct trace_surface *
-trace_surface(struct pipe_surface *surface)
-{
-   if (!surface)
-      return NULL;
-   return (struct trace_surface *)surface;
-}
-
-
 static inline struct trace_sampler_view *
 trace_sampler_view(struct pipe_sampler_view *sampler_view)
 {
@@ -103,14 +83,6 @@ trace_transfer(struct pipe_transfer *transfer)
 }
 
 
-struct pipe_surface *
-trace_surf_create(struct trace_context *tr_ctx,
-                  struct pipe_resource *tr_res,
-                  struct pipe_surface *surface);
-
-void
-trace_surf_destroy(struct trace_surface *tr_surf);
-
 struct pipe_transfer *
 trace_transfer_create(struct trace_context *tr_ctx,
 		      struct pipe_resource *tr_res,
@@ -120,5 +92,15 @@ void
 trace_transfer_destroy(struct trace_context *tr_ctx,
                        struct trace_transfer *tr_trans);
 
+struct pipe_sampler_view *
+trace_sampler_view_create(struct trace_context *tr_ctx,
+                  struct pipe_resource *tr_res,
+                  struct pipe_sampler_view *sampler_view);
+
+void
+trace_sampler_view_destroy(struct trace_sampler_view *tr_view);
+
+struct pipe_sampler_view *
+trace_sampler_view_unwrap(struct trace_sampler_view *tr_view);
 
 #endif /* TR_TEXTURE_H_ */

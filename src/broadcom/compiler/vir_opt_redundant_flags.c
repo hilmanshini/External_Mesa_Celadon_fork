@@ -36,10 +36,9 @@ static void
 vir_dce_pf(struct v3d_compile *c, struct qinst *inst)
 {
         if (debug) {
-                fprintf(stderr,
-                        "Removing flags write from: ");
-                vir_dump_inst(c, inst);
-                fprintf(stderr, "\n");
+                char *dump_inst = vir_dump_inst(c, inst);
+                mesa_logd("Removing flags write from: \"%s\"",
+                          dump_inst);
         }
 
         assert(inst->qpu.type == V3D_QPU_INSTR_TYPE_ALU);
@@ -81,11 +80,11 @@ vir_instr_flags_op_equal(struct qinst *a, struct qinst *b)
             a->qpu.flags.mpf != b->qpu.flags.mpf ||
             a->qpu.alu.add.op != b->qpu.alu.add.op ||
             a->qpu.alu.mul.op != b->qpu.alu.mul.op ||
-            a->qpu.alu.add.a_unpack != b->qpu.alu.add.a_unpack ||
-            a->qpu.alu.add.b_unpack != b->qpu.alu.add.b_unpack ||
+            a->qpu.alu.add.a.unpack != b->qpu.alu.add.a.unpack ||
+            a->qpu.alu.add.b.unpack != b->qpu.alu.add.b.unpack ||
             a->qpu.alu.add.output_pack != b->qpu.alu.add.output_pack ||
-            a->qpu.alu.mul.a_unpack != b->qpu.alu.mul.a_unpack ||
-            a->qpu.alu.mul.b_unpack != b->qpu.alu.mul.b_unpack ||
+            a->qpu.alu.mul.a.unpack != b->qpu.alu.mul.a.unpack ||
+            a->qpu.alu.mul.b.unpack != b->qpu.alu.mul.b.unpack ||
             a->qpu.alu.mul.output_pack != b->qpu.alu.mul.output_pack) {
                 return false;
         }

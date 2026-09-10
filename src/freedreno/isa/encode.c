@@ -1,24 +1,6 @@
 /*
  * Copyright © 2020 Google, Inc.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include "util/log.h"
@@ -49,7 +31,7 @@ struct encode_state {
  */
 
 static inline bool
-extract_SRC1_R(struct ir3_instruction *instr)
+extract_SRC1_R(const struct ir3_instruction *instr)
 {
 	if (instr->nop) {
 		assert(!instr->repeat);
@@ -59,7 +41,7 @@ extract_SRC1_R(struct ir3_instruction *instr)
 }
 
 static inline bool
-extract_SRC2_R(struct ir3_instruction *instr)
+extract_SRC2_R(const struct ir3_instruction *instr)
 {
 	if (instr->nop) {
 		assert(!instr->repeat);
@@ -72,7 +54,7 @@ extract_SRC2_R(struct ir3_instruction *instr)
 }
 
 static inline opc_t
-__instruction_case(struct encode_state *s, struct ir3_instruction *instr)
+__instruction_case(struct encode_state *s, const struct ir3_instruction *instr)
 {
 	/*
 	 * Temporary hack.. the new world doesn't map opcodes directly to hw
@@ -82,26 +64,16 @@ __instruction_case(struct encode_state *s, struct ir3_instruction *instr)
 	 * decoding and split up things which are logically different
 	 * instructions
 	 */
-	if (instr->opc == OPC_B) {
-		switch (instr->cat0.brtype) {
-		case BRANCH_PLAIN:
-			return OPC_BR;
-		case BRANCH_OR:
-			return OPC_BRAO;
-		case BRANCH_AND:
-			return OPC_BRAA;
-		case BRANCH_CONST:
-			return OPC_BRAC;
-		case BRANCH_ANY:
-			return OPC_BANY;
-		case BRANCH_ALL:
-			return OPC_BALL;
-		case BRANCH_X:
-			return OPC_BRAX;
-		}
-	} else if (instr->opc == OPC_MOV) {
+	if (instr->opc == OPC_MOV) {
 		struct ir3_register *src = instr->srcs[0];
-		if (src->flags & IR3_REG_IMMED) {
+		if ((instr->dsts[0]->num == regid(REG_A0, 0)) &&
+				(instr->cat1.r[0] || instr->cat1.r[1])) {
+			if (src->flags & IR3_REG_IMMED) {
+				return OPC_MOVA_R_IMMED;
+			} else {
+				return OPC_MOVA_R_GPR;
+			}
+		} else if (src->flags & IR3_REG_IMMED) {
 			return OPC_MOV_IMMED;
 		} if (src->flags & IR3_REG_RELATIV) {
 			if (src->flags & IR3_REG_CONST) {
@@ -113,6 +85,12 @@ __instruction_case(struct encode_state *s, struct ir3_instruction *instr)
 			return OPC_MOV_CONST;
 		} else {
 			return OPC_MOV_GPR;
+		}
+	} else if (instr->opc == OPC_MOVS) {
+		if (instr->srcs[1]->flags & IR3_REG_IMMED) {
+			return OPC_MOVS_IMMED;
+		} else {
+			return OPC_MOVS_A0;
 		}
 	} else if (instr->opc == OPC_DEMOTE) {
 		return OPC_KILL;
@@ -129,7 +107,7 @@ __instruction_case(struct encode_state *s, struct ir3_instruction *instr)
 }
 
 static inline unsigned
-extract_ABSNEG(struct ir3_register *reg)
+extract_ABSNEG(const struct ir3_register *reg)
 {
 	// TODO generate enums for this:
 	if (reg->flags & (IR3_REG_FNEG | IR3_REG_SNEG | IR3_REG_BNOT)) {
@@ -146,17 +124,29 @@ extract_ABSNEG(struct ir3_register *reg)
 }
 
 static inline int32_t
-extract_reg_iim(struct ir3_register *reg)
+extract_reg_iim(const struct ir3_register *reg)
 {
    assert(reg->flags & IR3_REG_IMMED);
    return reg->iim_val;
 }
 
 static inline uint32_t
-extract_reg_uim(struct ir3_register *reg)
+extract_reg_uim(const struct ir3_register *reg)
 {
    assert(reg->flags & IR3_REG_IMMED);
    return reg->uim_val;
+}
+
+static inline uint32_t
+extract_dst_num(const struct ir3_register *reg)
+{
+   if (reg->flags & IR3_REG_UNIFORM) {
+      assert(reg->flags & IR3_REG_PREDICATE);
+      assert(reg_num(reg) == REG_P0);
+      return REG_A0;
+   }
+
+   return reg_num(reg);
 }
 
 /**
@@ -166,7 +156,7 @@ extract_reg_uim(struct ir3_register *reg)
  * TODO revisit this once legacy 'packed struct' encoding is gone
  */
 static inline struct ir3_register *
-extract_cat5_SRC(struct ir3_instruction *instr, unsigned n)
+extract_cat5_SRC(const struct ir3_instruction *instr, unsigned n)
 {
 	if (instr->flags & IR3_INSTR_S2EN) {
 		n++;
@@ -177,7 +167,7 @@ extract_cat5_SRC(struct ir3_instruction *instr, unsigned n)
 }
 
 static inline bool
-extract_cat5_FULL(struct ir3_instruction *instr)
+extract_cat5_FULL(const struct ir3_instruction *instr)
 {
 	struct ir3_register *reg = extract_cat5_SRC(instr, 0);
 	/* some cat5 have zero src regs, in which case 'FULL' is false */
@@ -187,7 +177,7 @@ extract_cat5_FULL(struct ir3_instruction *instr)
 }
 
 static inline cat5_desc_mode_t
-extract_cat5_DESC_MODE(struct ir3_instruction *instr)
+extract_cat5_DESC_MODE(const struct ir3_instruction *instr)
 {
 	assert(instr->flags & (IR3_INSTR_S2EN | IR3_INSTR_B));
 	if (instr->flags & IR3_INSTR_S2EN) {
@@ -221,7 +211,7 @@ extract_cat5_DESC_MODE(struct ir3_instruction *instr)
 }
 
 static inline unsigned
-extract_cat6_DESC_MODE(struct ir3_instruction *instr)
+extract_cat6_DESC_MODE(const struct ir3_instruction *instr)
 {
 	struct ir3_register *ssbo = instr->srcs[0];
 	if (ssbo->flags & IR3_REG_IMMED) {
@@ -241,7 +231,7 @@ extract_cat6_DESC_MODE(struct ir3_instruction *instr)
  * TODO revisit this once legacy 'packed struct' encoding is gone
  */
 static inline struct ir3_register *
-extract_cat6_SRC(struct ir3_instruction *instr, unsigned n)
+extract_cat6_SRC(const struct ir3_instruction *instr, unsigned n)
 {
 	if (is_global_a3xx_atomic(instr->opc)) {
 		n++;
@@ -261,7 +251,7 @@ typedef enum {
 } reg_multisrc_t;
 
 static inline reg_multisrc_t
-__multisrc_case(struct encode_state *s, struct ir3_register *reg)
+__multisrc_case(struct encode_state *s, const struct ir3_register *reg)
 {
 	if (reg->flags & IR3_REG_IMMED) {
 		assert(opc_cat(s->instr->opc) == 2);
@@ -287,13 +277,15 @@ __multisrc_case(struct encode_state *s, struct ir3_register *reg)
 
 typedef enum {
 	REG_CAT3_SRC_GPR,
+	REG_CAT3_SRC_ALT_IMMED,
+	REG_CAT3_SRC_FLUT,
 	REG_CAT3_SRC_CONST_OR_IMMED,
 	REG_CAT3_SRC_RELATIVE_GPR,
 	REG_CAT3_SRC_RELATIVE_CONST,
 } reg_cat3_src_t;
 
 static inline reg_cat3_src_t
-__cat3_src_case(struct encode_state *s, struct ir3_register *reg)
+__cat3_src_case(struct encode_state *s, const struct ir3_register *reg)
 {
 	if (reg->flags & IR3_REG_RELATIV) {
 		if (reg->flags & IR3_REG_CONST) {
@@ -301,7 +293,26 @@ __cat3_src_case(struct encode_state *s, struct ir3_register *reg)
 		} else {
 			return REG_CAT3_SRC_RELATIVE_GPR;
 		}
-	} else if (reg->flags & (IR3_REG_CONST | IR3_REG_IMMED)) {
+	} else if (reg->flags & IR3_REG_IMMED) {
+		if (ir3_cat3_int(s->instr->opc)) {
+			switch (s->instr->opc) {
+			case OPC_SHRM:
+			case OPC_SHLM:
+			case OPC_SHRG:
+			case OPC_SHLG:
+			case OPC_ANDG:
+			case OPC_WMM:
+			case OPC_WMM_ACCU:
+				return REG_CAT3_SRC_CONST_OR_IMMED;
+			default:
+				assert(s->gen >= 800);
+				return REG_CAT3_SRC_ALT_IMMED;
+			}
+		} else {
+			assert(s->gen >= 800);
+			return REG_CAT3_SRC_FLUT;
+		}
+	} else if (reg->flags & IR3_REG_CONST) {
 		return REG_CAT3_SRC_CONST_OR_IMMED;
 	} else {
 		return REG_CAT3_SRC_GPR;
@@ -309,14 +320,14 @@ __cat3_src_case(struct encode_state *s, struct ir3_register *reg)
 }
 
 typedef enum {
-   STC_DST_IMM,
-   STC_DST_A1
+   CONST_DST_IMM,
+   CONST_DST_A1
 } stc_dst_t;
 
 static inline stc_dst_t
-__stc_dst_case(struct encode_state *s, struct ir3_instruction *instr)
+__const_dst_case(struct encode_state *s, const struct ir3_instruction *instr)
 {
-   return (instr->flags & IR3_INSTR_A1EN) ? STC_DST_A1 : STC_DST_IMM;
+   return (instr->flags & IR3_INSTR_A1EN) ? CONST_DST_A1 : CONST_DST_IMM;
 }
 
 #include "encode.h"
@@ -339,7 +350,12 @@ isa_assemble(struct ir3_shader_variant *v)
 				.instr = instr,
 			};
 
-			const bitmask_t encoded = encode__instruction(&s, NULL, instr);
+			bitmask_t encoded;
+			if (instr->opc == OPC_META_RAW) {
+				encoded = uint64_t_to_bitmask(instr->raw.value);
+			} else {
+				encoded = encode__instruction(&s, NULL, instr);
+			}
 			store_instruction(instrs, encoded);
 			instrs += BITMASK_WORDS;
 		}

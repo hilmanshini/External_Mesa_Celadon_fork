@@ -25,23 +25,37 @@
 #include <stdlib.h>
 #include <string.h>
 #include "vk_descriptors.h"
+#include "vk_common_entrypoints.h"
 #include "util/macros.h"
+
+struct binding_with_flags {
+   VkDescriptorSetLayoutBinding binding;
+   VkDescriptorBindingFlags flags;
+};
 
 static int
 binding_compare(const void* av, const void *bv)
 {
-   const VkDescriptorSetLayoutBinding *a = (const VkDescriptorSetLayoutBinding*)av;
-   const VkDescriptorSetLayoutBinding *b = (const VkDescriptorSetLayoutBinding*)bv;
+   const struct binding_with_flags *a = (const struct binding_with_flags*)av;
+   const struct binding_with_flags *b = (const struct binding_with_flags*)bv;
  
-   return (a->binding < b->binding) ? -1 : (a->binding > b->binding) ? 1 : 0;
+   return (a->binding.binding < b->binding.binding) ? -1 :
+          (a->binding.binding > b->binding.binding) ? 1 : 0;
 }
  
 VkResult
 vk_create_sorted_bindings(const VkDescriptorSetLayoutBinding *bindings, unsigned count,
-                          VkDescriptorSetLayoutBinding **sorted_bindings)
+                          VkDescriptorSetLayoutBinding **sorted_bindings,
+                          const VkDescriptorSetLayoutBindingFlagsCreateInfo *binding_flags_info,
+                          VkDescriptorBindingFlags **sorted_binding_flags)
 {
+   struct binding_with_flags *bwfs;
+   unsigned index;
+
    if (!count) {
       *sorted_bindings = NULL;
+      if (sorted_binding_flags)
+         *sorted_binding_flags = NULL;
       return VK_SUCCESS;
    }
 
@@ -49,8 +63,93 @@ vk_create_sorted_bindings(const VkDescriptorSetLayoutBinding *bindings, unsigned
    if (!*sorted_bindings)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
 
-   memcpy(*sorted_bindings, bindings, count * sizeof(VkDescriptorSetLayoutBinding));
-   qsort(*sorted_bindings, count, sizeof(VkDescriptorSetLayoutBinding), binding_compare);
+   if (binding_flags_info && !binding_flags_info->bindingCount)
+      binding_flags_info = NULL;
+
+   if (binding_flags_info) {
+      assert(sorted_binding_flags);
+      assert(binding_flags_info->bindingCount == count);
+
+      *sorted_binding_flags = malloc(count * sizeof(VkDescriptorBindingFlags));
+      if (!*sorted_binding_flags) {
+         free(*sorted_bindings);
+         return VK_ERROR_OUT_OF_HOST_MEMORY;
+      }
+   }
+
+   bwfs = malloc(count * sizeof(struct binding_with_flags));
+   if (!bwfs) {
+      if (binding_flags_info)
+         free(*sorted_binding_flags);
+      free(*sorted_bindings);
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+   }
+
+   for (index = 0; index < count; index++) {
+      memcpy(&bwfs[index].binding, &bindings[index],
+             sizeof(VkDescriptorSetLayoutBinding));
+      if (binding_flags_info)
+         bwfs[index].flags = binding_flags_info->pBindingFlags[index];
+      else
+         bwfs[index].flags = 0;
+   }
+
+   qsort(bwfs, count, sizeof(struct binding_with_flags), binding_compare);
+
+   for (index = 0; index < count; index++) {
+      memcpy(&(*sorted_bindings)[index], &bwfs[index].binding,
+             sizeof(VkDescriptorSetLayoutBinding));
+      if (binding_flags_info)
+         (*sorted_binding_flags)[index] = bwfs[index].flags;
+   }
+
+   free(bwfs);
  
+   return VK_SUCCESS;
+}
+
+/*
+ * For drivers that don't have mutable state in buffers, images, image views, or
+ * samplers, there's no need to save/restore anything to get the same
+ * descriptor back as long as the user uses the same GPU virtual address. In
+ * this case, the following EXT_descriptor_buffer functions are trivial.
+ */
+VKAPI_ATTR VkResult VKAPI_CALL
+vk_common_GetBufferOpaqueCaptureDescriptorDataEXT(VkDevice device,
+                                                  const VkBufferCaptureDescriptorDataInfoEXT *pInfo,
+                                                  void *pData)
+{
+   return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+vk_common_GetImageOpaqueCaptureDescriptorDataEXT(VkDevice device,
+                                                 const VkImageCaptureDescriptorDataInfoEXT *pInfo,
+                                                 void *pData)
+{
+   return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+vk_common_GetImageViewOpaqueCaptureDescriptorDataEXT(VkDevice device,
+                                                     const VkImageViewCaptureDescriptorDataInfoEXT *pInfo,
+                                                     void *pData)
+{
+   return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+vk_common_GetSamplerOpaqueCaptureDescriptorDataEXT(VkDevice _device,
+                                                   const VkSamplerCaptureDescriptorDataInfoEXT *pInfo,
+                                                   void *pData)
+{
+   return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+vk_common_GetAccelerationStructureOpaqueCaptureDescriptorDataEXT(VkDevice device,
+                                                                 const VkAccelerationStructureCaptureDescriptorDataInfoEXT *pInfo,
+                                                                 void *pData)
+{
    return VK_SUCCESS;
 }

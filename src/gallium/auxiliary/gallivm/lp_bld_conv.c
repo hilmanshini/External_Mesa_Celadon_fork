@@ -61,8 +61,6 @@
  */
 
 
-#include "util/u_debug.h"
-#include "util/u_math.h"
 #include "util/half_float.h"
 #include "util/u_cpu_detect.h"
 
@@ -76,6 +74,7 @@
 #include "lp_bld_intr.h"
 #include "lp_bld_printf.h"
 #include "lp_bld_format.h"
+#include "lp_bld_limits.h"
 
 
 /* the lp_test_format test fails on mingw/i686 at -O2 with gcc 10.x
@@ -105,13 +104,14 @@ lp_build_half_to_float(struct gallivm_state *gallivm,
                             LLVMGetVectorSize(src_type) : 1;
 
    struct lp_type f32_type = lp_type_float_vec(32, 32 * src_length);
+   struct lp_type i16_type = lp_type_int_vec(16, 16 * src_length);
    struct lp_type i32_type = lp_type_int_vec(32, 32 * src_length);
-   LLVMTypeRef int_vec_type = lp_build_vec_type(gallivm, i32_type);
+   LLVMTypeRef int_vec_type = lp_build_vec_type(gallivm, i16_type);
+   LLVMTypeRef ext_int_vec_type = lp_build_vec_type(gallivm, i32_type);
    LLVMValueRef h;
 
-   if (util_get_cpu_caps()->has_f16c &&
-       (src_length == 4 || src_length == 8)) {
-      if (LLVM_VERSION_MAJOR < 11) {
+   if (lp_has_fp16() && (src_length == 4 || src_length == 8)) {
+      if (util_get_cpu_caps()->has_f16c && LLVM_VERSION_MAJOR < 11) {
          const char *intrinsic = NULL;
          if (src_length == 4) {
             src = lp_build_pad_vector(gallivm, src, 8);
@@ -140,7 +140,8 @@ lp_build_half_to_float(struct gallivm_state *gallivm,
       }
    }
 
-   h = LLVMBuildZExt(builder, src, int_vec_type, "");
+   src = LLVMBuildBitCast(builder, src, int_vec_type, "");
+   h = LLVMBuildZExt(builder, src, ext_int_vec_type, "");
    return lp_build_smallfloat_to_float(gallivm, f32_type, h, 10, 5, 0, true);
 }
 
@@ -195,7 +196,8 @@ lp_build_float_to_half(struct gallivm_state *gallivm,
       if (length == 4) {
          result = lp_build_extract_range(gallivm, result, 0, 4);
       }
-      result = LLVMBuildBitCast(builder, result, lp_build_vec_type(gallivm, lp_type_float_vec(16, 16 * length)), "");
+      result = LLVMBuildBitCast(builder, result,
+                                lp_build_vec_type(gallivm, lp_type_float_vec(16, 16 * length)), "");
    }
 
    else {
@@ -273,7 +275,7 @@ lp_build_clamped_float_to_unsigned_norm(struct gallivm_state *gallivm,
 
    assert(src_type.floating);
    assert(dst_width <= src_type.width);
-   src_type.sign = FALSE;
+   src_type.sign = false;
 
    mantissa = lp_mantissa(src_type);
 
@@ -860,7 +862,7 @@ lp_build_conv(struct gallivm_state *gallivm,
                                                              dst_type.width,
                                                              tmp[i]);
          }
-         tmp_type.floating = FALSE;
+         tmp_type.floating = false;
       }
       else {
          double dst_scale = lp_const_scale(dst_type);
@@ -885,12 +887,12 @@ lp_build_conv(struct gallivm_state *gallivm,
             for(i = 0; i < num_tmps; ++i) {
                tmp[i] = lp_build_iround(&bld, tmp[i]);
             }
-            tmp_type.floating = FALSE;
+            tmp_type.floating = false;
          }
          else {
             LLVMTypeRef tmp_vec_type;
 
-            tmp_type.floating = FALSE;
+            tmp_type.floating = false;
             tmp_vec_type = lp_build_vec_type(gallivm, tmp_type);
             for(i = 0; i < num_tmps; ++i) {
 #if 0
@@ -971,15 +973,15 @@ lp_build_conv(struct gallivm_state *gallivm,
                                                      dst_type,
                                                      tmp[i]);
          }
-         tmp_type.floating = TRUE;
+         tmp_type.floating = true;
       }
       else {
          double src_scale = lp_const_scale(src_type);
          LLVMTypeRef tmp_vec_type;
 
          /* Use an equally sized integer for intermediate computations */
-         tmp_type.floating = TRUE;
-         tmp_type.sign = TRUE;
+         tmp_type.floating = true;
+         tmp_type.sign = true;
          tmp_vec_type = lp_build_vec_type(gallivm, tmp_type);
          for(i = 0; i < num_tmps; ++i) {
 #if 0
@@ -1083,15 +1085,15 @@ lp_build_conv_mask(struct gallivm_state *gallivm,
     * We assume all values are 0 or -1
     */
 
-   src_type.floating = FALSE;
-   src_type.fixed = FALSE;
-   src_type.sign = TRUE;
-   src_type.norm = FALSE;
+   src_type.floating = false;
+   src_type.fixed = false;
+   src_type.sign = true;
+   src_type.norm = false;
 
-   dst_type.floating = FALSE;
-   dst_type.fixed = FALSE;
-   dst_type.sign = TRUE;
-   dst_type.norm = FALSE;
+   dst_type.floating = false;
+   dst_type.fixed = false;
+   dst_type.sign = true;
+   dst_type.norm = false;
 
    /*
     * Truncate or expand bit width

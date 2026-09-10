@@ -231,9 +231,9 @@ alloc_select_resource(struct gl_context *ctx)
    if (!ctx->Const.HardwareAcceleratedSelect)
       return;
 
-   if (!ctx->HWSelectModeBeginEnd) {
-      ctx->HWSelectModeBeginEnd = _mesa_alloc_dispatch_table(false);
-      if (!ctx->HWSelectModeBeginEnd) {
+   if (!ctx->Dispatch.HWSelectModeBeginEnd) {
+      ctx->Dispatch.HWSelectModeBeginEnd = _mesa_alloc_dispatch_table(false);
+      if (!ctx->Dispatch.HWSelectModeBeginEnd) {
          _mesa_error(ctx, GL_OUT_OF_MEMORY, "Cannot allocate HWSelectModeBeginEnd");
          return;
       }
@@ -572,9 +572,6 @@ _mesa_RenderMode( GLenum mode )
    GET_CURRENT_CONTEXT(ctx);
    GLint result;
    ASSERT_OUTSIDE_BEGIN_END_WITH_RETVAL(ctx, 0);
-
-   if (MESA_VERBOSE & VERBOSE_API)
-      _mesa_debug(ctx, "glRenderMode %s\n", _mesa_enum_to_string(mode));
 
    FLUSH_VERTICES(ctx, _NEW_RENDERMODE | _NEW_FF_VERT_PROGRAM |
                   _NEW_FF_FRAG_PROGRAM, 0);

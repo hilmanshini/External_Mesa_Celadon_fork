@@ -10,8 +10,6 @@
 #include "pipe/p_shader_tokens.h"
 #include "tgsi/tgsi_parse.h"
 #include "tgsi/tgsi_dump.h"
-#include "tgsi/tgsi_util.h"
-#include "tgsi/tgsi_ureg.h"
 
 #include "draw/draw_context.h"
 
@@ -48,6 +46,8 @@ struct nvfx_vpc {
 
    unsigned r_temps;
    unsigned r_temps_discard;
+   unsigned num_requested_tmps;
+
    struct nvfx_reg r_result[PIPE_MAX_SHADER_OUTPUTS];
    struct nvfx_reg *r_address;
    struct nvfx_reg *r_temp;
@@ -70,6 +70,7 @@ static struct nvfx_reg
 temp(struct nvfx_vpc *vpc)
 {
    int idx = ffs(~vpc->r_temps) - 1;
+   vpc->num_requested_tmps++;
 
    if (idx < 0 || (!vpc->is_nv4x && idx >= 16)) {
       NOUVEAU_ERR("out of temps!!\n");
@@ -142,7 +143,7 @@ emit_src(struct nvfx_vpc *vpc, uint32_t *hw,
       if (src.reg.index < 256 && src.reg.index >= -256) {
          reloc.location = vp->nr_insns - 1;
          reloc.target = src.reg.index;
-         util_dynarray_append(&vp->const_relocs, struct nvfx_relocation, reloc);
+         util_dynarray_append(&vp->const_relocs, reloc);
       } else {
          hw[1] |= (src.reg.index << NVFX_VP(INST_CONST_SRC_SHIFT)) &
                NVFX_VP(INST_CONST_SRC_MASK);
@@ -463,7 +464,6 @@ nvfx_vertprog_parse_instruction(struct nvfx_vpc *vpc,
 {
    struct nvfx_src src[3], tmp;
    struct nvfx_reg dst;
-   struct nvfx_reg final_dst;
    struct nvfx_src none = nvfx_src(nvfx_reg(NVFXSR_NONE, 0));
    struct nvfx_insn insn;
    struct nvfx_relocation reloc;
@@ -539,15 +539,14 @@ nvfx_vertprog_parse_instruction(struct nvfx_vpc *vpc,
       finst->Instruction.Opcode != TGSI_OPCODE_ARL)
       return false;
 
-   final_dst = dst  = tgsi_dst(vpc, &finst->Dst[0]);
+   dst  = tgsi_dst(vpc, &finst->Dst[0]);
    mask = tgsi_mask(finst->Dst[0].Register.WriteMask);
    if(finst->Instruction.Saturate) {
       assert(finst->Instruction.Opcode != TGSI_OPCODE_ARL);
       if (vpc->is_nv4x)
          sat = true;
       else
-      if(dst.type != NVFXSR_TEMP)
-         dst = temp(vpc);
+         NOUVEAU_ERR("SAT should have been lowered.\n");
    }
 
    switch (finst->Instruction.Opcode) {
@@ -558,9 +557,7 @@ nvfx_vertprog_parse_instruction(struct nvfx_vpc *vpc,
       nvfx_vp_emit(vpc, arith(0, VEC, ARL, dst, mask, src[0], none, none));
       break;
    case TGSI_OPCODE_CEIL:
-      tmp = nvfx_src(temp(vpc));
-      nvfx_vp_emit(vpc, arith(0, VEC, FLR, tmp.reg, mask, neg(src[0]), none, none));
-      nvfx_vp_emit(vpc, arith(sat, VEC, MOV, dst, mask, neg(tmp), none, none));
+      NOUVEAU_ERR("CEIL should have been lowered.\n");
       break;
    case TGSI_OPCODE_CMP:
       insn = arith(0, VEC, MOV, none.reg, mask, src[0], none, none);
@@ -589,14 +586,8 @@ nvfx_vertprog_parse_instruction(struct nvfx_vpc *vpc,
    case TGSI_OPCODE_DP4:
       nvfx_vp_emit(vpc, arith(sat, VEC, DP4, dst, mask, src[0], src[1], none));
       break;
-   case TGSI_OPCODE_DST:
-      nvfx_vp_emit(vpc, arith(sat, VEC, DST, dst, mask, src[0], src[1], none));
-      break;
    case TGSI_OPCODE_EX2:
       nvfx_vp_emit(vpc, arith(sat, SCA, EX2, dst, mask, none, none, src[0]));
-      break;
-   case TGSI_OPCODE_EXP:
-      nvfx_vp_emit(vpc, arith(sat, SCA, EXP, dst, mask, none, none, src[0]));
       break;
    case TGSI_OPCODE_FLR:
       nvfx_vp_emit(vpc, arith(sat, VEC, FLR, dst, mask, src[0], none, none));
@@ -607,16 +598,8 @@ nvfx_vertprog_parse_instruction(struct nvfx_vpc *vpc,
    case TGSI_OPCODE_LG2:
       nvfx_vp_emit(vpc, arith(sat, SCA, LG2, dst, mask, none, none, src[0]));
       break;
-   case TGSI_OPCODE_LIT:
-      nvfx_vp_emit(vpc, arith(sat, SCA, LIT, dst, mask, none, none, src[0]));
-      break;
-   case TGSI_OPCODE_LOG:
-      nvfx_vp_emit(vpc, arith(sat, SCA, LOG, dst, mask, none, none, src[0]));
-      break;
    case TGSI_OPCODE_LRP:
-      tmp = nvfx_src(temp(vpc));
-      nvfx_vp_emit(vpc, arith(0, VEC, MAD, tmp.reg, mask, neg(src[0]), src[2], src[2]));
-      nvfx_vp_emit(vpc, arith(sat, VEC, MAD, dst, mask, src[0], src[1], tmp));
+      NOUVEAU_ERR("LRP should have been lowered.\n");
       break;
    case TGSI_OPCODE_MAD:
       nvfx_vp_emit(vpc, arith(sat, VEC, MAD, dst, mask, src[0], src[1], src[2]));
@@ -636,10 +619,7 @@ nvfx_vertprog_parse_instruction(struct nvfx_vpc *vpc,
    case TGSI_OPCODE_NOP:
       break;
    case TGSI_OPCODE_POW:
-      tmp = nvfx_src(temp(vpc));
-      nvfx_vp_emit(vpc, arith(0, SCA, LG2, tmp.reg, NVFX_VP_MASK_X, none, none, swz(src[0], X, X, X, X)));
-      nvfx_vp_emit(vpc, arith(0, VEC, MUL, tmp.reg, NVFX_VP_MASK_X, swz(tmp, X, X, X, X), swz(src[1], X, X, X, X), none));
-      nvfx_vp_emit(vpc, arith(sat, SCA, EX2, dst, mask, none, none, swz(tmp, X, X, X, X)));
+      NOUVEAU_ERR("POW should have been lowered.\n");
       break;
    case TGSI_OPCODE_RCP:
       nvfx_vp_emit(vpc, arith(sat, SCA, RCP, dst, mask, none, none, src[0]));
@@ -691,7 +671,7 @@ nvfx_vertprog_parse_instruction(struct nvfx_vpc *vpc,
 
       reloc.location = vpc->vp->nr_insns;
       reloc.target = finst->Label.Label + 1;
-      util_dynarray_append(&vpc->label_relocs, struct nvfx_relocation, reloc);
+      util_dynarray_append(&vpc->label_relocs, reloc);
 
       insn = arith(0, SCA, BRA, none.reg, 0, none, none, none);
       insn.cc_test = NVFX_COND_EQ;
@@ -702,7 +682,7 @@ nvfx_vertprog_parse_instruction(struct nvfx_vpc *vpc,
    case TGSI_OPCODE_CAL:
       reloc.location = vpc->vp->nr_insns;
       reloc.target = finst->Label.Label;
-      util_dynarray_append(&vpc->label_relocs, struct nvfx_relocation, reloc);
+      util_dynarray_append(&vpc->label_relocs, reloc);
 
       if(finst->Instruction.Opcode == TGSI_OPCODE_CAL)
          insn = arith(0, SCA, CAL, none.reg, 0, none, none, none);
@@ -718,7 +698,7 @@ nvfx_vertprog_parse_instruction(struct nvfx_vpc *vpc,
       } else {
          reloc.location = vpc->vp->nr_insns;
          reloc.target = vpc->info->num_instructions;
-         util_dynarray_append(&vpc->label_relocs, struct nvfx_relocation, reloc);
+         util_dynarray_append(&vpc->label_relocs, reloc);
          nvfx_vp_emit(vpc, arith(0, SCA, BRA, none.reg, 0, none, none, none));
       }
       break;
@@ -734,14 +714,14 @@ nvfx_vertprog_parse_instruction(struct nvfx_vpc *vpc,
    case TGSI_OPCODE_BGNLOOP:
       loop.cont_target = idx;
       loop.brk_target = finst->Label.Label + 1;
-      util_dynarray_append(&vpc->loop_stack, struct nvfx_loop_entry, loop);
+      util_dynarray_append(&vpc->loop_stack, loop);
       break;
    case TGSI_OPCODE_ENDLOOP:
       loop = util_dynarray_pop(&vpc->loop_stack, struct nvfx_loop_entry);
 
       reloc.location = vpc->vp->nr_insns;
       reloc.target = loop.cont_target;
-      util_dynarray_append(&vpc->label_relocs, struct nvfx_relocation, reloc);
+      util_dynarray_append(&vpc->label_relocs, reloc);
 
       nvfx_vp_emit(vpc, arith(0, SCA, BRA, none.reg, 0, none, none, none));
       break;
@@ -750,7 +730,7 @@ nvfx_vertprog_parse_instruction(struct nvfx_vpc *vpc,
 
       reloc.location = vpc->vp->nr_insns;
       reloc.target = loop.cont_target;
-      util_dynarray_append(&vpc->label_relocs, struct nvfx_relocation, reloc);
+      util_dynarray_append(&vpc->label_relocs, reloc);
 
       nvfx_vp_emit(vpc, arith(0, SCA, BRA, none.reg, 0, none, none, none));
       break;
@@ -759,7 +739,7 @@ nvfx_vertprog_parse_instruction(struct nvfx_vpc *vpc,
 
       reloc.location = vpc->vp->nr_insns;
       reloc.target = loop.brk_target;
-      util_dynarray_append(&vpc->label_relocs, struct nvfx_relocation, reloc);
+      util_dynarray_append(&vpc->label_relocs, reloc);
 
       nvfx_vp_emit(vpc, arith(0, SCA, BRA, none.reg, 0, none, none, none));
       break;
@@ -769,7 +749,7 @@ nvfx_vertprog_parse_instruction(struct nvfx_vpc *vpc,
          if(idx != (vpc->info->num_instructions - 1)) {
             reloc.location = vpc->vp->nr_insns;
             reloc.target = vpc->info->num_instructions;
-            util_dynarray_append(&vpc->label_relocs, struct nvfx_relocation, reloc);
+            util_dynarray_append(&vpc->label_relocs, reloc);
             nvfx_vp_emit(vpc, arith(0, SCA, BRA, none.reg, 0, none, none, none));
          }
       } else {
@@ -782,13 +762,6 @@ nvfx_vertprog_parse_instruction(struct nvfx_vpc *vpc,
    default:
       NOUVEAU_ERR("invalid opcode %d\n", finst->Instruction.Opcode);
       return false;
-   }
-
-   if(finst->Instruction.Saturate && !vpc->is_nv4x) {
-      if (!vpc->r_0_1.type)
-         vpc->r_0_1 = constant(vpc, -1, 0, 1, 0, 0);
-      nvfx_vp_emit(vpc, arith(0, VEC, MAX, dst, mask, nvfx_src(dst), swz(nvfx_src(vpc->r_0_1), X, X, X, X), none));
-      nvfx_vp_emit(vpc, arith(0, VEC, MIN, final_dst, mask, nvfx_src(dst), swz(nvfx_src(vpc->r_0_1), Y, Y, Y, Y), none));
    }
 
    release_temps(vpc);
@@ -955,7 +928,7 @@ nvfx_vertprog_prepare(struct nvfx_vpc *vpc)
 DEBUG_GET_ONCE_BOOL_OPTION(nvfx_dump_vp, "NVFX_DUMP_VP", false)
 
 bool
-_nvfx_vertprog_translate(uint16_t oclass, struct nv30_vertprog *vp)
+_nvfx_vertprog_translate(uint16_t oclass, struct nv30_vertprog *vp, struct util_debug_callback *debug)
 {
    struct tgsi_parse_context parse;
    struct nvfx_vpc *vpc = NULL;
@@ -991,7 +964,7 @@ _nvfx_vertprog_translate(uint16_t oclass, struct nv30_vertprog *vp)
       vpc->cvtx_idx = vpc->hpos_idx;
    }
 
-   util_dynarray_init(&insns, NULL);
+   insns = UTIL_DYNARRAY_INIT;
 
    tgsi_parse_init(&parse, vp->pipe.tokens);
    while (!tgsi_parse_end_of_tokens(&parse)) {
@@ -1017,7 +990,7 @@ _nvfx_vertprog_translate(uint16_t oclass, struct nv30_vertprog *vp)
       {
          const struct tgsi_full_instruction *finst;
          unsigned idx = insns.size >> 2;
-         util_dynarray_append(&insns, unsigned, vp->nr_insns);
+         util_dynarray_append(&insns, vp->nr_insns);
          finst = &parse.FullToken.FullInstruction;
          if (!nvfx_vertprog_parse_instruction(vpc, idx, finst))
             goto out;
@@ -1028,7 +1001,7 @@ _nvfx_vertprog_translate(uint16_t oclass, struct nv30_vertprog *vp)
       }
    }
 
-   util_dynarray_append(&insns, unsigned, vp->nr_insns);
+   util_dynarray_append(&insns, vp->nr_insns);
 
    for(unsigned i = 0; i < vpc->label_relocs.size; i += sizeof(struct nvfx_relocation))
    {
@@ -1040,7 +1013,7 @@ _nvfx_vertprog_translate(uint16_t oclass, struct nv30_vertprog *vp)
 
       //debug_printf("hw %u -> tgsi %u = hw %u\n", hw_reloc.location, label_reloc->target, hw_reloc.target);
 
-      util_dynarray_append(&vp->branch_relocs, struct nvfx_relocation, hw_reloc);
+      util_dynarray_append(&vp->branch_relocs, hw_reloc);
    }
    util_dynarray_fini(&insns);
    util_dynarray_trim(&vp->branch_relocs);
@@ -1097,6 +1070,10 @@ _nvfx_vertprog_translate(uint16_t oclass, struct nv30_vertprog *vp)
    }
 
    vp->translated = true;
+
+   util_debug_message(debug, SHADER_INFO,
+                      "%s shader: %u inst, %u const, %u requested_temps",
+                      "VP", vp->nr_insns, vp->nr_consts, vpc->num_requested_tmps);
 
 out:
    tgsi_parse_free(&parse);

@@ -1,34 +1,8 @@
-/**************************************************************************
- *
- * Copyright 2013 Advanced Micro Devices, Inc.
- * All Rights Reserved.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the
- * "Software"), to deal in the Software without restriction, including
- * without limitation the rights to use, copy, modify, merge, publish,
- * distribute, sub license, and/or sell copies of the Software, and to
- * permit persons to whom the Software is furnished to do so, subject to
- * the following conditions:
- *
- * The above copyright notice and this permission notice (including the
- * next paragraph) shall be included in all copies or substantial portions
- * of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT.
- * IN NO EVENT SHALL THE COPYRIGHT HOLDER(S) OR AUTHOR(S) BE LIABLE FOR
- * ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
- * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
- * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- *
- **************************************************************************/
-
 /*
+ * Copyright 2013 Advanced Micro Devices, Inc.
  * Authors:
  *      Christian König <christian.koenig@amd.com>
- *
+ * SPDX-License-Identifier: MIT
  */
 
 #include <unistd.h>
@@ -71,9 +45,8 @@ bool rvid_create_buffer(struct pipe_screen *screen, struct rvid_buffer *buffer,
 	 * able to move buffers around individually, so request a
 	 * non-sub-allocated buffer.
 	 */
-	buffer->res = (struct r600_resource *)
-		pipe_buffer_create(screen, PIPE_BIND_SHARED,
-				   usage, size);
+	buffer->res = r600_as_resource(pipe_buffer_create(screen, PIPE_BIND_SHARED,
+						       usage, size));
 
 	return buffer->res != NULL;
 }
@@ -141,13 +114,13 @@ void rvid_clear_buffer(struct pipe_context *context, struct rvid_buffer* buffer)
  * sumup their sizes and replace the backend buffers with a single bo
  */
 void rvid_join_surfaces(struct r600_common_context *rctx,
-			struct pb_buffer** buffers[VL_NUM_COMPONENTS],
+			struct pb_buffer_lean** buffers[VL_NUM_COMPONENTS],
 			struct radeon_surf *surfaces[VL_NUM_COMPONENTS])
 {
 	struct radeon_winsys* ws;
 	unsigned best_tiling, best_wh, off;
 	unsigned size, alignment;
-	struct pb_buffer *pb;
+	struct pb_buffer_lean *pb;
 	unsigned i, j;
 
 	ws = rctx->ws;
@@ -209,10 +182,10 @@ void rvid_join_surfaces(struct r600_common_context *rctx,
 		if (!buffers[i] || !*buffers[i])
 			continue;
 
-		pb_reference(buffers[i], pb);
+		radeon_bo_reference(rctx->ws, buffers[i], pb);
 	}
 
-	pb_reference(&pb, NULL);
+	radeon_bo_reference(rctx->ws, &pb, NULL);
 }
 
 int rvid_get_video_param(struct pipe_screen *screen,
@@ -224,29 +197,19 @@ int rvid_get_video_param(struct pipe_screen *screen,
 	enum pipe_video_format codec = u_reduce_video_profile(profile);
 	struct radeon_info info;
 
-	rscreen->ws->query_info(rscreen->ws, &info, false, false);
+	rscreen->ws->query_info(rscreen->ws, &info);
 
 	if (entrypoint == PIPE_VIDEO_ENTRYPOINT_ENCODE) {
 		switch (param) {
 		case PIPE_VIDEO_CAP_SUPPORTED:
 			return codec == PIPE_VIDEO_FORMAT_MPEG4_AVC &&
 				rvce_is_fw_version_supported(rscreen);
-		case PIPE_VIDEO_CAP_NPOT_TEXTURES:
-			return 1;
 		case PIPE_VIDEO_CAP_MAX_WIDTH:
 			return 2048;
 		case PIPE_VIDEO_CAP_MAX_HEIGHT:
 			return 1152;
-		case PIPE_VIDEO_CAP_PREFERED_FORMAT:
-			return PIPE_FORMAT_NV12;
-		case PIPE_VIDEO_CAP_PREFERS_INTERLACED:
-			return false;
-		case PIPE_VIDEO_CAP_SUPPORTS_INTERLACED:
-			return false;
 		case PIPE_VIDEO_CAP_SUPPORTS_PROGRESSIVE:
 			return true;
-		case PIPE_VIDEO_CAP_STACKED_FRAMES:
-			return 1;
 		default:
 			return 0;
 		}
@@ -256,10 +219,9 @@ int rvid_get_video_param(struct pipe_screen *screen,
 	case PIPE_VIDEO_CAP_SUPPORTED:
 		switch (codec) {
 		case PIPE_VIDEO_FORMAT_MPEG12:
-			return profile != PIPE_VIDEO_PROFILE_MPEG1;
-		case PIPE_VIDEO_FORMAT_MPEG4:
-			/* no support for MPEG4 on older hw */
-			return rscreen->family >= CHIP_PALM;
+			/* no support for MPEG2 on older hw */
+			return profile != PIPE_VIDEO_PROFILE_MPEG1 &&
+				rscreen->family >= CHIP_PALM;
 		case PIPE_VIDEO_FORMAT_MPEG4_AVC:
 			return true;
 		case PIPE_VIDEO_FORMAT_VC1:
@@ -271,55 +233,12 @@ int rvid_get_video_param(struct pipe_screen *screen,
 		default:
 			return false;
 		}
-	case PIPE_VIDEO_CAP_NPOT_TEXTURES:
-		return 1;
 	case PIPE_VIDEO_CAP_MAX_WIDTH:
 		return 2048;
 	case PIPE_VIDEO_CAP_MAX_HEIGHT:
 		return 1152;
-	case PIPE_VIDEO_CAP_PREFERED_FORMAT:
-		return PIPE_FORMAT_NV12;
-
-	case PIPE_VIDEO_CAP_PREFERS_INTERLACED:
-	case PIPE_VIDEO_CAP_SUPPORTS_INTERLACED:
-		if (rscreen->family < CHIP_PALM) {
-			/* MPEG2 only with shaders and no support for
-			   interlacing on R6xx style UVD */
-			return codec != PIPE_VIDEO_FORMAT_MPEG12 &&
-			       rscreen->family > CHIP_RV770;
-		} else {
-			enum pipe_video_format format = u_reduce_video_profile(profile);
-
-			if (format == PIPE_VIDEO_FORMAT_JPEG)
-				return false;
-			return true;
-		}
 	case PIPE_VIDEO_CAP_SUPPORTS_PROGRESSIVE:
 		return true;
-	case PIPE_VIDEO_CAP_MAX_LEVEL:
-		switch (profile) {
-		case PIPE_VIDEO_PROFILE_MPEG1:
-			return 0;
-		case PIPE_VIDEO_PROFILE_MPEG2_SIMPLE:
-		case PIPE_VIDEO_PROFILE_MPEG2_MAIN:
-			return 3;
-		case PIPE_VIDEO_PROFILE_MPEG4_SIMPLE:
-			return 3;
-		case PIPE_VIDEO_PROFILE_MPEG4_ADVANCED_SIMPLE:
-			return 5;
-		case PIPE_VIDEO_PROFILE_VC1_SIMPLE:
-			return 1;
-		case PIPE_VIDEO_PROFILE_VC1_MAIN:
-			return 2;
-		case PIPE_VIDEO_PROFILE_VC1_ADVANCED:
-			return 4;
-		case PIPE_VIDEO_PROFILE_MPEG4_AVC_BASELINE:
-		case PIPE_VIDEO_PROFILE_MPEG4_AVC_MAIN:
-		case PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH:
-			return 41;
-		default:
-			return 0;
-		}
 	default:
 		return 0;
 	}

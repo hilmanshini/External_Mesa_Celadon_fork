@@ -27,7 +27,7 @@
 #ifndef ST_SAMPLER_VIEW_H
 #define ST_SAMPLER_VIEW_H
 
-#include "pipe/p_compiler.h"
+#include "util/compiler.h"
 #include "pipe/p_context.h"
 #include "pipe/p_state.h"
 #include "util/u_sampler.h"
@@ -66,22 +66,20 @@ void
 st_delete_texture_sampler_views(struct st_context *st,
                                 struct gl_texture_object *stObj);
 
-struct st_sampler_view *
-st_texture_get_current_sampler_view(const struct st_context *st,
-                                    const struct gl_texture_object *stObj);
-
 struct pipe_sampler_view *
 st_get_texture_sampler_view_from_stobj(struct st_context *st,
                                        struct gl_texture_object *stObj,
                                        const struct gl_sampler_object *samp,
                                        bool glsl130_or_later,
                                        bool ignore_srgb_decode,
-                                       bool get_reference);
+                                       unsigned num_norelease_views,
+                                       const struct pipe_sampler_view **norelease_views);
 
 struct pipe_sampler_view *
 st_get_buffer_sampler_view_from_stobj(struct st_context *st,
                                       struct gl_texture_object *stObj,
-                                      bool get_reference);
+                                      unsigned num_norelease_views,
+                                      const struct pipe_sampler_view **norelease_views);
 
 enum pipe_format
 st_get_sampler_view_format(const struct st_context *st,

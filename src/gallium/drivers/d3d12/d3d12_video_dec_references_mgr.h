@@ -48,7 +48,7 @@ struct d3d12_video_decoder_references_manager
 
    bool is_pipe_buffer_underlying_output_decode_allocation()
    {
-      return (!is_reference_only() && is_array_of_textures());
+      return (is_reference_only() || is_array_of_textures());
    }
 
    void mark_all_references_as_unused();
@@ -90,7 +90,7 @@ struct d3d12_video_decoder_references_manager
 
    uint8_t get_unused_index7bits()
    {
-      for (uint32_t testIdx = 0; testIdx < 127; testIdx++) {
+      for (uint8_t testIdx = 0; testIdx < 127; testIdx++) {
          auto it = std::find_if(m_DecodeTargetToOriginalIndex7Bits.begin(), m_DecodeTargetToOriginalIndex7Bits.end(),
             [&testIdx](const std::pair< struct pipe_video_buffer*, uint8_t > &p) {
                return p.second == testIdx;
@@ -145,8 +145,6 @@ struct d3d12_video_decoder_references_manager
    
    std::map<struct pipe_video_buffer *, uint8_t> m_DecodeTargetToOriginalIndex7Bits = { };
  
-   ComPtr<ID3D12Resource> m_pClearDecodedOutputTexture;
-
    const struct d3d12_screen *       m_pD3D12Screen;
    uint16_t                          m_invalidIndex;
    d3d12_video_decode_dpb_descriptor m_dpbDescriptor      = {};
@@ -239,8 +237,8 @@ d3d12_video_decoder_references_manager::update_entries_av1(T (&picEntries)[size]
       uint32_t        OutputSubresource              = 0u;
       bool            outNeedsTransitionToDecodeRead = false;
 
-      picEntry =
-         update_entry(picEntry, pOutputReference, OutputSubresource, outNeedsTransitionToDecodeRead);
+      picEntry = static_cast<T>(
+         update_entry(picEntry, pOutputReference, OutputSubresource, outNeedsTransitionToDecodeRead));
 
       if (outNeedsTransitionToDecodeRead) {
          ///

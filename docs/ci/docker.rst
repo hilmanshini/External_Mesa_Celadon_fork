@@ -3,7 +3,7 @@ Docker CI
 
 For LLVMpipe and Softpipe CI, we run tests in a container containing
 VK-GL-CTS, on the shared GitLab runners provided by `freedesktop
-<https://freedesktop.org>`__
+<https://www.freedesktop.org>`__
 
 Software architecture
 ---------------------
@@ -34,7 +34,7 @@ at the job's log for which specific tests failed).
 DUT requirements
 ----------------
 
-In addition to the general :ref:`CI-farm-expectations`, using
+In addition to the general :ref:`CI-job-user-expectations`, using
 Docker requires:
 
 * DUTs must have a stable kernel and GPU reset (if applicable).
@@ -53,7 +53,7 @@ step across multiple test runs.  Since the images are large and change
 approximately weekly, the DUTs also need to be running some script to
 prune stale Docker images periodically in order to not run out of disk
 space as we rev those containers (perhaps `this script
-<https://gitlab.com/gitlab-org/gitlab-runner/-/issues/2980#note_169233611>`__).
+<https://gitlab.com/gitlab-org/gitlab-runner/-/work_items/2980#note_169233611>`__).
 
 Note that Docker doesn't allow containers to be stored on NFS, and
 doesn't allow multiple Docker daemons to interact with the same

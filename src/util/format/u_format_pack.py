@@ -256,6 +256,10 @@ def native_to_constant(type, value):
             return "%.1ff" % float(value)
         else:
             return "%.1f" % float(value)
+    elif value == -2147483648:
+        return "INT_MIN"
+    elif value == -9223372036854775808:
+        return "INT64_MIN"
     else:
         return str(int(value))
 
@@ -397,6 +401,10 @@ def conversion_expr(src_channel,
                 # bigger than single precision mantissa, use double
                 value = '(%s * (1.0/0x%x))' % (value, one)
                 src_size = 64
+
+            if src_norm and src_type == SIGNED:
+                value = 'MAX2(-1.0f, %s)' % (value)
+
             src_norm = False
         else:
             if src_size <= 23 or dst_channel.size <= 32:
@@ -410,13 +418,24 @@ def conversion_expr(src_channel,
 
     # Convert double or float to non-float
     if dst_channel.type != FLOAT:
-        if dst_channel.norm or dst_channel.type == FIXED:
-            dst_one = get_one(dst_channel)
+        if not dst_channel.pure:
+            if dst_channel.norm or dst_channel.type == FIXED:
+                dst_one = get_one(dst_channel)
+                if dst_channel.size <= 23:
+                    value = '(%s * 0x%x)' % (value, dst_one)
+                else:
+                    # bigger than single precision mantissa, use double
+                    value = '(%s * (double)0x%x)' % (value, dst_one)
+
             if dst_channel.size <= 23:
-                value = 'util_iround(%s * 0x%x)' % (value, dst_one)
-            else:
-                # bigger than single precision mantissa, use double
-                value = '(%s * (double)0x%x)' % (value, dst_one)
+                value = 'util_iround(%s)' % (value)
+
+            # Cast to an integer with the correct signedness first
+            if dst_channel.type == UNSIGNED:
+                value = '(uint%u_t)(%s) ' % (max(dst_channel.size, 32), value)
+            elif dst_channel.type == SIGNED:
+                value = '(int%u_t)(%s) ' % (max(dst_channel.size, 32), value)
+
         value = '(%s)%s' % (dst_native_type, value)
     else:
         # Cast double to float when converting to either half or float
@@ -441,7 +460,8 @@ def generate_unpack_kernel(format, dst_channel, dst_native_type):
 
     def unpack_from_bitmask(channels, swizzles):
         depth = format.block_size()
-        print('         uint%u_t value = *(const uint%u_t *)src;' % (depth, depth))
+        print('         uint%u_t value;' % (depth))
+        print('         memcpy(&value, src, sizeof value);')
 
         # Compute the intermediate unshifted values
         for i in range(format.nr_channels()):
@@ -567,7 +587,7 @@ def generate_pack_kernel(format, src_channel, src_native_type):
                 if value is not None:
                     print('         value |= %s;' % (value))
 
-        print('         *(uint%u_t *)dst = value;' % depth)
+        print('         memcpy(dst, &value, sizeof value);')
 
     def pack_into_struct(channels, swizzles):
         inv_swizzle = inv_swizzles(swizzles)
@@ -691,7 +711,7 @@ def is_format_hand_written(format):
 
 def generate(formats):
     print()
-    print('#include "pipe/p_compiler.h"')
+    print('#include "util/compiler.h"')
     print('#include "util/u_math.h"')
     print('#include "util/half_float.h"')
     print('#include "u_format.h"')

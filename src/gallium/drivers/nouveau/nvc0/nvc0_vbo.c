@@ -51,12 +51,13 @@ nvc0_vertex_state_create(struct pipe_context *pipe,
                          unsigned num_elements,
                          const struct pipe_vertex_element *elements)
 {
+    struct nvc0_context *nvc0 = nvc0_context(pipe);
     struct nvc0_vertex_stateobj *so;
     struct translate_key transkey;
     unsigned i;
     unsigned src_offset_max = 0;
 
-    so = MALLOC(sizeof(*so) +
+    so = CALLOC(1, sizeof(*so) +
                 num_elements * sizeof(struct nvc0_vertex_element));
     if (!so)
         return NULL;
@@ -113,6 +114,10 @@ nvc0_vertex_state_create(struct pipe_context *pipe,
            if (ve->instance_divisor < so->min_instance_div[vbi])
               so->min_instance_div[vbi] = ve->instance_divisor;
         }
+
+        so->strides[vbi] = ve->src_stride;
+        if (!ve->src_stride && nvc0->screen->eng3d->oclass < GM107_3D_CLASS)
+           so->constant_vbos |= 1 << vbi;
 
         if (1) {
             unsigned ca;
@@ -205,14 +210,14 @@ nvc0_user_vbuf_range(struct nvc0_context *nvc0, int vbi,
 {
    if (unlikely(nvc0->vertex->instance_bufs & (1 << vbi))) {
       const uint32_t div = nvc0->vertex->min_instance_div[vbi];
-      *base = nvc0->instance_off * nvc0->vtxbuf[vbi].stride;
-      *size = (nvc0->instance_max / div) * nvc0->vtxbuf[vbi].stride +
+      *base = nvc0->instance_off * nvc0->vertex->strides[vbi];
+      *size = (nvc0->instance_max / div) * nvc0->vertex->strides[vbi] +
          nvc0->vertex->vb_access_size[vbi];
    } else {
       /* NOTE: if there are user buffers, we *must* have index bounds */
       assert(nvc0->vb_elt_limit != ~0);
-      *base = nvc0->vb_elt_first * nvc0->vtxbuf[vbi].stride;
-      *size = nvc0->vb_elt_limit * nvc0->vtxbuf[vbi].stride +
+      *base = nvc0->vb_elt_first * nvc0->vertex->strides[vbi];
+      *size = nvc0->vb_elt_limit * nvc0->vertex->strides[vbi] +
          nvc0->vertex->vb_access_size[vbi];
    }
 }
@@ -340,7 +345,7 @@ nvc0_validate_vertex_buffers(struct nvc0_context *nvc0)
                PUSH_DATA (push, ve->pipe.instance_divisor);
             }
             BEGIN_NVC0(push, NVC0_3D(VERTEX_ARRAY_FETCH(i)), 1);
-            PUSH_DATA (push, (1 << 12) | vb->stride);
+            PUSH_DATA (push, (1 << 12) | vertex->strides[b]);
          }
          /* address/value set in nvc0_update_user_vbufs */
          continue;
@@ -351,13 +356,13 @@ nvc0_validate_vertex_buffers(struct nvc0_context *nvc0)
 
       if (unlikely(ve->pipe.instance_divisor)) {
          BEGIN_NVC0(push, NVC0_3D(VERTEX_ARRAY_FETCH(i)), 4);
-         PUSH_DATA (push, NVC0_3D_VERTEX_ARRAY_FETCH_ENABLE | vb->stride);
+         PUSH_DATA (push, NVC0_3D_VERTEX_ARRAY_FETCH_ENABLE | vertex->strides[b]);
          PUSH_DATAh(push, res->address + offset);
          PUSH_DATA (push, res->address + offset);
          PUSH_DATA (push, ve->pipe.instance_divisor);
       } else {
          BEGIN_NVC0(push, NVC0_3D(VERTEX_ARRAY_FETCH(i)), 3);
-         PUSH_DATA (push, NVC0_3D_VERTEX_ARRAY_FETCH_ENABLE | vb->stride);
+         PUSH_DATA (push, NVC0_3D_VERTEX_ARRAY_FETCH_ENABLE | vertex->strides[b]);
          PUSH_DATAh(push, res->address + offset);
          PUSH_DATA (push, res->address + offset);
       }
@@ -394,7 +399,7 @@ nvc0_validate_vertex_buffers_shared(struct nvc0_context *nvc0)
       if (mask & (1 << b)) {
          if (!(nvc0->constant_vbos & (1 << b))) {
             BEGIN_NVC0(push, NVC0_3D(VERTEX_ARRAY_FETCH(b)), 1);
-            PUSH_DATA (push, NVC0_3D_VERTEX_ARRAY_FETCH_ENABLE | vb->stride);
+            PUSH_DATA (push, NVC0_3D_VERTEX_ARRAY_FETCH_ENABLE | nvc0->vertex->strides[b]);
          }
          /* address/value set in nvc0_update_user_vbufs_shared */
          continue;
@@ -408,7 +413,7 @@ nvc0_validate_vertex_buffers_shared(struct nvc0_context *nvc0)
       limit = buf->base.width0 - 1;
 
       BEGIN_NVC0(push, NVC0_3D(VERTEX_ARRAY_FETCH(b)), 3);
-      PUSH_DATA (push, NVC0_3D_VERTEX_ARRAY_FETCH_ENABLE | vb->stride);
+      PUSH_DATA (push, NVC0_3D_VERTEX_ARRAY_FETCH_ENABLE | nvc0->vertex->strides[b]);
       PUSH_DATAh(push, buf->address + offset);
       PUSH_DATA (push, buf->address + offset);
 
@@ -531,7 +536,7 @@ nvc0_vertex_arrays_validate(struct nvc0_context *nvc0)
 }
 
 #define NVC0_PRIM_GL_CASE(n) \
-   case PIPE_PRIM_##n: return NVC0_3D_VERTEX_BEGIN_GL_PRIMITIVE_##n
+   case MESA_PRIM_##n: return NVC0_3D_VERTEX_BEGIN_GL_PRIMITIVE_##n
 
 static inline unsigned
 nvc0_prim_gl(unsigned prim)
@@ -557,10 +562,11 @@ nvc0_prim_gl(unsigned prim)
    }
 }
 
-static void
+static bool
 nvc0_draw_vbo_kick_notify(struct nouveau_context *context)
 {
    _nouveau_fence_update(context->screen, true);
+   return true;
 }
 
 static void
@@ -920,110 +926,18 @@ nvc0_update_prim_restart(struct nvc0_context *nvc0, bool en, uint32_t index)
    }
 }
 
-void
-nvc0_draw_vbo(struct pipe_context *pipe, const struct pipe_draw_info *info,
-              unsigned drawid_offset,
-              const struct pipe_draw_indirect_info *indirect,
-              const struct pipe_draw_start_count_bias *draws,
-              unsigned num_draws)
+static void
+nvc0_draw_single_vbo(struct pipe_context *pipe, const struct pipe_draw_info *info,
+                     unsigned drawid_offset,
+                     const struct pipe_draw_indirect_info *indirect,
+                     const struct pipe_draw_start_count_bias *draws)
 {
-   if (num_draws > 1) {
-      util_draw_multi(pipe, info, drawid_offset, indirect, draws, num_draws);
-      return;
-   }
-
-   if (!indirect && (!draws[0].count || !info->instance_count))
-      return;
-
    struct nvc0_context *nvc0 = nvc0_context(pipe);
    struct nouveau_pushbuf *push = nvc0->base.pushbuf;
    struct nvc0_screen *screen = nvc0->screen;
-   unsigned vram_domain = NV_VRAM_DOMAIN(&screen->base);
    int s;
 
-   /* NOTE: caller must ensure that (min_index + index_bias) is >= 0 */
-   if (info->index_bounds_valid) {
-      nvc0->vb_elt_first = info->min_index + (info->index_size ? draws->index_bias : 0);
-      nvc0->vb_elt_limit = info->max_index - info->min_index;
-   } else {
-      nvc0->vb_elt_first = 0;
-      nvc0->vb_elt_limit = ~0;
-   }
-   nvc0->instance_off = info->start_instance;
-   nvc0->instance_max = info->instance_count - 1;
-
-   /* For picking only a few vertices from a large user buffer, push is better,
-    * if index count is larger and we expect repeated vertices, suggest upload.
-    */
-   nvc0->vbo_push_hint =
-      (!indirect || indirect->count_from_stream_output) && info->index_size &&
-      (nvc0->vb_elt_limit >= (draws[0].count * 2));
-
-   /* Check whether we want to switch vertex-submission mode. */
-   if (nvc0->vbo_user && !(nvc0->dirty_3d & (NVC0_NEW_3D_ARRAYS | NVC0_NEW_3D_VERTEX))) {
-      if (nvc0->vbo_push_hint != !!nvc0->state.vbo_mode)
-         if (nvc0->state.vbo_mode != 3)
-            nvc0->dirty_3d |= NVC0_NEW_3D_ARRAYS;
-
-      if (!(nvc0->dirty_3d & NVC0_NEW_3D_ARRAYS) && nvc0->state.vbo_mode == 0) {
-         if (nvc0->vertex->shared_slots)
-            nvc0_update_user_vbufs_shared(nvc0);
-         else
-            nvc0_update_user_vbufs(nvc0);
-      }
-   }
-
-   if (info->mode == PIPE_PRIM_PATCHES &&
-       nvc0->state.patch_vertices != nvc0->patch_vertices) {
-      nvc0->state.patch_vertices = nvc0->patch_vertices;
-      PUSH_SPACE(push, 1);
-      IMMED_NVC0(push, NVC0_3D(PATCH_VERTICES), nvc0->state.patch_vertices);
-   }
-
-   if (info->index_size && !info->has_user_indices) {
-      struct nv04_resource *buf = nv04_resource(info->index.resource);
-
-      assert(buf);
-      assert(nouveau_resource_mapped_by_gpu(&buf->base));
-
-      PUSH_SPACE(push, 6);
-      if (nvc0->screen->eng3d->oclass < TU102_3D_CLASS) {
-         BEGIN_NVC0(push, NVC0_3D(INDEX_ARRAY_START_HIGH), 5);
-         PUSH_DATAh(push, buf->address);
-         PUSH_DATA (push, buf->address);
-         PUSH_DATAh(push, buf->address + buf->base.width0 - 1);
-         PUSH_DATA (push, buf->address + buf->base.width0 - 1);
-         PUSH_DATA (push, info->index_size >> 1);
-      } else {
-         BEGIN_NVC0(push, NVC0_3D(INDEX_ARRAY_START_HIGH), 2);
-         PUSH_DATAh(push, buf->address);
-         PUSH_DATA (push, buf->address);
-         BEGIN_NVC0(push, SUBC_3D(TU102_3D_INDEX_ARRAY_LIMIT_HIGH), 2);
-         PUSH_DATAh(push, buf->address + buf->base.width0 - 1);
-         PUSH_DATA (push, buf->address + buf->base.width0 - 1);
-         BEGIN_NVC0(push, NVC0_3D(INDEX_FORMAT), 1);
-         PUSH_DATA (push, info->index_size >> 1);
-      }
-
-      BCTX_REFN(nvc0->bufctx_3d, 3D_IDX, buf, RD);
-   }
-
-   list_for_each_entry(struct nvc0_resident, resident, &nvc0->tex_head, list) {
-      nvc0_add_resident(nvc0->bufctx_3d, NVC0_BIND_3D_BINDLESS, resident->buf,
-                        resident->flags);
-   }
-
-   list_for_each_entry(struct nvc0_resident, resident, &nvc0->img_head, list) {
-      nvc0_add_resident(nvc0->bufctx_3d, NVC0_BIND_3D_BINDLESS, resident->buf,
-                        resident->flags);
-   }
-
-   BCTX_REFN_bo(nvc0->bufctx_3d, 3D_TEXT, vram_domain | NOUVEAU_BO_RD,
-                screen->text);
-
-   simple_mtx_lock(&nvc0->screen->state_lock);
-
-   nvc0_state_validate_3d(nvc0, ~0);
+   simple_mtx_assert_locked(&nvc0->screen->state_lock);
 
    if (nvc0->vertprog->vp.need_draw_parameters && (!indirect || indirect->count_from_stream_output)) {
       PUSH_SPACE(push, 9);
@@ -1081,7 +995,7 @@ nvc0_draw_vbo(struct pipe_context *pipe, const struct pipe_draw_info *info,
          nvc0_push_vbo_indirect(nvc0, info, drawid_offset, indirect, &draws[0]);
       else
          nvc0_push_vbo(nvc0, info, indirect, &draws[0]);
-      goto cleanup;
+      return;
    }
 
    /* space for base instance, flush, and prim restart */
@@ -1128,8 +1042,131 @@ nvc0_draw_vbo(struct pipe_context *pipe, const struct pipe_draw_info *info,
                        info->mode, draws[0].start, draws[0].count,
                        info->instance_count);
    }
+}
 
-cleanup:
+/* Thin wrapper to avoid kicking every 3 ns during multidraw */
+
+void
+nvc0_draw_vbo(struct pipe_context *pipe, const struct pipe_draw_info *info,
+              unsigned drawid_offset,
+              const struct pipe_draw_indirect_info *indirect,
+              const struct pipe_draw_start_count_bias *draws,
+              unsigned num_draws)
+{
+   struct nvc0_context *nvc0 = nvc0_context(pipe);
+   struct nouveau_pushbuf *push = nvc0->base.pushbuf;
+
+   struct nvc0_screen *screen = nvc0->screen;
+   unsigned vram_domain = NV_VRAM_DOMAIN(&screen->base);
+   unsigned count_total = 0;
+
+   /* The rest is copied straight from util_multi_draw
+    *
+    * XXX: Properly rewrite vbo handling in nvc0/nv50
+    *
+     */
+
+   unsigned drawid = drawid_offset;
+
+   /* dont wanna start trippin */
+   simple_mtx_lock(&nvc0->screen->state_lock);
+
+   /* NOTE: caller must ensure that (min_index + index_bias) is >= 0 */
+   if (info->index_bounds_valid) {
+      nvc0->vb_elt_first = info->min_index + (info->index_size ? draws->index_bias : 0);
+      nvc0->vb_elt_limit = info->max_index - info->min_index;
+   } else {
+      nvc0->vb_elt_first = 0;
+      nvc0->vb_elt_limit = ~0;
+   }
+   nvc0->instance_off = info->start_instance;
+   nvc0->instance_max = info->instance_count - 1;
+
+   /* Get total amount of draw counts to determine whether to push or upload vertices */
+   for (unsigned i = 0; i < num_draws; i++) {
+      count_total += draws[i].count;
+   }
+
+   /* For picking only a few vertices from a large user buffer, push is better,
+    * if index count is larger and we expect repeated vertices, suggest upload.
+    */
+   nvc0->vbo_push_hint =
+      (!indirect || indirect->count_from_stream_output) && info->index_size &&
+      (nvc0->vb_elt_limit >= (count_total * 2));
+
+   if (nvc0->dirty_3d & (NVC0_NEW_3D_ARRAYS | NVC0_NEW_3D_VERTEX))
+      nvc0->constant_vbos = nvc0->vertex->constant_vbos & nvc0->vbo_user;
+   /* Check whether we want to switch vertex-submission mode. */
+   if (nvc0->vbo_user && !(nvc0->dirty_3d & (NVC0_NEW_3D_ARRAYS | NVC0_NEW_3D_VERTEX))) {
+      if (nvc0->vbo_push_hint != !!nvc0->state.vbo_mode)
+         if (nvc0->state.vbo_mode != 3)
+            nvc0->dirty_3d |= NVC0_NEW_3D_ARRAYS;
+
+      if (!(nvc0->dirty_3d & NVC0_NEW_3D_ARRAYS) && nvc0->state.vbo_mode == 0) {
+         if (nvc0->vertex->shared_slots)
+            nvc0_update_user_vbufs_shared(nvc0);
+         else
+            nvc0_update_user_vbufs(nvc0);
+      }
+   }
+
+   if (info->mode == MESA_PRIM_PATCHES &&
+       nvc0->state.patch_vertices != nvc0->patch_vertices) {
+      nvc0->state.patch_vertices = nvc0->patch_vertices;
+      PUSH_SPACE(push, 1);
+      IMMED_NVC0(push, NVC0_3D(PATCH_VERTICES), nvc0->state.patch_vertices);
+   }
+
+   if (info->index_size && !info->has_user_indices) {
+      struct nv04_resource *buf = nv04_resource(info->index.resource);
+
+      assert(buf);
+      assert(nouveau_resource_mapped_by_gpu(&buf->base));
+
+      PUSH_SPACE(push, 6);
+      if (nvc0->screen->eng3d->oclass < TU102_3D_CLASS) {
+         BEGIN_NVC0(push, NVC0_3D(INDEX_ARRAY_START_HIGH), 5);
+         PUSH_DATAh(push, buf->address);
+         PUSH_DATA (push, buf->address);
+         PUSH_DATAh(push, buf->address + buf->base.width0 - 1);
+         PUSH_DATA (push, buf->address + buf->base.width0 - 1);
+         PUSH_DATA (push, info->index_size >> 1);
+      } else {
+         BEGIN_NVC0(push, NVC0_3D(INDEX_ARRAY_START_HIGH), 2);
+         PUSH_DATAh(push, buf->address);
+         PUSH_DATA (push, buf->address);
+         BEGIN_NVC0(push, SUBC_3D(TU102_3D_INDEX_ARRAY_LIMIT_HIGH), 2);
+         PUSH_DATAh(push, buf->address + buf->base.width0 - 1);
+         PUSH_DATA (push, buf->address + buf->base.width0 - 1);
+         BEGIN_NVC0(push, NVC0_3D(INDEX_FORMAT), 1);
+         PUSH_DATA (push, info->index_size >> 1);
+      }
+
+      BCTX_REFN(nvc0->bufctx_3d, 3D_IDX, buf, RD);
+   }
+
+   list_for_each_entry(struct nvc0_resident, resident, &nvc0->tex_head, list) {
+      nvc0_add_resident(nvc0->bufctx_3d, NVC0_BIND_3D_BINDLESS, resident->buf,
+                        resident->flags);
+   }
+
+   list_for_each_entry(struct nvc0_resident, resident, &nvc0->img_head, list) {
+      nvc0_add_resident(nvc0->bufctx_3d, NVC0_BIND_3D_BINDLESS, resident->buf,
+                        resident->flags);
+   }
+
+   BCTX_REFN_bo(nvc0->bufctx_3d, 3D_TEXT, vram_domain | NOUVEAU_BO_RD,
+                screen->text);
+
+   nvc0_state_validate_3d(nvc0, ~0);
+
+   for (unsigned i = 0; i < num_draws; i++) {
+      if (indirect || (draws[i].count && info->instance_count))
+         nvc0_draw_single_vbo(pipe, info, drawid, indirect, &draws[i]);
+      if (info->increment_draw_id)
+         drawid++;
+   }
+
    PUSH_KICK(push);
    simple_mtx_unlock(&nvc0->screen->state_lock);
 

@@ -20,10 +20,12 @@
  * OTHER DEALINGS IN THE SOFTWARE.
  */
 
+#include "nir/pipe_nir.h"
 #include "pipe/p_defines.h"
+#include "pipe/p_shader_tokens.h"
 
 #include "compiler/nir/nir.h"
-#include "tgsi/tgsi_ureg.h"
+#include "compiler/nir/nir_builder.h"
 #include "util/blob.h"
 
 #include "nvc0/nvc0_context.h"
@@ -184,14 +186,14 @@ nvc0_program_assign_varying_slots(struct nv50_ir_prog_info_out *info)
 {
    int ret;
 
-   if (info->type == PIPE_SHADER_VERTEX)
+   if (info->type == MESA_SHADER_VERTEX)
       ret = nvc0_vp_assign_input_slots(info);
    else
       ret = nvc0_sp_assign_input_slots(info);
    if (ret)
       return ret;
 
-   if (info->type == PIPE_SHADER_FRAGMENT)
+   if (info->type == MESA_SHADER_FRAGMENT)
       ret = nvc0_fp_assign_output_slots(info);
    else
       ret = nvc0_sp_assign_output_slots(info);
@@ -242,16 +244,16 @@ nvc0_vtgp_gen_header(struct nvc0_program *vp, struct nv50_ir_prog_info_out *info
 
    for (i = 0; i < info->numSysVals; ++i) {
       switch (info->sv[i].sn) {
-      case TGSI_SEMANTIC_PRIMID:
+      case SYSTEM_VALUE_PRIMITIVE_ID:
          vp->hdr[5] |= 1 << 24;
          break;
-      case TGSI_SEMANTIC_INSTANCEID:
+      case SYSTEM_VALUE_INSTANCE_ID:
          vp->hdr[10] |= 1 << 30;
          break;
-      case TGSI_SEMANTIC_VERTEXID:
+      case SYSTEM_VALUE_VERTEX_ID:
          vp->hdr[10] |= 1 << 31;
          break;
-      case TGSI_SEMANTIC_TESSCOORD:
+      case SYSTEM_VALUE_TESS_COORD:
          /* We don't have the mask, nor the slots populated. While this could
           * be achieved, the vast majority of the time if either of the coords
           * are read, then both will be read.
@@ -290,18 +292,18 @@ nvc0_vp_gen_header(struct nvc0_program *vp, struct nv50_ir_prog_info_out *info)
 static void
 nvc0_tp_get_tess_mode(struct nvc0_program *tp, struct nv50_ir_prog_info_out *info)
 {
-   if (info->prop.tp.outputPrim == PIPE_PRIM_MAX) {
+   if (info->prop.tp.outputPrim == MESA_PRIM_COUNT) {
       tp->tp.tess_mode = ~0;
       return;
    }
    switch (info->prop.tp.domain) {
-   case PIPE_PRIM_LINES:
+   case MESA_PRIM_LINES:
       tp->tp.tess_mode = NVC0_3D_TESS_MODE_PRIM_ISOLINES;
       break;
-   case PIPE_PRIM_TRIANGLES:
+   case MESA_PRIM_TRIANGLES:
       tp->tp.tess_mode = NVC0_3D_TESS_MODE_PRIM_TRIANGLES;
       break;
-   case PIPE_PRIM_QUADS:
+   case MESA_PRIM_QUADS:
       tp->tp.tess_mode = NVC0_3D_TESS_MODE_PRIM_QUADS;
       break;
    default:
@@ -312,16 +314,16 @@ nvc0_tp_get_tess_mode(struct nvc0_program *tp, struct nv50_ir_prog_info_out *inf
    /* It seems like lines want the "CW" bit to indicate they're connected, and
     * spit out errors in dmesg when the "CONNECTED" bit is set.
     */
-   if (info->prop.tp.outputPrim != PIPE_PRIM_POINTS) {
-      if (info->prop.tp.domain == PIPE_PRIM_LINES)
+   if (info->prop.tp.outputPrim != MESA_PRIM_POINTS) {
+      if (info->prop.tp.domain == MESA_PRIM_LINES)
          tp->tp.tess_mode |= NVC0_3D_TESS_MODE_CW;
       else
          tp->tp.tess_mode |= NVC0_3D_TESS_MODE_CONNECTED;
    }
 
    /* Winding only matters for triangles/quads, not lines. */
-   if (info->prop.tp.domain != PIPE_PRIM_LINES &&
-       info->prop.tp.outputPrim != PIPE_PRIM_POINTS &&
+   if (info->prop.tp.domain != MESA_PRIM_LINES &&
+       info->prop.tp.outputPrim != MESA_PRIM_POINTS &&
        info->prop.tp.winding > 0)
       tp->tp.tess_mode |= NVC0_3D_TESS_MODE_CW;
 
@@ -395,15 +397,15 @@ nvc0_gp_gen_header(struct nvc0_program *gp, struct nv50_ir_prog_info_out *info)
    gp->hdr[2] = MIN2(info->prop.gp.instanceCount, 32) << 24;
 
    switch (info->prop.gp.outputPrim) {
-   case PIPE_PRIM_POINTS:
+   case MESA_PRIM_POINTS:
       gp->hdr[3] = 0x01000000;
       gp->hdr[0] |= 0xf0000000;
       break;
-   case PIPE_PRIM_LINE_STRIP:
+   case MESA_PRIM_LINE_STRIP:
       gp->hdr[3] = 0x06000000;
       gp->hdr[0] |= 0x10000000;
       break;
-   case PIPE_PRIM_TRIANGLE_STRIP:
+   case MESA_PRIM_TRIANGLE_STRIP:
       gp->hdr[3] = 0x07000000;
       gp->hdr[0] |= 0x10000000;
       break;
@@ -553,7 +555,7 @@ nvc0_program_dump(struct nvc0_program *prog)
 {
    unsigned pos;
 
-   if (prog->type != PIPE_SHADER_COMPUTE) {
+   if (prog->type != MESA_SHADER_COMPUTE) {
       _debug_printf("dumping HDR for type %i\n", prog->type);
       for (pos = 0; pos < ARRAY_SIZE(prog->hdr); ++pos)
          _debug_printf("HDR[%02"PRIxPTR"] = 0x%08x\n",
@@ -590,27 +592,15 @@ nvc0_program_translate(struct nvc0_program *prog, uint16_t chipset,
    info->type = prog->type;
    info->target = chipset;
 
-   info->bin.sourceRep = prog->pipe.type;
-   switch (prog->pipe.type) {
-   case PIPE_SHADER_IR_TGSI:
-      info->bin.source = (void *)prog->pipe.tokens;
-      break;
-   case PIPE_SHADER_IR_NIR:
-      info->bin.source = (void *)nir_shader_clone(NULL, prog->pipe.ir.nir);
-      break;
-   default:
-      assert(!"unsupported IR!");
-      free(info);
-      return false;
-   }
+   info->bin.nir = nir_shader_clone(NULL, prog->nir);
 
 #ifndef NDEBUG
    info->target = debug_get_num_option("NV50_PROG_CHIPSET", chipset);
-   info->optLevel = debug_get_num_option("NV50_PROG_OPTIMIZE", 3);
+   info->optLevel = debug_get_num_option("NV50_PROG_OPTIMIZE", 4);
    info->dbgFlags = debug_get_num_option("NV50_PROG_DEBUG", 0);
    info->omitLineNum = debug_get_num_option("NV50_PROG_DEBUG_OMIT_LINENUM", 0);
 #else
-   info->optLevel = 3;
+   info->optLevel = 4;
 #endif
 
    info->bin.smemSize = prog->cp.smem_size;
@@ -628,7 +618,7 @@ nvc0_program_translate(struct nvc0_program *prog, uint16_t chipset,
       info->io.bindlessBase = NVC0_CB_AUX_BINDLESS_INFO(0);
    }
 
-   if (prog->type == PIPE_SHADER_COMPUTE) {
+   if (prog->type == MESA_SHADER_COMPUTE) {
       if (info->target >= NVISA_GK104_CHIPSET) {
          info->io.auxCBSlot = 7;
          info->io.msInfoCBSlot = 7;
@@ -686,9 +676,9 @@ nvc0_program_translate(struct nvc0_program *prog, uint16_t chipset,
    prog->relocs = info_out.bin.relocData;
    prog->fixups = info_out.bin.fixupData;
    if (info_out.target >= NVISA_GV100_CHIPSET)
-      prog->num_gprs = MIN2(info_out.bin.maxGPR + 5, 255); //XXX: why?
+      prog->num_gprs = MAX2(4, info_out.bin.maxGPR + 3);
    else
-      prog->num_gprs = MAX2(4, (info_out.bin.maxGPR + 1));
+      prog->num_gprs = MAX2(4, info_out.bin.maxGPR + 1);
    prog->cp.smem_size = info_out.bin.smemSize;
    prog->num_barriers = info_out.numBarriers;
 
@@ -700,22 +690,22 @@ nvc0_program_translate(struct nvc0_program *prog, uint16_t chipset,
    prog->vp.edgeflag = info_out.io.edgeFlagIn;
 
    switch (prog->type) {
-   case PIPE_SHADER_VERTEX:
+   case MESA_SHADER_VERTEX:
       ret = nvc0_vp_gen_header(prog, &info_out);
       break;
-   case PIPE_SHADER_TESS_CTRL:
+   case MESA_SHADER_TESS_CTRL:
       ret = nvc0_tcp_gen_header(prog, &info_out);
       break;
-   case PIPE_SHADER_TESS_EVAL:
+   case MESA_SHADER_TESS_EVAL:
       ret = nvc0_tep_gen_header(prog, &info_out);
       break;
-   case PIPE_SHADER_GEOMETRY:
+   case MESA_SHADER_GEOMETRY:
       ret = nvc0_gp_gen_header(prog, &info_out);
       break;
-   case PIPE_SHADER_FRAGMENT:
+   case MESA_SHADER_FRAGMENT:
       ret = nvc0_fp_gen_header(prog, &info_out);
       break;
-   case PIPE_SHADER_COMPUTE:
+   case MESA_SHADER_COMPUTE:
       break;
    default:
       ret = -1;
@@ -747,9 +737,9 @@ nvc0_program_translate(struct nvc0_program *prog, uint16_t chipset,
    if (info_out.io.fp64)
       prog->hdr[0] |= 1 << 27;
 
-   if (prog->pipe.stream_output.num_outputs)
+   if (prog->stream_output.num_outputs)
       prog->tfb = nvc0_program_create_tfb_state(&info_out,
-                                                &prog->pipe.stream_output);
+                                                &prog->stream_output);
 
    util_debug_message(debug, SHADER_INFO,
                       "type: %d, local: %d, shared: %d, gpr: %d, inst: %d, bytes: %d, cached: %zd",
@@ -763,8 +753,7 @@ nvc0_program_translate(struct nvc0_program *prog, uint16_t chipset,
 #endif
 
 out:
-   if (info->bin.sourceRep == PIPE_SHADER_IR_NIR)
-      ralloc_free((void *)info->bin.source);
+   ralloc_free((void *)info->bin.nir);
    FREE(info);
    return !ret;
 }
@@ -773,7 +762,7 @@ static inline int
 nvc0_program_alloc_code(struct nvc0_context *nvc0, struct nvc0_program *prog)
 {
    struct nvc0_screen *screen = nvc0->screen;
-   const bool is_cp = prog->type == PIPE_SHADER_COMPUTE;
+   const bool is_cp = prog->type == MESA_SHADER_COMPUTE;
    int ret;
    uint32_t size = prog->code_size;
 
@@ -825,7 +814,7 @@ static inline void
 nvc0_program_upload_code(struct nvc0_context *nvc0, struct nvc0_program *prog)
 {
    struct nvc0_screen *screen = nvc0->screen;
-   const bool is_cp = prog->type == PIPE_SHADER_COMPUTE;
+   const bool is_cp = prog->type == MESA_SHADER_COMPUTE;
    uint32_t code_pos = prog->code_base;
    uint32_t size_sph = 0;
 
@@ -873,7 +862,7 @@ bool
 nvc0_program_upload(struct nvc0_context *nvc0, struct nvc0_program *prog)
 {
    struct nvc0_screen *screen = nvc0->screen;
-   const bool is_cp = prog->type == PIPE_SHADER_COMPUTE;
+   const bool is_cp = prog->type == MESA_SHADER_COMPUTE;
    int ret;
    uint32_t size = prog->code_size;
 
@@ -934,7 +923,7 @@ nvc0_program_upload(struct nvc0_context *nvc0, struct nvc0_program *prog)
          }
          nvc0_program_upload_code(nvc0, progs[i]);
 
-         if (progs[i]->type == PIPE_SHADER_COMPUTE) {
+         if (progs[i]->type == MESA_SHADER_COMPUTE) {
             /* Caches have to be invalidated but the CP_START_ID will be
              * updated in the launch_grid functions. */
             BEGIN_NVC0(nvc0->base.pushbuf, NVC0_CP(FLUSH), 1);
@@ -948,7 +937,7 @@ nvc0_program_upload(struct nvc0_context *nvc0, struct nvc0_program *prog)
    nvc0_program_upload_code(nvc0, prog);
 
 #ifndef NDEBUG
-   if (debug_get_bool_option("NV50_PROG_DEBUG", false))
+   if (debug_get_num_option("NV50_PROG_DEBUG", 0))
       nvc0_program_dump(prog);
 #endif
 
@@ -988,8 +977,8 @@ nvc0_program_library_upload(struct nvc0_context *nvc0)
 void
 nvc0_program_destroy(struct nvc0_context *nvc0, struct nvc0_program *prog)
 {
-   const struct pipe_shader_state pipe = prog->pipe;
-   const ubyte type = prog->type;
+   struct nir_shader *nir = prog->nir;
+   const uint8_t type = prog->type;
 
    if (prog->mem) {
       if (nvc0)
@@ -1007,21 +996,23 @@ nvc0_program_destroy(struct nvc0_context *nvc0, struct nvc0_program *prog)
 
    memset(prog, 0, sizeof(*prog));
 
-   prog->pipe = pipe;
+   prog->nir = nir;
    prog->type = type;
 }
 
 void
 nvc0_program_init_tcp_empty(struct nvc0_context *nvc0)
 {
-   struct ureg_program *ureg;
+   const nir_shader_compiler_options *options =
+      nv50_ir_nir_shader_compiler_options(nvc0->screen->base.device->chipset,
+                                          MESA_SHADER_TESS_CTRL);
 
-   ureg = ureg_create(PIPE_SHADER_TESS_CTRL);
-   if (!ureg)
-      return;
+   struct nir_builder b =
+      nir_builder_init_simple_shader(MESA_SHADER_TESS_CTRL, options,
+                                     "tcp_empty");
+   b.shader->info.tess.tcs_vertices_out = 1;
 
-   ureg_property(ureg, TGSI_PROPERTY_TCS_VERTICES_OUT, 1);
-   ureg_END(ureg);
+   nir_validate_shader(b.shader, "in nvc0_program_init_tcp_empty");
 
-   nvc0->tcp_empty = ureg_create_shader_and_destroy(ureg, &nvc0->base.pipe);
+   nvc0->tcp_empty = pipe_shader_from_nir(&nvc0->base.pipe, b.shader);
 }

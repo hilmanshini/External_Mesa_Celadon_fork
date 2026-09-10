@@ -46,6 +46,9 @@ struct gl_sampler_object;
 enum pipe_texture_target
 gl_target_to_pipe(GLenum target);
 
+extern GLint
+st_from_pipe_compression_rate(uint32_t rate);
+
 unsigned
 st_get_blit_mask(GLenum srcFormat, GLenum dstFormat);
 
@@ -81,10 +84,10 @@ void st_CompressedTexSubImage(struct gl_context *ctx, GLuint dims,
                               struct gl_texture_image *texImage,
                               GLint x, GLint y, GLint z,
                               GLsizei w, GLsizei h, GLsizei d,
-                              GLenum format, GLsizei imageSize, const void *data);
+                              GLenum format, size_t imageSize, const void *data);
 void st_CompressedTexImage(struct gl_context *ctx, GLuint dims,
                            struct gl_texture_image *texImage,
-                           GLsizei imageSize, const void *data);
+                           size_t imageSize, const void *data);
 void st_GetTexSubImage(struct gl_context * ctx,
                        GLint xoffset, GLint yoffset, GLint zoffset,
                        GLsizei width, GLsizei height, GLint depth,
@@ -98,7 +101,8 @@ void st_CopyTexSubImage(struct gl_context *ctx, GLuint dims,
 GLboolean st_AllocTextureStorage(struct gl_context *ctx,
                                  struct gl_texture_object *texObj,
                                  GLsizei levels, GLsizei width,
-                                 GLsizei height, GLsizei depth);
+                                 GLsizei height, GLsizei depth,
+                                 const char *func);
 GLboolean st_TestProxyTexImage(struct gl_context *ctx, GLenum target,
                                GLuint numLevels, GLint level,
                                mesa_format format, GLuint numSamples,
@@ -116,7 +120,8 @@ GLboolean st_SetTextureStorageForMemoryObject(struct gl_context *ctx,
                                               struct gl_memory_object *memObj,
                                               GLsizei levels, GLsizei width,
                                               GLsizei height, GLsizei depth,
-                                              GLuint64 offset);
+                                              GLuint64 offset,
+                                              const char *func);
 
 GLboolean st_GetSparseTextureVirtualPageSize(struct gl_context *ctx,
                                              GLenum target, mesa_format format,

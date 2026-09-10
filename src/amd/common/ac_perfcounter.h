@@ -1,25 +1,7 @@
 /*
  * Copyright 2015 Advanced Micro Devices, Inc.
- * All Rights Reserved.
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef AC_PERFCOUNTER_H
@@ -27,7 +9,7 @@
 
 #include <stdbool.h>
 
-#include "sid.h"
+#include "amdgfxregs.h"
 
 #include "ac_gpu_info.h"
 
@@ -85,7 +67,7 @@ enum ac_pc_gpu_block {
    ATC     = 0x1A,
    ATCL2   = 0x1B,
    MCVML2  = 0x1C,
-   EA      = 0x1D,
+   GCEA    = 0x1D,
    RPB     = 0x1E,
    RMI     = 0x1F,
    UMCCH   = 0x20,
@@ -106,12 +88,30 @@ enum ac_pc_gpu_block {
    GEDIST  = 0x2E,
    GESE    = 0x2F,
    DF      = 0x30,
+   /* GFX11+ */
+   SQ_WGP  = 0x31,
+   PC      = 0x32,
+   /* GFX12+ */
+   GL1XA   = 0x33,
+   GL1XC   = 0x34,
+   WGS     = 0x35,
+   GCEA_CPWD = 0x36,
+   GCEA_SE   = 0x37,
+   RLC_USER = 0x38,
    NUM_GPU_BLOCK,
+};
+
+enum ac_pc_distribution {
+   AC_PC_UNAVAILABLE = 0,
+   AC_PC_GLOBAL_BLOCK,
+   AC_PC_PER_SHADER_ENGINE,
+   AC_PC_PER_SHADER_ARRAY,
 };
 
 struct ac_pc_block_base {
    enum ac_pc_gpu_block gpu_block;
    const char *name;
+   enum ac_pc_distribution distribution;
    unsigned num_counters;
    unsigned flags;
 
@@ -120,8 +120,15 @@ struct ac_pc_block_base {
    unsigned counter0_lo;
    unsigned *counters;
 
+   /* Config style */
+   unsigned cfg_cntl;
+   unsigned *cfg_regs;
+   unsigned cfg_counter_lo;
+
    /* SPM */
-   unsigned num_spm_counters;
+   unsigned num_16bit_spm_counters;
+   unsigned num_32bit_spm_counters;
+   unsigned num_spm_modules;
    unsigned num_spm_wires;
    unsigned *select1;
    unsigned spm_block_select;
@@ -135,6 +142,7 @@ struct ac_pc_block_gfxdescr {
 
 struct ac_pc_block {
    const struct ac_pc_block_gfxdescr *b;
+   unsigned num_scoped_instances;
    unsigned num_instances;
 
    unsigned num_groups;
@@ -184,7 +192,7 @@ ac_pc_block_has_per_instance_groups(const struct ac_perfcounters *pc,
                                     const struct ac_pc_block *block)
 {
    return block->b->b->flags & AC_PC_BLOCK_INSTANCE_GROUPS ||
-          (block->num_instances > 1 && pc->separate_instance);
+          (block->num_scoped_instances > 1 && pc->separate_instance);
 }
 
 struct ac_pc_block *ac_lookup_counter(const struct ac_perfcounters *pc,
@@ -205,5 +213,17 @@ bool ac_init_perfcounters(const struct radeon_info *info,
                           bool separate_instance,
                           struct ac_perfcounters *pc);
 void ac_destroy_perfcounters(struct ac_perfcounters *pc);
+
+const struct ac_pc_block_gfxdescr *
+ac_gfx12_get_perfcounters(uint32_t *num_blocks);
+
+const struct ac_pc_block_gfxdescr *
+ac_gfx11_get_perfcounters(uint32_t *num_blocks);
+
+const struct ac_pc_block_gfxdescr *
+ac_gfx103_get_perfcounters(uint32_t *num_blocks);
+
+const struct ac_pc_block_gfxdescr *
+ac_gfx10_get_perfcounters(uint32_t *num_blocks);
 
 #endif

@@ -171,7 +171,7 @@ translate_texture_wrapmode(unsigned wrap)
    case PIPE_TEX_WRAP_CLAMP_TO_EDGE:
       return TEXTURE_WRAPMODE_CLAMP_TO_EDGE;
    case PIPE_TEX_WRAP_CLAMP_TO_BORDER:
-      return TEXTURE_WRAPMODE_CLAMP_TO_EDGE; /* XXX */
+      return TEXTURE_WRAPMODE_CLAMP_TO_BORDER;
    case PIPE_TEX_WRAP_MIRROR_REPEAT:
       return TEXTURE_WRAPMODE_MIRRORED_REPEAT;
    case PIPE_TEX_WRAP_MIRROR_CLAMP:
@@ -216,12 +216,6 @@ translate_texture_filter(unsigned filter)
    }
 }
 
-static inline int
-translate_rb_src_dst_swap(enum pipe_format src, enum pipe_format dst)
-{
-   return translate_pe_format_rb_swap(src) ^ translate_pe_format_rb_swap(dst);
-}
-
 static inline uint32_t
 translate_depth_format(enum pipe_format fmt)
 {
@@ -233,6 +227,11 @@ translate_depth_format(enum pipe_format fmt)
       return VIVS_PE_DEPTH_CONFIG_DEPTH_FORMAT_D24S8;
    case PIPE_FORMAT_S8_UINT_Z24_UNORM:
       return VIVS_PE_DEPTH_CONFIG_DEPTH_FORMAT_D24S8;
+   case PIPE_FORMAT_S8_UINT:
+      return VIVS_PE_DEPTH_CONFIG_DEPTH_FORMAT_D24S8;
+   case PIPE_FORMAT_Z32_FLOAT:
+   case PIPE_FORMAT_Z32_FLOAT_S8X24_UINT:
+      return VIVS_PE_DEPTH_CONFIG_DEPTH_FORMAT_D24S8;
    default:
       return ETNA_NO_MATCH;
    }
@@ -242,6 +241,8 @@ translate_depth_format(enum pipe_format fmt)
 static inline uint32_t
 translate_ts_format(enum pipe_format fmt)
 {
+   fmt = translate_emulated_format_z32f(fmt);
+
    /* Note: Pipe format convention is LSB to MSB, VIVS is MSB to LSB */
    switch (fmt) {
    case PIPE_FORMAT_B4G4R4X4_UNORM:
@@ -277,8 +278,18 @@ translate_ts_format(enum pipe_format fmt)
 static inline uint32_t
 translate_rs_format(enum pipe_format fmt)
 {
+   fmt = util_format_linear(fmt);
+   fmt = translate_emulated_format_z32f(fmt);
+
    /* Note: Pipe format convention is LSB to MSB, VIVS is MSB to LSB */
    switch (fmt) {
+   case PIPE_FORMAT_Z16_UNORM:
+      return RS_FORMAT_D16;
+   case PIPE_FORMAT_X8Z24_UNORM:
+   case PIPE_FORMAT_S8_UINT_Z24_UNORM:
+      return RS_FORMAT_D32;
+   case PIPE_FORMAT_S8_UINT:
+      return RS_FORMAT_S8;
    case PIPE_FORMAT_B4G4R4X4_UNORM:
       return RS_FORMAT_X4R4G4B4;
    case PIPE_FORMAT_B4G4R4A4_UNORM:
@@ -290,11 +301,9 @@ translate_rs_format(enum pipe_format fmt)
    case PIPE_FORMAT_B5G6R5_UNORM:
       return RS_FORMAT_R5G6B5;
    case PIPE_FORMAT_B8G8R8X8_UNORM:
-   case PIPE_FORMAT_B8G8R8X8_SRGB:
    case PIPE_FORMAT_R8G8B8X8_UNORM:
       return RS_FORMAT_X8R8G8B8;
    case PIPE_FORMAT_B8G8R8A8_UNORM:
-   case PIPE_FORMAT_B8G8R8A8_SRGB:
    case PIPE_FORMAT_R8G8B8A8_UNORM:
       return RS_FORMAT_A8R8G8B8;
    default:
@@ -306,6 +315,9 @@ translate_rs_format(enum pipe_format fmt)
 static inline uint32_t
 translate_blt_format(enum pipe_format fmt)
 {
+   fmt = util_format_linear(fmt);
+   fmt = translate_emulated_format_z32f(fmt);
+
    /* Note: Pipe format convention is LSB to MSB, VIVS is MSB to LSB */
    switch (fmt) {
    case PIPE_FORMAT_B4G4R4X4_UNORM:
@@ -319,16 +331,30 @@ translate_blt_format(enum pipe_format fmt)
    case PIPE_FORMAT_B5G6R5_UNORM:
       return BLT_FORMAT_R5G6B5;
    case PIPE_FORMAT_B8G8R8X8_UNORM:
-   case PIPE_FORMAT_B8G8R8X8_SRGB:
    case PIPE_FORMAT_R8G8B8X8_UNORM:
       return BLT_FORMAT_X8R8G8B8;
    case PIPE_FORMAT_B8G8R8A8_UNORM:
-   case PIPE_FORMAT_B8G8R8A8_SRGB:
    case PIPE_FORMAT_R8G8B8A8_UNORM:
       return BLT_FORMAT_A8R8G8B8;
    case PIPE_FORMAT_R10G10B10A2_UNORM:
    case PIPE_FORMAT_R10G10B10X2_UNORM:
       return BLT_FORMAT_A2R10G10B10;
+   case PIPE_FORMAT_R8_UNORM:
+      return BLT_FORMAT_R8;
+   case PIPE_FORMAT_R8G8_UNORM:
+      return BLT_FORMAT_R8G8;
+   case PIPE_FORMAT_A8_UNORM:
+   case PIPE_FORMAT_S8_UINT:
+      return BLT_FORMAT_A8;
+   case PIPE_FORMAT_L8_UNORM:
+      return BLT_FORMAT_L8;
+   case PIPE_FORMAT_L8A8_UNORM:
+      return BLT_FORMAT_A8L8;
+   case PIPE_FORMAT_X8Z24_UNORM:
+   case PIPE_FORMAT_S8_UINT_Z24_UNORM:
+      return BLT_FORMAT_X24S8;
+   case PIPE_FORMAT_Z16_UNORM:
+      return BLT_FORMAT_D16;
    default:
       return ETNA_NO_MATCH;
    }
@@ -376,11 +402,10 @@ ts_format_to_drmfourcc(uint32_t comp_format)
 static inline uint32_t
 translate_vertex_format_normalize(enum pipe_format fmt)
 {
-   const struct util_format_description *desc = util_format_description(fmt);
-
-   /* assumes that normalization of channel 0 holds for all channels;
-    * this holds for all vertex formats that we support */
-   return desc->channel[0].normalized
+   /* Use SIGN_EXTEND for all normalized formats and pure signed integers. */
+   return (util_format_is_unorm(fmt) ||
+           util_format_is_snorm(fmt) ||
+           util_format_is_pure_sint(fmt))
              ? VIVS_FE_VERTEX_ELEMENT_CONFIG_NORMALIZE_SIGN_EXTEND
              : VIVS_FE_VERTEX_ELEMENT_CONFIG_NORMALIZE_OFF;
 }
@@ -427,21 +452,21 @@ static inline uint32_t
 translate_draw_mode(unsigned mode)
 {
    switch (mode) {
-   case PIPE_PRIM_POINTS:
+   case MESA_PRIM_POINTS:
       return PRIMITIVE_TYPE_POINTS;
-   case PIPE_PRIM_LINES:
+   case MESA_PRIM_LINES:
       return PRIMITIVE_TYPE_LINES;
-   case PIPE_PRIM_LINE_LOOP:
+   case MESA_PRIM_LINE_LOOP:
       return PRIMITIVE_TYPE_LINE_LOOP;
-   case PIPE_PRIM_LINE_STRIP:
+   case MESA_PRIM_LINE_STRIP:
       return PRIMITIVE_TYPE_LINE_STRIP;
-   case PIPE_PRIM_TRIANGLES:
+   case MESA_PRIM_TRIANGLES:
       return PRIMITIVE_TYPE_TRIANGLES;
-   case PIPE_PRIM_TRIANGLE_STRIP:
+   case MESA_PRIM_TRIANGLE_STRIP:
       return PRIMITIVE_TYPE_TRIANGLE_STRIP;
-   case PIPE_PRIM_TRIANGLE_FAN:
+   case MESA_PRIM_TRIANGLE_FAN:
       return PRIMITIVE_TYPE_TRIANGLE_FAN;
-   case PIPE_PRIM_QUADS:
+   case MESA_PRIM_QUADS:
       return PRIMITIVE_TYPE_QUADS;
    default:
       DBG("Unhandled draw mode primitive %i", mode);
@@ -453,6 +478,8 @@ static inline uint32_t
 translate_clear_depth_stencil(enum pipe_format format, double depth,
                               uint8_t stencil)
 {
+   format = translate_emulated_format_z32f(format);
+
    uint32_t clear_value = util_pack_z_stencil(format, depth, stencil);
 
    if (format == PIPE_FORMAT_Z16_UNORM)
@@ -536,7 +563,7 @@ translate_texture_compare(enum pipe_compare_func compare_func)
    case PIPE_FUNC_ALWAYS:
       return TEXTURE_COMPARE_FUNC_ALWAYS;
    default:
-      unreachable("Invalid compare func");
+      UNREACHABLE("Invalid compare func");
    }
 }
 

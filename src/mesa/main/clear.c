@@ -163,7 +163,7 @@ clear(struct gl_context *ctx, GLbitfield mask, bool no_error)
        * existed in OpenGL ES.
        */
       if ((mask & GL_ACCUM_BUFFER_BIT) != 0
-          && (ctx->API == API_OPENGL_CORE || _mesa_is_gles(ctx))) {
+          && (_mesa_is_desktop_gl_core(ctx) || _mesa_is_gles(ctx))) {
          _mesa_error( ctx, GL_INVALID_VALUE, "glClear(GL_ACCUM_BUFFER_BIT)");
          return;
       }
@@ -238,10 +238,6 @@ void GLAPIENTRY
 _mesa_Clear(GLbitfield mask)
 {
    GET_CURRENT_CONTEXT(ctx);
-
-   if (MESA_VERBOSE & VERBOSE_API)
-      _mesa_debug(ctx, "glClear 0x%x\n", mask);
-
    clear(ctx, mask, false);
 }
 

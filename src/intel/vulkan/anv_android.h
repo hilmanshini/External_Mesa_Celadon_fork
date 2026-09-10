@@ -24,34 +24,38 @@
 #ifndef ANV_ANDROID_H
 #define ANV_ANDROID_H
 
-#if defined(ANDROID) && ANDROID_API_LEVEL >= 26
+#include "util/detect_os.h"
+
+#if DETECT_OS_ANDROID && ANDROID_API_LEVEL >= 26
 #include <vndk/hardware_buffer.h>
 #endif
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_android.h>
 #include <vulkan/vk_android_native_buffer.h>
 
+struct anv_bo;
 struct anv_device_memory;
 struct anv_device;
 struct anv_image;
+struct u_gralloc_buffer_handle;
+enum isl_tiling;
+
+VkResult
+anv_android_import_from_handle(struct anv_device *device,
+                               const buffer_handle_t handle,
+                               uint64_t modifier,
+                               struct anv_bo **bo_out);
+VkResult
+anv_android_get_tiling(struct anv_device *device,
+                       struct u_gralloc_buffer_handle *gr_handle,
+                       enum isl_tiling *tiling_out);
 
 VkResult anv_image_init_from_gralloc(struct anv_device *device,
                                      struct anv_image *image,
                                      const VkImageCreateInfo *base_info,
                                      const VkNativeBufferANDROID *gralloc_info);
 
-VkResult anv_image_bind_from_gralloc(struct anv_device *device,
-                                     struct anv_image *image,
-                                     const VkNativeBufferANDROID *gralloc_info);
+VkResult anv_import_ahb_memory(VkDevice device_h,
+                               struct anv_device_memory *mem);
 
-uint64_t anv_ahw_usage_from_vk_usage(const VkImageCreateFlags vk_create,
-                                     const VkImageUsageFlags vk_usage);
-
-VkResult anv_import_ahw_memory(VkDevice device_h,
-                               struct anv_device_memory *mem,
-                               const VkImportAndroidHardwareBufferInfoANDROID *info);
-
-VkResult anv_create_ahw_memory(VkDevice device_h,
-                               struct anv_device_memory *mem,
-                               const VkMemoryAllocateInfo *pAllocateInfo);
 #endif /* ANV_ANDROID_H */

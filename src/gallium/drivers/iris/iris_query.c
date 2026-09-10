@@ -1,26 +1,7 @@
 /*
  * Copyright © 2017 Intel Corporation
+ * SPDX-License-Identifier: MIT
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
-
-/**
  * @file iris_query.c
  *
  * ============================= GENXML CODE =============================
@@ -173,10 +154,21 @@ write_value(struct iris_context *ice, struct iris_query *q, unsigned offset)
    struct iris_bo *bo = iris_resource_bo(q->query_state_ref.res);
 
    if (!iris_is_query_pipelined(q)) {
+      enum pipe_control_flags flags = PIPE_CONTROL_CS_STALL |
+                                      PIPE_CONTROL_STALL_AT_SCOREBOARD;
+      if (batch->name == IRIS_BATCH_COMPUTE) {
+         iris_emit_pipe_control_write(batch,
+                                      "query: write immediate for compute batches",
+                                      PIPE_CONTROL_WRITE_IMMEDIATE,
+                                      bo,
+                                      offset,
+                                      0ull);
+         flags = PIPE_CONTROL_FLUSH_ENABLE;
+      }
+
       iris_emit_pipe_control_flush(batch,
                                    "query: non-pipelined snapshot write",
-                                   PIPE_CONTROL_CS_STALL |
-                                   PIPE_CONTROL_STALL_AT_SCOREBOARD);
+                                   flags);
       q->stalled = true;
    }
 
@@ -271,7 +263,7 @@ static uint64_t
 iris_raw_timestamp_delta(uint64_t time0, uint64_t time1)
 {
    if (time0 > time1) {
-      return (1ULL << TIMESTAMP_BITS) + time1 - time0;
+      return (1ull << 36) + time1 - time0;
    } else {
       return time1 - time0;
    }
@@ -298,12 +290,10 @@ calculate_result_on_cpu(const struct intel_device_info *devinfo,
    case PIPE_QUERY_TIMESTAMP_DISJOINT:
       /* The timestamp is the single starting snapshot. */
       q->result = intel_device_info_timebase_scale(devinfo, q->map->start);
-      q->result &= (1ull << TIMESTAMP_BITS) - 1;
       break;
    case PIPE_QUERY_TIME_ELAPSED:
       q->result = iris_raw_timestamp_delta(q->map->start, q->map->end);
       q->result = intel_device_info_timebase_scale(devinfo, q->result);
-      q->result &= (1ull << TIMESTAMP_BITS) - 1;
       break;
    case PIPE_QUERY_SO_OVERFLOW_PREDICATE:
       q->result = stream_overflowed((void *) q->map, q->index);
@@ -509,8 +499,9 @@ iris_begin_query(struct pipe_context *ctx, struct pipe_query *query)
    else
       size = sizeof(struct iris_query_snapshots);
 
-   u_upload_alloc(ice->query_buffer_uploader, 0,
-                  size, size, &q->query_state_ref.offset,
+   u_upload_alloc_ref(ice->query_buffer_uploader, 0,
+                  size, util_next_power_of_two(size),
+                  &q->query_state_ref.offset,
                   &q->query_state_ref.res, &ptr);
 
    if (!iris_resource_bo(q->query_state_ref.res))
@@ -527,6 +518,11 @@ iris_begin_query(struct pipe_context *ctx, struct pipe_query *query)
    if (q->type == PIPE_QUERY_PRIMITIVES_GENERATED && q->index == 0) {
       ice->state.prims_generated_query_active = true;
       ice->state.dirty |= IRIS_DIRTY_STREAMOUT | IRIS_DIRTY_CLIP;
+   }
+
+   if (q->type == PIPE_QUERY_OCCLUSION_COUNTER && q->index == 0) {
+      ice->state.occlusion_query_active = true;
+      ice->state.dirty |= IRIS_DIRTY_STREAMOUT;
    }
 
    if (q->type == PIPE_QUERY_SO_OVERFLOW_PREDICATE ||
@@ -566,6 +562,11 @@ iris_end_query(struct pipe_context *ctx, struct pipe_query *query)
    if (q->type == PIPE_QUERY_PRIMITIVES_GENERATED && q->index == 0) {
       ice->state.prims_generated_query_active = false;
       ice->state.dirty |= IRIS_DIRTY_STREAMOUT | IRIS_DIRTY_CLIP;
+   }
+
+   if (q->type == PIPE_QUERY_OCCLUSION_COUNTER && q->index == 0) {
+      ice->state.occlusion_query_active = false;
+      ice->state.dirty |= IRIS_DIRTY_STREAMOUT;
    }
 
    if (q->type == PIPE_QUERY_SO_OVERFLOW_PREDICATE ||
@@ -621,7 +622,7 @@ iris_get_query_result(struct pipe_context *ctx,
       struct pipe_screen *screen = ctx->screen;
 
       result->b = screen->fence_finish(screen, ctx, q->fence,
-                                       wait ? PIPE_TIMEOUT_INFINITE : 0);
+                                       wait ? OS_TIMEOUT_INFINITE : 0);
       return result->b;
    }
 
@@ -708,6 +709,8 @@ iris_get_query_result_resource(struct pipe_context *ctx,
 
    struct mi_builder b;
    mi_builder_init(&b, batch->screen->devinfo, batch);
+   const uint32_t mocs = iris_mocs(query_bo, &batch->screen->isl_dev, 0);
+   mi_builder_set_mocs(&b, mocs);
 
    iris_batch_sync_region_start(batch);
 
@@ -779,6 +782,8 @@ set_predicate_for_result(struct iris_context *ice,
 
    struct mi_builder b;
    mi_builder_init(&b, batch->screen->devinfo, batch);
+   const uint32_t mocs = iris_mocs(bo, &batch->screen->isl_dev, 0);
+   mi_builder_set_mocs(&b, mocs);
 
    struct mi_value result;
 
@@ -813,7 +818,13 @@ set_predicate_for_result(struct iris_context *ice,
    mi_store(&b, mi_reg32(MI_PREDICATE_RESULT), result);
    mi_store(&b, query_mem64(q, offsetof(struct iris_query_snapshots,
                                         predicate_result)), result);
-   ice->state.compute_predicate = bo;
+
+   ice->state.compute_predicate = (struct iris_address) {
+      .bo = bo,
+      .offset = q->query_state_ref.offset +
+          offsetof(struct iris_query_snapshots, predicate_result),
+      .access = IRIS_DOMAIN_OTHER_WRITE
+   };
 
    iris_batch_sync_region_end(batch);
 }
@@ -828,7 +839,7 @@ iris_render_condition(struct pipe_context *ctx,
    struct iris_query *q = (void *) query;
 
    /* The old condition isn't relevant; we'll update it if necessary */
-   ice->state.compute_predicate = NULL;
+   ice->state.compute_predicate.bo = NULL;
 
    if (!q) {
       ice->state.predicate = IRIS_PREDICATE_STATE_RENDER;

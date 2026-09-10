@@ -2,31 +2,17 @@
  * Copyright 2008 Corbin Simpson <MostAwesomeDude@gmail.com>
  * Copyright 2010 Marek Olšák <maraeo@gmail.com>
  * Copyright 2018 Advanced Micro Devices, Inc.
- * All Rights Reserved.
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ * SPDX-License-Identifier: MIT
+ */
 
 #ifndef RADEON_WINSYS_H
 #define RADEON_WINSYS_H
 
 /* The public winsys interface header for the radeon driver. */
+
+/* Force flush. */
+#define RADEON_FLUSH_FORCE                    (1u << 28)
 
 /* Skip command submission. Same as RADEON_NOOP=1. */
 #define RADEON_FLUSH_NOOP                     (1u << 29)
@@ -41,9 +27,12 @@
 #define RADEON_FLUSH_ASYNC_START_NEXT_GFX_IB_NOW                                                   \
    (PIPE_FLUSH_ASYNC | RADEON_FLUSH_START_NEXT_GFX_IB_NOW)
 
+#include "amd/common/ac_cmdbuf_base.h"
 #include "amd/common/ac_gpu_info.h"
 #include "amd/common/ac_surface.h"
 #include "pipebuffer/pb_buffer.h"
+
+struct ac_pm4_state;
 
 /* Tiling flags. */
 enum radeon_bo_layout
@@ -62,6 +51,7 @@ enum radeon_bo_domain
   RADEON_DOMAIN_VRAM_GTT = RADEON_DOMAIN_VRAM | RADEON_DOMAIN_GTT,
   RADEON_DOMAIN_GDS = 8,
   RADEON_DOMAIN_OA = 16,
+  RADEON_DOMAIN_DOORBELL = 32,
 };
 
 enum radeon_bo_flag
@@ -71,7 +61,6 @@ enum radeon_bo_flag
   RADEON_FLAG_NO_SUBALLOC = (1 << 2),
   RADEON_FLAG_SPARSE = (1 << 3),
   RADEON_FLAG_NO_INTERPROCESS_SHARING = (1 << 4),
-  RADEON_FLAG_READ_ONLY = (1 << 5),
   RADEON_FLAG_32BIT = (1 << 6),
   RADEON_FLAG_ENCRYPTED = (1 << 7),
   RADEON_FLAG_GL2_BYPASS = (1 << 8), /* only gfx9 and newer */
@@ -80,7 +69,10 @@ enum radeon_bo_flag
     * This guarantees that this buffer will never be moved to GTT.
     */
   RADEON_FLAG_DISCARDABLE = (1 << 10),
-  RADEON_FLAG_MALL_NOALLOC = (1 << 11), /* don't cache in the infinity cache */
+  RADEON_FLAG_WINSYS_SLAB_BACKING = (1 << 11), /* only used by the winsys */
+  RADEON_FLAG_GFX12_ALLOW_DCC = (1 << 12), /* allow DCC, VRAM only */
+  RADEON_FLAG_CLEAR_VRAM = (1 << 13),
+  RADEON_FLAG_NO_VMA = (1 << 14), /* frontend assigns addresses */
 };
 
 static inline void
@@ -95,8 +87,6 @@ si_res_print_flags(enum radeon_bo_flag flags) {
       fprintf(stderr, "SPARSE ");
    if (flags & RADEON_FLAG_NO_INTERPROCESS_SHARING)
       fprintf(stderr, "NO_INTERPROCESS_SHARING ");
-   if (flags & RADEON_FLAG_READ_ONLY)
-      fprintf(stderr, "READ_ONLY ");
    if (flags & RADEON_FLAG_32BIT)
       fprintf(stderr, "32BIT ");
    if (flags & RADEON_FLAG_ENCRYPTED)
@@ -107,8 +97,8 @@ si_res_print_flags(enum radeon_bo_flag flags) {
       fprintf(stderr, "DRIVER_INTERNAL ");
    if (flags & RADEON_FLAG_DISCARDABLE)
       fprintf(stderr, "DISCARDABLE ");
-   if (flags & RADEON_FLAG_MALL_NOALLOC)
-      fprintf(stderr, "MALL_NOALLOC ");
+   if (flags & RADEON_FLAG_GFX12_ALLOW_DCC)
+      fprintf(stderr, "GFX12_ALLOW_DCC ");
 }
 
 enum radeon_map_flags
@@ -148,14 +138,6 @@ enum radeon_value_id
    RADEON_CURRENT_SCLK,
    RADEON_CURRENT_MCLK,
    RADEON_CS_THREAD_TIME,
-};
-
-enum radeon_ctx_priority
-{
-   RADEON_CTX_PRIORITY_LOW = 0,
-   RADEON_CTX_PRIORITY_MEDIUM,
-   RADEON_CTX_PRIORITY_HIGH,
-   RADEON_CTX_PRIORITY_REALTIME,
 };
 
 enum radeon_ctx_pstate
@@ -205,43 +187,45 @@ enum radeon_ctx_pstate
 #define RADEON_PRIO_SHADER_RINGS (1 << 22)
 #define RADEON_PRIO_SCRATCH_BUFFER (1 << 23)
 
-#define RADEON_ALL_PRIORITIES (RADEON_USAGE_READ - 1)
+#define RADEON_ALL_PRIORITIES    BITFIELD_MASK(24)
+
+/* When passed to radeon_winsys::buffer_wait, it disallows using the DRM ioctl for timeout=0
+ * queries because it can take ~1 ms to return, reducing FPS.
+ */
+#define RADEON_USAGE_DISALLOW_SLOW_REPLY (1 << 26)
 
 /* Upper bits of priorities are used by usage flags. */
-#define RADEON_USAGE_READ (1 << 28)
-#define RADEON_USAGE_WRITE (1 << 29)
+#define RADEON_USAGE_READ (1 << 27)
+#define RADEON_USAGE_WRITE (1 << 28)
 #define RADEON_USAGE_READWRITE (RADEON_USAGE_READ | RADEON_USAGE_WRITE)
 
 /* The winsys ensures that the CS submission will be scheduled after
  * previously flushed CSs referencing this BO in a conflicting way.
  */
-#define RADEON_USAGE_SYNCHRONIZED (1 << 30)
+#define RADEON_USAGE_SYNCHRONIZED (1 << 29)
 
 /* When used, an implicit sync is done to make sure a compute shader
  * will read the written values from a previous draw.
  */
-#define RADEON_USAGE_NEEDS_IMPLICIT_SYNC (1u << 31)
+#define RADEON_USAGE_CB_NEEDS_IMPLICIT_SYNC (1u << 30)
+#define RADEON_USAGE_DB_NEEDS_IMPLICIT_SYNC (1u << 31)
 
 struct winsys_handle;
 struct radeon_winsys_ctx;
 
-struct radeon_cmdbuf_chunk {
-   unsigned cdw;    /* Number of used dwords. */
-   unsigned max_dw; /* Maximum number of dwords. */
-   uint32_t *buf;   /* The base pointer of the chunk. */
-};
-
 struct radeon_cmdbuf {
-   struct radeon_cmdbuf_chunk current;
-   struct radeon_cmdbuf_chunk *prev;
+   struct ac_cmdbuf current;
+   struct ac_cmdbuf *prev;
    uint16_t num_prev; /* Number of previous chunks. */
    uint16_t max_prev; /* Space in array pointed to by prev. */
    unsigned prev_dw;  /* Total number of dwords in previous chunks. */
 
+   struct radeon_cmdbuf *gang_cs;
+   bool gang;
+
    /* Memory usage of the buffer list. These are always 0 for preamble IBs. */
    uint32_t used_vram_kb;
    uint32_t used_gart_kb;
-   uint64_t gpu_address;
 
    /* Private winsys data. */
    void *priv;
@@ -316,14 +300,17 @@ struct radeon_winsys {
    void (*destroy)(struct radeon_winsys *ws);
 
    /**
+    * Get FD for winsys if winsys provides one
+    */
+   int (*get_fd)(struct radeon_winsys *ws);
+
+   /**
     * Query an info structure from winsys.
     *
     * \param ws        The winsys this function is called from.
     * \param info      Return structure
     */
-   void (*query_info)(struct radeon_winsys *ws, struct radeon_info *info,
-                      bool enable_smart_access_memory,
-                      bool disable_smart_access_memory);
+   void (*query_info)(struct radeon_winsys *ws, struct radeon_info *info);
 
    /**
     * A hint for the winsys that it should pin its execution threads to
@@ -331,7 +318,7 @@ struct radeon_winsys {
     * L3 caches. This is needed for good multithreading performance on
     * AMD Zen CPUs.
     */
-   void (*pin_threads_to_L3_cache)(struct radeon_winsys *ws, unsigned cache);
+   void (*pin_threads_to_L3_cache)(struct radeon_winsys *ws, unsigned cpu);
 
    /**************************************************************************
     * Buffer management. Buffer attributes are mostly fixed over its lifetime.
@@ -351,8 +338,14 @@ struct radeon_winsys {
     * \param domain    A bitmask of the RADEON_DOMAIN_* flags.
     * \return          The created buffer object.
     */
-   struct pb_buffer *(*buffer_create)(struct radeon_winsys *ws, uint64_t size, unsigned alignment,
-                                      enum radeon_bo_domain domain, enum radeon_bo_flag flags);
+   struct pb_buffer_lean *(*buffer_create)(struct radeon_winsys *ws, uint64_t size,
+                                           unsigned alignment, enum radeon_bo_domain domain,
+                                           enum radeon_bo_flag flags);
+
+   /**
+    * Don't use directly. Use radeon_bo_reference.
+    */
+   void (*buffer_destroy)(struct radeon_winsys *ws, struct pb_buffer_lean *buf);
 
    /**
     * Map the entire data store of a buffer object into the client's address
@@ -366,25 +359,32 @@ struct radeon_winsys {
     * \param usage     A bitmask of the PIPE_MAP_* and RADEON_MAP_* flags.
     * \return          The pointer at the beginning of the buffer.
     */
-   void *(*buffer_map)(struct radeon_winsys *ws, struct pb_buffer *buf,
-                       struct radeon_cmdbuf *cs, enum pipe_map_flags usage);
+   void *(*buffer_map)(struct radeon_winsys *ws, struct pb_buffer_lean *buf,
+                       struct radeon_cmdbuf *rcs, enum pipe_map_flags usage);
 
    /**
     * Unmap a buffer object from the client's address space.
     *
     * \param buf       A winsys buffer object to unmap.
     */
-   void (*buffer_unmap)(struct radeon_winsys *ws, struct pb_buffer *buf);
+   void (*buffer_unmap)(struct radeon_winsys *ws, struct pb_buffer_lean *buf);
 
    /**
     * Wait for the buffer and return true if the buffer is not used
     * by the device.
     *
     * The timeout of 0 will only return the status.
-    * The timeout of PIPE_TIMEOUT_INFINITE will always wait until the buffer
+    * The timeout of OS_TIMEOUT_INFINITE will always wait until the buffer
     * is idle.
+    *
+    * usage is RADEON_USAGE_READ/WRITE.
+    *
+    * Checking whether a buffer is idle using timeout=0 can take 1 ms even if the DRM ioctl is
+    * used, reducing our FPS to several hundreds. To prevent that, set
+    * RADEON_USAGE_DISALLOW_SLOW_REPLY, which will return busy. This is a workaround for kernel
+    * inefficiency.
     */
-   bool (*buffer_wait)(struct radeon_winsys *ws, struct pb_buffer *buf,
+   bool (*buffer_wait)(struct radeon_winsys *ws, struct pb_buffer_lean *buf,
                        uint64_t timeout, unsigned usage);
 
    /**
@@ -394,7 +394,7 @@ struct radeon_winsys {
     * \param buf       A winsys buffer object to get the flags from.
     * \param md        Metadata
     */
-   void (*buffer_get_metadata)(struct radeon_winsys *ws, struct pb_buffer *buf,
+   void (*buffer_get_metadata)(struct radeon_winsys *ws, struct pb_buffer_lean *buf,
                                struct radeon_bo_metadata *md, struct radeon_surf *surf);
 
    /**
@@ -404,8 +404,8 @@ struct radeon_winsys {
     * \param buf       A winsys buffer object to set the flags for.
     * \param md        Metadata
     */
-   void (*buffer_set_metadata)(struct radeon_winsys *ws, struct pb_buffer *buf,
-                               struct radeon_bo_metadata *md, struct radeon_surf *surf);
+   void (*buffer_set_metadata)(struct radeon_winsys *ws, struct pb_buffer_lean *buf,
+                               struct radeon_bo_metadata *md, const struct radeon_surf *surf);
 
    /**
     * Get a winsys buffer from a winsys handle. The internal structure
@@ -415,8 +415,10 @@ struct radeon_winsys {
     * \param whandle   A winsys handle pointer as was received from a state
     *                  tracker.
     */
-   struct pb_buffer *(*buffer_from_handle)(struct radeon_winsys *ws, struct winsys_handle *whandle,
-                                           unsigned vm_alignment, bool is_prime_linear_buffer);
+   struct pb_buffer_lean *(*buffer_from_handle)(struct radeon_winsys *ws,
+                                                struct winsys_handle *whandle,
+                                                unsigned vm_alignment,
+                                                bool is_prime_linear_buffer);
 
    /**
     * Get a winsys buffer from a user pointer. The resulting buffer can't
@@ -426,7 +428,8 @@ struct radeon_winsys {
     * \param pointer   User pointer to turn into a buffer object.
     * \param Size      Size in bytes for the new buffer.
     */
-   struct pb_buffer *(*buffer_from_ptr)(struct radeon_winsys *ws, void *pointer, uint64_t size, enum radeon_bo_flag flags);
+   struct pb_buffer_lean *(*buffer_from_ptr)(struct radeon_winsys *ws, void *pointer,
+                                             uint64_t size, enum radeon_bo_flag flags);
 
    /**
     * Whether the buffer was created from a user pointer.
@@ -434,10 +437,13 @@ struct radeon_winsys {
     * \param buf       A winsys buffer object
     * \return          whether \p buf was created via buffer_from_ptr
     */
-   bool (*buffer_is_user_ptr)(struct pb_buffer *buf);
+   bool (*buffer_is_user_ptr)(struct pb_buffer_lean *buf);
 
    /** Whether the buffer was suballocated. */
-   bool (*buffer_is_suballocated)(struct pb_buffer *buf);
+   bool (*buffer_is_suballocated)(struct pb_buffer_lean *buf);
+
+   /** Whether the buffer has AMDGPU_GEM_CREATE_VM_ALWAYS_VALID. */
+   bool (*buffer_has_vm_always_valid)(struct pb_buffer_lean *buf);
 
    /**
     * Get a winsys handle from a winsys buffer. The internal structure
@@ -448,7 +454,7 @@ struct radeon_winsys {
     * \param whandle   A winsys handle pointer.
     * \return          true on success.
     */
-   bool (*buffer_get_handle)(struct radeon_winsys *ws, struct pb_buffer *buf,
+   bool (*buffer_get_handle)(struct radeon_winsys *ws, struct pb_buffer_lean *buf,
                              struct winsys_handle *whandle);
 
    /**
@@ -461,7 +467,7 @@ struct radeon_winsys {
     *
     * \return false on out of memory or other failure, true on success.
     */
-   bool (*buffer_commit)(struct radeon_winsys *ws, struct pb_buffer *buf,
+   bool (*buffer_commit)(struct radeon_winsys *ws, struct pb_buffer_lean *buf,
                          uint64_t offset, uint64_t size, bool commit);
 
    /**
@@ -473,7 +479,7 @@ struct radeon_winsys {
     * \param buf       A winsys buffer object
     * \return          virtual address
     */
-   uint64_t (*buffer_get_virtual_address)(struct pb_buffer *buf);
+   uint64_t (*buffer_get_virtual_address)(struct pb_buffer_lean *buf);
 
    /**
     * Return the offset of this buffer relative to the relocation base.
@@ -485,12 +491,12 @@ struct radeon_winsys {
     * \param buf      A winsys buffer object
     * \return         the offset for relocations
     */
-   unsigned (*buffer_get_reloc_offset)(struct pb_buffer *buf);
+   unsigned (*buffer_get_reloc_offset)(struct pb_buffer_lean *buf);
 
    /**
     * Query the initial placement of the buffer from the kernel driver.
     */
-   enum radeon_bo_domain (*buffer_get_initial_domain)(struct pb_buffer *buf);
+   enum radeon_bo_domain (*buffer_get_initial_domain)(struct pb_buffer_lean *buf);
 
    /**
     * Query the flags used for creation of this buffer.
@@ -498,7 +504,34 @@ struct radeon_winsys {
     * Note that for imported buffer this may be lossy since not all flags
     * are passed 1:1.
     */
-   enum radeon_bo_flag (*buffer_get_flags)(struct pb_buffer *buf);
+   enum radeon_bo_flag (*buffer_get_flags)(struct pb_buffer_lean *buf);
+
+   /**
+    * Query the valid virtual memory range of the device for use with alloc_vm.
+    */
+   void (*va_range)(struct radeon_winsys *rws, uint64_t *start, uint64_t *end);
+
+   /**
+    * Reserves a virtual memory range for use through buffer_assign_vma. Start and size must be
+    * within the limits of va_range otherwise this function will return NULL.
+    */
+   struct pipe_vm_allocation *(*alloc_vm)(struct radeon_winsys *rws, uint64_t start, uint64_t size);
+
+   /**
+    * Frees a virtual memory range reservation.
+    */
+   void (*free_vm)(struct radeon_winsys *rws, struct pipe_vm_allocation *alloc);
+
+   /**
+    * Assigns the given address to buf.
+    *
+    * \param buf        The buffer the address gets assigned to. This buffer must have been created
+    *                   with the RADEON_FLAG_NO_VMA flag.
+    * \param address    Address to be assigned. Needs to be within a range previously reserved
+    *                   through alloc_vm or 0.
+    */
+   bool (*buffer_assign_vma)(struct radeon_winsys *rws, struct pb_buffer_lean *buf,
+                             uint64_t address);
 
    /**************************************************************************
     * Command submission.
@@ -510,9 +543,10 @@ struct radeon_winsys {
    /**
     * Create a command submission context.
     * Various command streams can be submitted to the same context.
+    *
+    * \param flags  PIPE_CONTEXT_* flags (priority, allow losing the context)
     */
-   struct radeon_winsys_ctx *(*ctx_create)(struct radeon_winsys *ws,
-                                           enum radeon_ctx_priority priority);
+   struct radeon_winsys_ctx *(*ctx_create)(struct radeon_winsys *ws, unsigned flags);
 
    /**
     * Destroy a context.
@@ -520,11 +554,18 @@ struct radeon_winsys {
    void (*ctx_destroy)(struct radeon_winsys_ctx *ctx);
 
    /**
+    * Set a reset status for the context due to a software failure, such as an allocation failure
+    * or a skipped draw.
+    */
+   void (*ctx_set_sw_reset_status)(struct radeon_winsys_ctx *ctx, enum pipe_reset_status status,
+                                   const char *format, ...);
+
+   /**
     * Query a GPU reset status.
     */
    enum pipe_reset_status (*ctx_query_reset_status)(struct radeon_winsys_ctx *ctx,
                                                     bool full_reset_only,
-                                                    bool *needs_reset);
+                                                    bool *needs_reset, bool *reset_completed);
 
    /**
     * Create a command stream.
@@ -537,24 +578,11 @@ struct radeon_winsys {
     *
     * \return true on success
     */
-   bool (*cs_create)(struct radeon_cmdbuf *cs,
+   bool (*cs_create)(struct radeon_cmdbuf *rcs,
                      struct radeon_winsys_ctx *ctx, enum amd_ip_type amd_ip_type,
                      void (*flush)(void *ctx, unsigned flags,
                                    struct pipe_fence_handle **fence),
-                     void *flush_ctx, bool allow_context_lost);
-
-   /**
-    * Set or change the CS preamble, which is a sequence of packets that is executed before
-    * the command buffer. If the winsys doesn't support preambles, the packets are inserted
-    * into the command buffer.
-    *
-    * \param cs               Command stream
-    * \param preamble_ib      Preamble IB for the context.
-    * \param preamble_num_dw  Number of dwords in the preamble IB.
-    * \param preamble_changed Whether the preamble changed or is the same as the last one.
-    */
-   void (*cs_set_preamble)(struct radeon_cmdbuf *cs, const uint32_t *preamble_ib,
-                           unsigned preamble_num_dw, bool preamble_changed);
+                     void *flush_ctx);
 
    /**
     * Set up and enable mid command buffer preemption for the command stream.
@@ -563,7 +591,7 @@ struct radeon_winsys {
     * \param preamble_ib      Non-preemptible preamble IB for the context.
     * \param preamble_num_dw  Number of dwords in the preamble IB.
     */
-   bool (*cs_setup_preemption)(struct radeon_cmdbuf *cs, const uint32_t *preamble_ib,
+   bool (*cs_setup_preemption)(struct radeon_cmdbuf *rcs, const uint32_t *preamble_ib,
                                unsigned preamble_num_dw);
 
    /**
@@ -571,7 +599,7 @@ struct radeon_winsys {
     *
     * \param cs        A command stream to destroy.
     */
-   void (*cs_destroy)(struct radeon_cmdbuf *cs);
+   void (*cs_destroy)(struct radeon_cmdbuf *rcs);
 
    /**
     * Add a buffer. Each buffer used by a CS must be added using this function.
@@ -582,7 +610,7 @@ struct radeon_winsys {
     * \param domain  Bitmask of the RADEON_DOMAIN_* flags.
     * \return Buffer index.
     */
-   unsigned (*cs_add_buffer)(struct radeon_cmdbuf *cs, struct pb_buffer *buf,
+   unsigned (*cs_add_buffer)(struct radeon_cmdbuf *rcs, struct pb_buffer_lean *buf,
                              unsigned usage, enum radeon_bo_domain domain);
 
    /**
@@ -595,7 +623,7 @@ struct radeon_winsys {
     * \param buf       Buffer
     * \return          The buffer index, or -1 if the buffer has not been added.
     */
-   int (*cs_lookup_buffer)(struct radeon_cmdbuf *cs, struct pb_buffer *buf);
+   int (*cs_lookup_buffer)(struct radeon_cmdbuf *rcs, struct pb_buffer_lean *buf);
 
    /**
     * Return true if there is enough memory in VRAM and GTT for the buffers
@@ -605,7 +633,7 @@ struct radeon_winsys {
     *
     * \param cs        A command stream to validate.
     */
-   bool (*cs_validate)(struct radeon_cmdbuf *cs);
+   bool (*cs_validate)(struct radeon_cmdbuf *rcs);
 
    /**
     * Check whether the given number of dwords is available in the IB.
@@ -615,7 +643,7 @@ struct radeon_winsys {
     * \param dw        Number of CS dwords requested by the caller.
     * \return true if there is enough space
     */
-   bool (*cs_check_space)(struct radeon_cmdbuf *cs, unsigned dw);
+   bool (*cs_check_space)(struct radeon_cmdbuf *rcs, unsigned dw);
 
    /**
     * Return the buffer list.
@@ -627,7 +655,7 @@ struct radeon_winsys {
     * \param list  Returned buffer list. Set to NULL to query the count only.
     * \return      The buffer count.
     */
-   unsigned (*cs_get_buffer_list)(struct radeon_cmdbuf *cs, struct radeon_bo_list_item *list);
+   unsigned (*cs_get_buffer_list)(struct radeon_cmdbuf *rcs, struct radeon_bo_list_item *list);
 
    /**
     * Flush a command stream.
@@ -639,7 +667,7 @@ struct radeon_winsys {
     * \return Negative POSIX error code or 0 for success.
     *         Asynchronous submissions never return an error.
     */
-   int (*cs_flush)(struct radeon_cmdbuf *cs, unsigned flags, struct pipe_fence_handle **fence);
+   int (*cs_flush)(struct radeon_cmdbuf *rcs, unsigned flags, struct pipe_fence_handle **fence);
 
    /**
     * Create a fence before the CS is flushed.
@@ -648,7 +676,7 @@ struct radeon_winsys {
     * The fence must not be used for anything except \ref cs_add_fence_dependency
     * before the flush.
     */
-   struct pipe_fence_handle *(*cs_get_next_fence)(struct radeon_cmdbuf *cs);
+   struct pipe_fence_handle *(*cs_get_next_fence)(struct radeon_cmdbuf *rcs);
 
    /**
     * Return true if a buffer is referenced by a command stream.
@@ -656,7 +684,7 @@ struct radeon_winsys {
     * \param cs        A command stream.
     * \param buf       A winsys buffer.
     */
-   bool (*cs_is_buffer_referenced)(struct radeon_cmdbuf *cs, struct pb_buffer *buf,
+   bool (*cs_is_buffer_referenced)(struct radeon_cmdbuf *rcs, struct pb_buffer_lean *buf,
                                    unsigned usage);
 
    /**
@@ -666,32 +694,36 @@ struct radeon_winsys {
     * \param fid       Feature ID, one of RADEON_FID_*
     * \param enable    Whether to enable or disable the feature.
     */
-   bool (*cs_request_feature)(struct radeon_cmdbuf *cs, enum radeon_feature_id fid, bool enable);
+   bool (*cs_request_feature)(struct radeon_cmdbuf *rcs, enum radeon_feature_id fid, bool enable);
    /**
     * Make sure all asynchronous flush of the cs have completed
     *
     * \param cs        A command stream.
     */
-   void (*cs_sync_flush)(struct radeon_cmdbuf *cs);
+   void (*cs_sync_flush)(struct radeon_cmdbuf *rcs);
 
    /**
     * Add a fence dependency to the CS, so that the CS will wait for
     * the fence before execution.
-    *
-    * \param dependency_flags  Bitmask of RADEON_DEPENDENCY_*
     */
-   void (*cs_add_fence_dependency)(struct radeon_cmdbuf *cs, struct pipe_fence_handle *fence,
-                                   unsigned dependency_flags);
+   void (*cs_add_fence_dependency)(struct radeon_cmdbuf *rcs, struct pipe_fence_handle *fence,
+                                   uint64_t timeline_point);
 
    /**
     * Signal a syncobj when the CS finishes execution.
     */
-   void (*cs_add_syncobj_signal)(struct radeon_cmdbuf *cs, struct pipe_fence_handle *fence);
+   void (*cs_add_syncobj_signal)(struct radeon_cmdbuf *rcs, struct pipe_fence_handle *fence,
+                                 uint64_t timeline_point);
+
+   /**
+    * Returns the amd_ip_type type of a CS.
+    */
+   enum amd_ip_type (*cs_get_ip_type)(struct radeon_cmdbuf *rcs);
 
    /**
     * Wait for the fence and return true if the fence has been signalled.
     * The timeout of 0 will only return the status.
-    * The timeout of PIPE_TIMEOUT_INFINITE will always wait until the fence
+    * The timeout of OS_TIMEOUT_INFINITE will always wait until the fence
     * is signalled.
     */
    bool (*fence_wait)(struct radeon_winsys *ws, struct pipe_fence_handle *fence, uint64_t timeout);
@@ -699,7 +731,10 @@ struct radeon_winsys {
    /**
     * Reference counting for fences.
     */
-   void (*fence_reference)(struct pipe_fence_handle **dst, struct pipe_fence_handle *src);
+   void (*fence_reference)(struct radeon_winsys *ws, struct pipe_fence_handle **dst,
+                           struct pipe_fence_handle *src);
+
+   struct pipe_fence_handle *(*semaphore_create)(struct radeon_winsys *ws);
 
    /**
     * Create a new fence object corresponding to the given syncobj fd.
@@ -725,14 +760,23 @@ struct radeon_winsys {
     * Initialize surface
     *
     * \param ws        The winsys this function is called from.
+    * \param info      radeon_info from the driver
     * \param tex       Input texture description
     * \param flags     Bitmask of RADEON_SURF_* flags
     * \param bpe       Bytes per pixel, it can be different for Z buffers.
     * \param mode      Preferred tile mode. (linear, 1D, or 2D)
     * \param surf      Output structure
     */
-   int (*surface_init)(struct radeon_winsys *ws, const struct pipe_resource *tex, uint64_t flags,
+   int (*surface_init)(struct radeon_winsys *ws, const struct radeon_info *info,
+                       const struct pipe_resource *tex, uint64_t flags,
                        unsigned bpe, enum radeon_surf_mode mode, struct radeon_surf *surf);
+
+   uint64_t (*surface_offset_from_coord)(struct radeon_winsys *rws,
+                                         const struct radeon_info *info,
+                                         const struct radeon_surf *surf,
+                                         const struct pipe_resource *tex,
+                                         unsigned level, unsigned x, unsigned y,
+                                         unsigned layer);
 
    uint64_t (*query_value)(struct radeon_winsys *ws, enum radeon_value_id value);
 
@@ -742,29 +786,57 @@ struct radeon_winsys {
    /**
     * Secure context
     */
-   bool (*cs_is_secure)(struct radeon_cmdbuf *cs);
+   bool (*cs_is_secure)(struct radeon_cmdbuf *rcs);
 
    /**
     * Stable pstate
     */
-   bool (*cs_set_pstate)(struct radeon_cmdbuf *cs, enum radeon_ctx_pstate state);
+   bool (*cs_set_pstate)(struct radeon_cmdbuf *rcs, enum radeon_ctx_pstate state);
+
+   /**
+    * Submits the preamble IB, which is the IB that initializes immutable registers and states.
+    * This must be the first IB for that queue type, and it affects all current and future contexts.
+    * If the IB has been submitted already, the call is ignored.
+    */
+   bool (*userq_submit_cs_preamble_ib_once)(struct radeon_cmdbuf *rcs, struct ac_pm4_state *pm4);
+
+   /**
+    * Create and add a compute command stream to existing rcs command stream which will
+    * be combined as a gang submission to GPU.
+    */
+   bool (*cs_create_compute_gang)(struct radeon_cmdbuf *rcs);
+
+   /**
+    * In case of gfx11.5, register shadowing enabling and shadow regs addresses has to be done
+    * using CONTEXT_CONTROL and LOAD_* packets. Also these packets have to be sumitted for every
+    * job.
+    */
+   bool (*userq_f32_init_reg_shadowing)(struct radeon_cmdbuf *rcs, struct ac_pm4_state *pm4);
+
+   /**
+    * Gets the shadow regs va address from the given radeon_cmdbuf. The radeon_cmdbuf will be gfx_cs
+    * and it is per context. In case of userqueue, The shadow regs va address is per userqueue. The
+    * gfx_cs will be for tied to a userqueue and the shadow regs va address returned will be for
+    * that userqueue.
+    */
+   uint64_t (*userq_f32_get_shadow_regs_va)(struct radeon_cmdbuf *rcs);
 };
 
-static inline bool radeon_emitted(struct radeon_cmdbuf *cs, unsigned num_dw)
+static inline bool radeon_emitted(struct radeon_cmdbuf *rcs, unsigned num_dw)
 {
-   return cs && (cs->prev_dw + cs->current.cdw > num_dw);
+   return rcs && (rcs->prev_dw + rcs->current.cdw > num_dw);
 }
 
-static inline void radeon_emit(struct radeon_cmdbuf *cs, uint32_t value)
+static inline void radeon_emit(struct radeon_cmdbuf *rcs, uint32_t value)
 {
-   cs->current.buf[cs->current.cdw++] = value;
+   rcs->current.buf[rcs->current.cdw++] = value;
 }
 
-static inline void radeon_emit_array(struct radeon_cmdbuf *cs, const uint32_t *values,
+static inline void radeon_emit_array(struct radeon_cmdbuf *rcs, const uint32_t *values,
                                      unsigned count)
 {
-   memcpy(cs->current.buf + cs->current.cdw, values, count * 4);
-   cs->current.cdw += count;
+   memcpy(rcs->current.buf + rcs->current.cdw, values, count * 4);
+   rcs->current.cdw += count;
 }
 
 static inline bool radeon_uses_secure_bos(struct radeon_winsys* ws)
@@ -773,24 +845,44 @@ static inline bool radeon_uses_secure_bos(struct radeon_winsys* ws)
 }
 
 static inline void
-radeon_bo_reference(struct radeon_winsys *rws, struct pb_buffer **dst, struct pb_buffer *src)
+radeon_bo_reference(struct radeon_winsys *rws, struct pb_buffer_lean **dst,
+                    struct pb_buffer_lean *src)
 {
-   pb_reference_with_winsys(rws, dst, src);
+   struct pb_buffer_lean *old = *dst;
+
+   if (pipe_reference(&(*dst)->reference, &src->reference))
+      rws->buffer_destroy(rws, old);
+   *dst = src;
+}
+
+/* Same as radeon_bo_reference, but ignore the value in *dst. */
+static inline void
+radeon_bo_set_reference(struct pb_buffer_lean **dst, struct pb_buffer_lean *src)
+{
+   *dst = src;
+   pipe_reference(NULL, &src->reference); /* only increment refcount */
+}
+
+/* Unreference dst, but don't assign anything. */
+static inline void
+radeon_bo_drop_reference(struct radeon_winsys *rws, struct pb_buffer_lean *dst)
+{
+   if (pipe_reference(&dst->reference, NULL)) /* only decrement refcount */
+      rws->buffer_destroy(rws, dst);
 }
 
 /* The following bits describe the heaps managed by slab allocators (pb_slab) and
  * the allocation cache (pb_cache).
  */
 #define RADEON_HEAP_BIT_VRAM           (1 << 0) /* if false, it's GTT */
-#define RADEON_HEAP_BIT_READ_ONLY      (1 << 1) /* both VRAM and GTT */
+#define RADEON_HEAP_BIT_GL2_BYPASS     (1 << 1) /* both VRAM and GTT */
 #define RADEON_HEAP_BIT_32BIT          (1 << 2) /* both VRAM and GTT */
 #define RADEON_HEAP_BIT_ENCRYPTED      (1 << 3) /* both VRAM and GTT */
 
 #define RADEON_HEAP_BIT_NO_CPU_ACCESS  (1 << 4) /* VRAM only */
-#define RADEON_HEAP_BIT_MALL_NOALLOC   (1 << 5) /* VRAM only */
+#define RADEON_HEAP_BIT_GFX12_ALLOW_DCC (1 << 5) /* VRAM only */
 
 #define RADEON_HEAP_BIT_WC             (1 << 4) /* GTT only, VRAM implies this to be true */
-#define RADEON_HEAP_BIT_GL2_BYPASS     (1 << 5) /* GTT only */
 
 /* The number of all possible heap descriptions using the bits above. */
 #define RADEON_NUM_HEAPS               (1 << 6)
@@ -811,8 +903,8 @@ static inline unsigned radeon_flags_from_heap(int heap)
 
    unsigned flags = RADEON_FLAG_NO_INTERPROCESS_SHARING;
 
-   if (heap & RADEON_HEAP_BIT_READ_ONLY)
-      flags |= RADEON_FLAG_READ_ONLY;
+   if (heap & RADEON_HEAP_BIT_GL2_BYPASS)
+      flags |= RADEON_FLAG_GL2_BYPASS;
    if (heap & RADEON_HEAP_BIT_32BIT)
       flags |= RADEON_FLAG_32BIT;
    if (heap & RADEON_HEAP_BIT_ENCRYPTED)
@@ -822,14 +914,12 @@ static inline unsigned radeon_flags_from_heap(int heap)
       flags |= RADEON_FLAG_GTT_WC;
       if (heap & RADEON_HEAP_BIT_NO_CPU_ACCESS)
          flags |= RADEON_FLAG_NO_CPU_ACCESS;
-      if (heap & RADEON_HEAP_BIT_MALL_NOALLOC)
-         flags |= RADEON_FLAG_MALL_NOALLOC;
+      if (heap & RADEON_HEAP_BIT_GFX12_ALLOW_DCC)
+         flags |= RADEON_FLAG_GFX12_ALLOW_DCC;
    } else {
       /* GTT only */
       if (heap & RADEON_HEAP_BIT_WC)
          flags |= RADEON_FLAG_GTT_WC;
-      if (heap & RADEON_HEAP_BIT_GL2_BYPASS)
-         flags |= RADEON_FLAG_GL2_BYPASS;
    }
 
    return flags;
@@ -845,23 +935,26 @@ static void radeon_canonicalize_bo_flags(enum radeon_bo_domain *_domain,
    unsigned flags = *_flags;
 
    /* Only set 1 domain, e.g. ignore GTT if VRAM is set. */
-   if (domain)
-      domain = BITFIELD_BIT(ffs(domain) - 1);
-   else
+   if (domain == RADEON_DOMAIN_VRAM_GTT)
       domain = RADEON_DOMAIN_VRAM;
+   else
+      assert(util_bitcount(domain) == 1);
 
    switch (domain) {
    case RADEON_DOMAIN_VRAM:
       flags |= RADEON_FLAG_GTT_WC;
-      flags &= ~RADEON_FLAG_GL2_BYPASS;
       break;
    case RADEON_DOMAIN_GTT:
       flags &= ~RADEON_FLAG_NO_CPU_ACCESS;
-      flags &= ~RADEON_FLAG_MALL_NOALLOC;
+      flags &= ~RADEON_FLAG_GFX12_ALLOW_DCC;
       break;
    case RADEON_DOMAIN_GDS:
    case RADEON_DOMAIN_OA:
       flags |= RADEON_FLAG_NO_SUBALLOC | RADEON_FLAG_NO_CPU_ACCESS;
+      flags &= ~RADEON_FLAG_SPARSE;
+      break;
+   case RADEON_DOMAIN_DOORBELL:
+      flags |= RADEON_FLAG_NO_SUBALLOC;
       flags &= ~RADEON_FLAG_SPARSE;
       break;
    }
@@ -886,13 +979,13 @@ static inline int radeon_get_heap_index(enum radeon_bo_domain domain, enum radeo
    /* These are unsupported flags. */
    /* RADEON_FLAG_DRIVER_INTERNAL is ignored. It doesn't affect allocators. */
    if (flags & (RADEON_FLAG_NO_SUBALLOC | RADEON_FLAG_SPARSE |
-                RADEON_FLAG_DISCARDABLE))
+                RADEON_FLAG_DISCARDABLE | RADEON_FLAG_CLEAR_VRAM))
       return -1;
 
    int heap = 0;
 
-   if (flags & RADEON_FLAG_READ_ONLY)
-      heap |= RADEON_HEAP_BIT_READ_ONLY;
+   if (flags & RADEON_FLAG_GL2_BYPASS)
+      heap |= RADEON_HEAP_BIT_GL2_BYPASS;
    if (flags & RADEON_FLAG_32BIT)
       heap |= RADEON_HEAP_BIT_32BIT;
    if (flags & RADEON_FLAG_ENCRYPTED)
@@ -903,18 +996,14 @@ static inline int radeon_get_heap_index(enum radeon_bo_domain domain, enum radeo
       heap |= RADEON_HEAP_BIT_VRAM;
       if (flags & RADEON_FLAG_NO_CPU_ACCESS)
          heap |= RADEON_HEAP_BIT_NO_CPU_ACCESS;
-      if (flags & RADEON_FLAG_MALL_NOALLOC)
-         heap |= RADEON_HEAP_BIT_MALL_NOALLOC;
+      if (flags & RADEON_FLAG_GFX12_ALLOW_DCC)
+         heap |= RADEON_HEAP_BIT_GFX12_ALLOW_DCC;
       /* RADEON_FLAG_WC is ignored and implied to be true for VRAM */
-      /* RADEON_FLAG_GL2_BYPASS is ignored and implied to be false for VRAM */
    } else if (domain == RADEON_DOMAIN_GTT) {
       /* GTT is implied by RADEON_HEAP_BIT_VRAM not being set. */
       if (flags & RADEON_FLAG_GTT_WC)
          heap |= RADEON_HEAP_BIT_WC;
-      if (flags & RADEON_FLAG_GL2_BYPASS)
-         heap |= RADEON_HEAP_BIT_GL2_BYPASS;
       /* RADEON_FLAG_NO_CPU_ACCESS is ignored and implied to be false for GTT */
-      /* RADEON_FLAG_MALL_NOALLOC is ignored and implied to be false for GTT */
    } else {
       return -1; /*  */
    }
@@ -929,7 +1018,7 @@ typedef struct pipe_screen *(*radeon_screen_create_t)(struct radeon_winsys *,
 /* These functions create the radeon_winsys instance for the corresponding kernel driver. */
 struct radeon_winsys *
 amdgpu_winsys_create(int fd, const struct pipe_screen_config *config,
-		     radeon_screen_create_t screen_create);
+		     radeon_screen_create_t screen_create, bool is_virtio);
 struct radeon_winsys *
 radeon_drm_winsys_create(int fd, const struct pipe_screen_config *config,
 			 radeon_screen_create_t screen_create);

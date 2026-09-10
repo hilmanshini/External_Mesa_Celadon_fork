@@ -24,13 +24,9 @@
 #ifndef DZN_PHYSICAL_DEVICE_ENUM_H
 #define DZN_PHYSICAL_DEVICE_ENUM_H
 
-#include <vulkan/vulkan.h>
+#include <vulkan/vulkan_core.h>
 
-#include <unknwn.h>
-
-#ifndef _WIN32
 #include <wsl/winadapter.h>
-#endif
 
 #include <stdbool.h>
 
@@ -38,7 +34,7 @@
 extern "C" {
 #endif
 
-struct dzn_instance;
+struct vk_instance;
 
 struct dzn_physical_device_desc {
    uint32_t vendor_id;
@@ -53,14 +49,26 @@ struct dzn_physical_device_desc {
    char description[128];
 };
 
-VkResult
-dzn_enumerate_physical_devices_dxgi(struct dzn_instance *instance);
+struct d3d12_memory_info {
+   uint64_t usage_local;
+   uint64_t budget_local;
+   uint64_t usage_nonlocal;
+   uint64_t budget_nonlocal;
+   uint64_t usage;    // local + nonlocal
+   uint64_t budget;   // local + nonlocal
+};
 
 VkResult
-dzn_enumerate_physical_devices_dxcore(struct dzn_instance *instance);
+dzn_enumerate_physical_devices_dxgi(struct vk_instance *instance);
 
 VkResult
-dzn_instance_add_physical_device(struct dzn_instance *instance,
+dzn_enumerate_physical_devices_dxcore(struct vk_instance *instance);
+
+void
+dzn_query_memory_info(IUnknown* unk, struct d3d12_memory_info* memory_info);
+
+VkResult
+dzn_instance_add_physical_device(struct vk_instance *instance,
                                  IUnknown *adapter,
                                  const struct dzn_physical_device_desc *desc);
 

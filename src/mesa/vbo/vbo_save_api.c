@@ -110,7 +110,7 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "main/macros.h"
 #include "main/draw_validate.h"
 #include "main/api_arrayelt.h"
-#include "main/dispatch.h"
+#include "dispatch.h"
 #include "main/state.h"
 #include "main/varray.h"
 #include "util/bitscan.h"
@@ -389,7 +389,8 @@ update_vao(struct gl_context *ctx,
    assert((vao_enabled & ~(*vao)->VertexAttribBufferMask) == 0);
 
    /* Finalize and freeze the VAO */
-   _mesa_set_vao_immutable(ctx, *vao);
+   _mesa_update_vao_derived_arrays(ctx, *vao, true);
+   (*vao)->SharedAndImmutable = true;
 }
 
 static void wrap_filled_vertex(struct gl_context *ctx);
@@ -598,7 +599,7 @@ compile_vertex_list(struct gl_context *ctx)
    node->cold->max_index = end - 1;
 
    /* converting primitive types may result in many more indices */
-   bool all_prims_supported = (ctx->Const.DriverSupportedPrimMask & BITFIELD_MASK(PIPE_PRIM_MAX)) == BITFIELD_MASK(PIPE_PRIM_MAX);
+   bool all_prims_supported = (ctx->Const.DriverSupportedPrimMask & BITFIELD_MASK(MESA_PRIM_COUNT)) == BITFIELD_MASK(MESA_PRIM_COUNT);
    int max_index_count = total_vert_count * (all_prims_supported ? 2 : 3);
    uint32_t* indices = (uint32_t*) malloc(max_index_count * sizeof(uint32_t));
    void *tmp_indices = all_prims_supported ? NULL : malloc(max_index_count * sizeof(uint32_t));
@@ -625,6 +626,9 @@ compile_vertex_list(struct gl_context *ctx)
       GLubyte mode = original_prims[i].mode;
       bool converted_prim = false;
       unsigned index_size;
+      bool outputting_quads = !!(ctx->Const.DriverSupportedPrimMask &
+                                 (BITFIELD_MASK(MESA_PRIM_QUADS) | BITFIELD_MASK(MESA_PRIM_QUAD_STRIP)));
+      unsigned verts_per_primitive = outputting_quads ? 4 : 3;
 
       int vertex_count = original_prims[i].count;
       if (!vertex_count) {
@@ -632,8 +636,8 @@ compile_vertex_list(struct gl_context *ctx)
       }
 
       /* Increase indices storage if the original estimation was too small. */
-      if (idx + 3 * vertex_count > max_index_count) {
-         max_index_count = max_index_count + 3 * vertex_count;
+      if (idx + verts_per_primitive * vertex_count > max_index_count) {
+         max_index_count = max_index_count + verts_per_primitive * vertex_count;
          indices = (uint32_t*) realloc(indices, max_index_count * sizeof(uint32_t));
          tmp_indices = all_prims_supported ? NULL : realloc(tmp_indices, max_index_count * sizeof(uint32_t));
       }
@@ -645,7 +649,7 @@ compile_vertex_list(struct gl_context *ctx)
       if (!(ctx->Const.DriverSupportedPrimMask & BITFIELD_BIT(mode))) {
          unsigned new_count;
          u_generate_func trans_func;
-         enum pipe_prim_type pmode = (enum pipe_prim_type)mode;
+         enum mesa_prim pmode = (enum mesa_prim)mode;
          u_index_generator(ctx->Const.DriverSupportedPrimMask,
                            pmode, original_prims[i].start, vertex_count,
                            PV_LAST, PV_LAST,
@@ -847,6 +851,7 @@ compile_vertex_list(struct gl_context *ctx)
                            node->cold->ib.obj);
    save->current_bo_bytes_used += total_vert_count * save->vertex_size * sizeof(fi_type);
    node->cold->bo_bytes_used = save->current_bo_bytes_used;
+   ctx->ListState.Current.NeedsFlush = true;
 
   if (vertex_to_index) {
       _mesa_hash_table_destroy(vertex_to_index, _free_entry);
@@ -950,16 +955,16 @@ end:
       _mesa_reference_vao(ctx, &node->cold->VAO[vpm], save->VAO[vpm]);
    }
 
-   /* Prepare for DrawGalliumVertexState */
-   if (node->num_draws && ctx->Driver.DrawGalliumVertexState) {
+   /* Prepare for draw_vertex_state. */
+   if (node->num_draws && ctx->Const.HasDrawVertexState) {
       for (unsigned i = 0; i < VP_MODE_MAX; i++) {
          uint32_t enabled_attribs = _vbo_get_vao_filter(i) &
                                     node->cold->VAO[i]->_EnabledWithMapMode;
 
          node->state[i] =
-            ctx->Driver.CreateGalliumVertexState(ctx, node->cold->VAO[i],
-                                                 node->cold->ib.obj,
-                                                 enabled_attribs);
+            st_create_gallium_vertex_state(ctx, node->cold->VAO[i],
+                                           node->cold->ib.obj,
+                                           enabled_attribs);
          node->private_refcount[i] = 0;
          node->enabled_attribs[i] = enabled_attribs;
       }
@@ -1104,7 +1109,7 @@ copy_from_current(struct gl_context *ctx)
          save->attrptr[i][0] = save->current[i][0];
          break;
       case 0:
-         unreachable("Unexpected vertex attribute size");
+         UNREACHABLE("Unexpected vertex attribute size");
       }
    }
 }
@@ -1321,24 +1326,24 @@ do {                                                            \
                                                                 \
    if (save->active_sz[A] != N) {                               \
       bool had_dangling_ref = save->dangling_attr_ref;          \
-      fi_type *dest = save->vertex_store->buffer_in_ram;        \
       if (fixup_vertex(ctx, A, N * sz, T) &&                    \
           !had_dangling_ref && save->dangling_attr_ref &&       \
           A != VBO_ATTRIB_POS) {                                \
+         fi_type *dest = save->vertex_store->buffer_in_ram;     \
          /* Copy the new attr values to the already copied      \
           * vertices.                                           \
           */                                                    \
-         for (int i = 0; i < save->copied.nr; i++) {            \
+         for (int nr = 0; nr < save->copied.nr; nr++) {         \
             GLbitfield64 enabled = save->enabled;               \
             while (enabled) {                                   \
-               const int j = u_bit_scan64(&enabled);            \
-               if (j == A) {                                    \
+               const int enabled_bit = u_bit_scan64(&enabled);  \
+               if (enabled_bit == A) {                          \
                   if (N>0) ((C*) dest)[0] = V0;                 \
                   if (N>1) ((C*) dest)[1] = V1;                 \
                   if (N>2) ((C*) dest)[2] = V2;                 \
                   if (N>3) ((C*) dest)[3] = V3;                 \
                }                                                \
-               dest += save->attrsz[j];                         \
+               dest += save->attrsz[enabled_bit];               \
             }                                                   \
          }                                                      \
          save->dangling_attr_ref = false;                       \
@@ -1358,8 +1363,8 @@ do {                                                            \
       fi_type *buffer_ptr = save->vertex_store->buffer_in_ram + \
                             save->vertex_store->used;           \
                                                                 \
-      for (int i = 0; i < save->vertex_size; i++)               \
-        buffer_ptr[i] = save->vertex[i];                        \
+      for (int vi = 0; vi < save->vertex_size; vi++)            \
+        buffer_ptr[vi] = save->vertex[vi];                      \
                                                                 \
       save->vertex_store->used += save->vertex_size;            \
       unsigned used_next = (save->vertex_store->used +          \
@@ -1481,7 +1486,7 @@ _save_EvalCoord1f(GLfloat u)
 {
    GET_CURRENT_CONTEXT(ctx);
    dlist_fallback(ctx);
-   CALL_EvalCoord1f(ctx->Save, (u));
+   CALL_EvalCoord1f(ctx->Dispatch.Save, (u));
 }
 
 static void GLAPIENTRY
@@ -1489,7 +1494,7 @@ _save_EvalCoord1fv(const GLfloat * v)
 {
    GET_CURRENT_CONTEXT(ctx);
    dlist_fallback(ctx);
-   CALL_EvalCoord1fv(ctx->Save, (v));
+   CALL_EvalCoord1fv(ctx->Dispatch.Save, (v));
 }
 
 static void GLAPIENTRY
@@ -1497,7 +1502,7 @@ _save_EvalCoord2f(GLfloat u, GLfloat v)
 {
    GET_CURRENT_CONTEXT(ctx);
    dlist_fallback(ctx);
-   CALL_EvalCoord2f(ctx->Save, (u, v));
+   CALL_EvalCoord2f(ctx->Dispatch.Save, (u, v));
 }
 
 static void GLAPIENTRY
@@ -1505,7 +1510,7 @@ _save_EvalCoord2fv(const GLfloat * v)
 {
    GET_CURRENT_CONTEXT(ctx);
    dlist_fallback(ctx);
-   CALL_EvalCoord2fv(ctx->Save, (v));
+   CALL_EvalCoord2fv(ctx->Dispatch.Save, (v));
 }
 
 static void GLAPIENTRY
@@ -1513,7 +1518,7 @@ _save_EvalPoint1(GLint i)
 {
    GET_CURRENT_CONTEXT(ctx);
    dlist_fallback(ctx);
-   CALL_EvalPoint1(ctx->Save, (i));
+   CALL_EvalPoint1(ctx->Dispatch.Save, (i));
 }
 
 static void GLAPIENTRY
@@ -1521,7 +1526,7 @@ _save_EvalPoint2(GLint i, GLint j)
 {
    GET_CURRENT_CONTEXT(ctx);
    dlist_fallback(ctx);
-   CALL_EvalPoint2(ctx->Save, (i, j));
+   CALL_EvalPoint2(ctx->Dispatch.Save, (i, j));
 }
 
 static void GLAPIENTRY
@@ -1529,7 +1534,7 @@ _save_CallList(GLuint l)
 {
    GET_CURRENT_CONTEXT(ctx);
    dlist_fallback(ctx);
-   CALL_CallList(ctx->Save, (l));
+   CALL_CallList(ctx->Dispatch.Save, (l));
 }
 
 static void GLAPIENTRY
@@ -1537,7 +1542,7 @@ _save_CallLists(GLsizei n, GLenum type, const GLvoid * v)
 {
    GET_CURRENT_CONTEXT(ctx);
    dlist_fallback(ctx);
-   CALL_CallLists(ctx->Save, (n, type, v));
+   CALL_CallLists(ctx->Dispatch.Save, (n, type, v));
 }
 
 
@@ -1624,7 +1629,7 @@ _save_PrimitiveRestartNV(void)
       bool no_current_update = save->no_current_update;
 
       /* restart primitive */
-      CALL_End(ctx->CurrentServerDispatch, ());
+      CALL_End(ctx->Dispatch.Current, ());
       vbo_save_NotifyBegin(ctx, curPrim, no_current_update);
    }
 }
@@ -1634,7 +1639,7 @@ void GLAPIENTRY
 save_Rectf(GLfloat x1, GLfloat y1, GLfloat x2, GLfloat y2)
 {
    GET_CURRENT_CONTEXT(ctx);
-   struct _glapi_table *dispatch = ctx->CurrentServerDispatch;
+   struct _glapi_table *dispatch = ctx->Dispatch.Current;
 
    vbo_save_NotifyBegin(ctx, GL_QUADS, false);
    CALL_Vertex2f(dispatch, (x1, y1));
@@ -1712,7 +1717,7 @@ save_DrawArrays(GLenum mode, GLint start, GLsizei count)
 
    for (i = 0; i < count; i++)
       _mesa_array_element(ctx, start + i);
-   CALL_End(ctx->CurrentServerDispatch, ());
+   CALL_End(ctx->Dispatch.Current, ());
 
    _mesa_vao_unmap_arrays(ctx, vao);
 }
@@ -1771,7 +1776,7 @@ array_element(struct gl_context *ctx,
     */
    if (ctx->Array._PrimitiveRestart[index_size_shift] &&
        elt == ctx->Array._RestartIndex[index_size_shift]) {
-      CALL_PrimitiveRestartNV(ctx->CurrentServerDispatch, ());
+      CALL_PrimitiveRestartNV(ctx->Dispatch.Current, ());
       return;
    }
 
@@ -1841,7 +1846,7 @@ save_DrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type,
       break;
    }
 
-   CALL_End(ctx->CurrentServerDispatch, ());
+   CALL_End(ctx->Dispatch.Current, ());
 
    _mesa_vao_unmap(ctx, vao);
 }
@@ -1910,7 +1915,7 @@ save_MultiDrawElements(GLenum mode, const GLsizei *count, GLenum type,
                        const GLvoid * const *indices, GLsizei primcount)
 {
    GET_CURRENT_CONTEXT(ctx);
-   struct _glapi_table *dispatch = ctx->CurrentServerDispatch;
+   struct _glapi_table *dispatch = ctx->Dispatch.Current;
    GLsizei i;
 
    int vertcount = 0;
@@ -1935,7 +1940,7 @@ save_MultiDrawElementsBaseVertex(GLenum mode, const GLsizei *count,
                                   const GLint *basevertex)
 {
    GET_CURRENT_CONTEXT(ctx);
-   struct _glapi_table *dispatch = ctx->CurrentServerDispatch;
+   struct _glapi_table *dispatch = ctx->Dispatch.Current;
    GLsizei i;
 
    int vertcount = 0;
@@ -1962,7 +1967,7 @@ vbo_init_dispatch_save_begin_end(struct gl_context *ctx)
 #define NAME(x) _save_##x
 #define NAME_ES(x) _save_##x
 
-   struct _glapi_table *tab = ctx->Save;
+   struct _glapi_table *tab = ctx->Dispatch.Save;
    #include "api_beginend_init.h"
 }
 

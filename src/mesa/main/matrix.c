@@ -81,7 +81,7 @@ get_named_matrix_stack(struct gl_context *ctx, GLenum mode, const char* caller)
    case GL_MATRIX5_ARB:
    case GL_MATRIX6_ARB:
    case GL_MATRIX7_ARB:
-      if (ctx->API == API_OPENGL_COMPAT
+      if (_mesa_is_desktop_gl_compat(ctx)
           && (ctx->Extensions.ARB_vertex_program ||
               ctx->Extensions.ARB_fragment_program)) {
          const GLuint m = mode - GL_MATRIX0_ARB;
@@ -185,10 +185,6 @@ matrix_ortho(struct gl_matrix_stack* stack,
              const char* caller)
 {
    GET_CURRENT_CONTEXT(ctx);
-
-   if (MESA_VERBOSE & VERBOSE_API)
-      _mesa_debug(ctx, "%s(%f, %f, %f, %f, %f, %f)\n", caller,
-                  left, right, bottom, top, nearval, farval);
 
    if (left == right ||
        bottom == top ||
@@ -311,8 +307,9 @@ push_matrix(struct gl_context *ctx, struct gl_matrix_stack *stack,
    if (stack->Depth + 1 >= stack->StackSize) {
       unsigned new_stack_size = stack->StackSize * 2;
       unsigned i;
-      GLmatrix *new_stack = realloc(stack->Stack,
-                                    sizeof(*new_stack) * new_stack_size);
+      GLmatrix *new_stack =
+         os_realloc_aligned(stack->Stack, stack->StackSize * sizeof(GLmatrix),
+                            new_stack_size * sizeof(GLmatrix), 16);
 
       if (!new_stack) {
          _mesa_error(ctx, GL_OUT_OF_MEMORY, "%s", func);
@@ -348,10 +345,6 @@ _mesa_PushMatrix( void )
 {
    GET_CURRENT_CONTEXT(ctx);
    struct gl_matrix_stack *stack = ctx->CurrentStack;
-
-   if (MESA_VERBOSE&VERBOSE_API)
-      _mesa_debug(ctx, "glPushMatrix %s\n",
-                  _mesa_enum_to_string(ctx->Transform.MatrixMode));
 
    push_matrix(ctx, stack, ctx->Transform.MatrixMode, "glPushMatrix");
 }
@@ -407,10 +400,6 @@ _mesa_PopMatrix( void )
 {
    GET_CURRENT_CONTEXT(ctx);
    struct gl_matrix_stack *stack = ctx->CurrentStack;
-
-   if (MESA_VERBOSE&VERBOSE_API)
-      _mesa_debug(ctx, "glPopMatrix %s\n",
-                  _mesa_enum_to_string(ctx->Transform.MatrixMode));
 
    if (!pop_matrix(ctx, stack)) {
       if (ctx->Transform.MatrixMode == GL_TEXTURE) {
@@ -474,9 +463,6 @@ _mesa_LoadIdentity( void )
 {
    GET_CURRENT_CONTEXT(ctx);
 
-   if (MESA_VERBOSE & VERBOSE_API)
-      _mesa_debug(ctx, "glLoadIdentity()\n");
-
    _mesa_load_identity_matrix(ctx, ctx->CurrentStack);
 }
 
@@ -512,14 +498,6 @@ matrix_load(struct gl_context *ctx, struct gl_matrix_stack *stack,
             const GLfloat *m, const char* caller)
 {
    if (!m) return;
-   if (MESA_VERBOSE & VERBOSE_API)
-      _mesa_debug(ctx,
-          "%s(%f %f %f %f, %f %f %f %f, %f %f %f %f, %f %f %f %f\n",
-          caller,
-          m[0], m[4], m[8], m[12],
-          m[1], m[5], m[9], m[13],
-          m[2], m[6], m[10], m[14],
-          m[3], m[7], m[11], m[15]);
 
    _mesa_load_matrix(ctx, stack, m);
 }
@@ -568,25 +546,11 @@ _mesa_MatrixLoadfEXT( GLenum matrixMode, const GLfloat *m )
 static void
 matrix_mult(struct gl_matrix_stack *stack, const GLfloat *m, const char* caller)
 {
-   static float identity[16] = {
-      1, 0, 0, 0,
-      0, 1, 0, 0,
-      0, 0, 1, 0,
-      0, 0, 0, 1,
-   };
-
    GET_CURRENT_CONTEXT(ctx);
-   if (!m || !memcmp(m, identity, sizeof(identity)))
-      return;
 
-   if (MESA_VERBOSE & VERBOSE_API)
-      _mesa_debug(ctx,
-          "%s(%f %f %f %f, %f %f %f %f, %f %f %f %f, %f %f %f %f\n",
-          caller,
-          m[0], m[4], m[8], m[12],
-          m[1], m[5], m[9], m[13],
-          m[2], m[6], m[10], m[14],
-          m[3], m[7], m[11], m[15]);
+   /* glthread filters out identity matrices, so don't do it again. */
+   if (!m || (!ctx->GLThread.enabled && _mesa_matrix_is_identity(m)))
+      return;
 
    FLUSH_VERTICES(ctx, 0, 0);
    _math_matrix_mul_floats(stack->Top, m);
@@ -1013,7 +977,7 @@ init_matrix_stack(struct gl_matrix_stack *stack,
    stack->MaxDepth = maxDepth;
    stack->DirtyFlag = dirtyFlag;
    /* The stack will be dynamically resized at glPushMatrix() time */
-   stack->Stack = calloc(1, sizeof(GLmatrix));
+   stack->Stack = os_malloc_aligned(sizeof(GLmatrix), 16);
    stack->StackSize = 1;
    _math_matrix_ctr(&stack->Stack[0]);
    stack->Top = stack->Stack;
@@ -1028,7 +992,7 @@ init_matrix_stack(struct gl_matrix_stack *stack,
 static void
 free_matrix_stack( struct gl_matrix_stack *stack )
 {
-   free(stack->Stack);
+   os_free_aligned(stack->Stack);
    stack->Stack = stack->Top = NULL;
    stack->StackSize = 0;
 }

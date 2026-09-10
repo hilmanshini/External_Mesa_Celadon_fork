@@ -41,17 +41,35 @@ int v3d_simulator_ioctl(int fd, unsigned long request, void *arg);
 void v3d_simulator_open_from_handle(int fd, int handle, uint32_t size);
 uint32_t v3d_simulator_get_mem_size(void);
 uint32_t v3d_simulator_get_mem_free(void);
+uint32_t v3d_simulator_get_raster_stride_align(int fd);
 
 #ifdef v3dX
 #  include "v3dx_simulator.h"
 #else
-#  define v3dX(x) v3d33_##x
+#  define v3dX(x) v3d42_##x
 #  include "v3dx_simulator.h"
 #  undef v3dX
 
-#  define v3dX(x) v3d41_##x
+#  define v3dX(x) v3d71_##x
 #  include "v3dx_simulator.h"
 #  undef v3dX
+
 #endif
+
+/* Helper to call simulator ver specific functions */
+#define v3d_X_simulator(thing) ({                     \
+   __typeof(&v3d42_simulator_##thing) v3d_X_sim_thing;\
+   switch (sim_state.ver) {                           \
+   case 42:                                           \
+      v3d_X_sim_thing = &v3d42_simulator_##thing;     \
+      break;                                          \
+   case 71:                                           \
+      v3d_X_sim_thing = &v3d71_simulator_##thing;     \
+      break;                                          \
+   default:                                           \
+      UNREACHABLE("Unsupported hardware generation"); \
+   }                                                  \
+   v3d_X_sim_thing;                                   \
+})
 
 #endif

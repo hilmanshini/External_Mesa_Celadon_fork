@@ -1,27 +1,7 @@
 /* -*- mesa-c++  -*-
- *
- * Copyright (c) 2021 Collabora LTD
- *
+ * Copyright 2022 Collabora LTD
  * Author: Gert Wollny <gert.wollny@collabora.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include "sfn_virtualvalues.h"
@@ -29,6 +9,7 @@
 #include "sfn_alu_defines.h"
 #include "sfn_debug.h"
 #include "sfn_instr.h"
+#include "sfn_instr_alu.h"
 #include "sfn_valuefactory.h"
 #include "util/macros.h"
 #include "util/u_math.h"
@@ -68,7 +49,7 @@ VirtualValue::VirtualValue(int sel, int chan, Pin pin):
     m_pins(pin)
 {
 #if __cpp_exceptions >= 199711L
-   ASSERT_OR_THROW(m_sel < virtual_register_base || pin != pin_fully,
+   ASSERT_OR_THROW(m_sel < g_registers_end || pin != pin_fully,
                    "Register is virtual but pinned to sel");
 #endif
 }
@@ -137,7 +118,7 @@ VirtualValue::from_string(const std::string& s)
    case 'L':
       return LiteralConstant::from_string(s);
    case 'K':
-      return UniformValue::from_string(s);
+      return UniformValue::from_string(s, nullptr);
    case 'P':
       return InlineConstant::param_from_string(s);
    case 'I':
@@ -145,7 +126,7 @@ VirtualValue::from_string(const std::string& s)
 
    default:
       std::cerr << "'" << s << "'";
-      unreachable("Unknown register type");
+      UNREACHABLE("Unknown register type");
    }
 }
 
@@ -198,7 +179,6 @@ void
 Register::add_parent(Instr *instr)
 {
    m_parents.insert(instr);
-   instr->add_use();
    add_parent_to_array(instr);
 }
 
@@ -212,7 +192,6 @@ void
 Register::del_parent(Instr *instr)
 {
    m_parents.erase(instr);
-   instr->dec_use();
    del_parent_from_array(instr);
 }
 
@@ -225,14 +204,7 @@ Register::del_parent_from_array(Instr *instr)
 void
 Register::add_use(Instr *instr)
 {
-   const auto& [itr, inserted] = m_uses.insert(instr);
-   {
-   }
-
-   if (inserted) {
-      for (auto& p : m_parents)
-         p->add_use();
-   }
+   m_uses.insert(instr);
 }
 
 void
@@ -241,9 +213,6 @@ Register::del_use(Instr *instr)
    sfn_log << SfnLog::opt << "Del use of " << *this << " in " << *instr << "\n";
    if (m_uses.find(instr) != m_uses.end()) {
       m_uses.erase(instr);
-      if (m_flags.test(ssa))
-         for (auto& p : m_parents)
-            p->dec_use();
    }
 }
 
@@ -272,9 +241,54 @@ Register::accept(ConstRegisterVisitor& visitor) const
    visitor.visit(*this);
 }
 
+bool
+Register::can_switch_to_chan(int c)
+{
+   if (pin() != pin_free && pin() != pin_group)
+      return false;
+
+   int free_mask = BITSET_BIT(c);
+   for (auto p : parents()) {
+      auto alu = p->as_alu();
+      if (alu)
+         free_mask &= alu->allowed_dest_chan_mask();
+   }
+
+   for (auto u : uses()) {
+      free_mask &= u->allowed_src_chan_mask();
+      if (!free_mask)
+         return false;
+   }
+   return true;
+}
+
+void
+Register::pin_to_chan()
+{
+   auto p = pin();
+   if (p == pin_fully || p == pin_chan || p == pin_chgr || p == pin_array)
+      return;
+
+   if (p != pin_group)
+      set_pin(pin_chan);
+   else
+      set_pin(pin_chgr);
+}
+
 void
 Register::print(std::ostream& os) const
 {
+   if (m_flags.test(addr_or_idx)) {
+      switch (sel()) {
+      case AddressRegister::addr: os << "AR"; break;
+      case AddressRegister::idx0: os << "IDX0"; break;
+      case AddressRegister::idx1: os << "IDX1"; break;
+      default:
+         UNREACHABLE("Wrong address ID");
+      }
+      return;
+   }
+
    os << (m_flags.test(ssa) ? "S" : "R") << sel() << "." << chanchar[chan()];
 
    if (pin() != pin_none)
@@ -297,6 +311,14 @@ Register::from_string(const std::string& s)
    std::string numstr;
    char chan = 0;
    std::string pinstr;
+
+   if (s == "AR") {
+      return new AddressRegister(AddressRegister::addr);
+   } else if (s == "IDX0") {
+      return new AddressRegister(AddressRegister::idx0);
+   } else if (s == "IDX1") {
+      return new AddressRegister(AddressRegister::idx1);
+   }
 
    assert(s[0] == 'R' || s[0] == '_' || s[0] == 'S');
 
@@ -321,7 +343,7 @@ Register::from_string(const std::string& s)
          pinstr.append(1, s[i]);
          break;
       default:
-         unreachable("Malformed register string");
+         UNREACHABLE("Malformed register string");
       }
    }
 
@@ -523,13 +545,11 @@ operator==(const RegisterVec4& lhs, const RegisterVec4& rhs)
 }
 
 RegisterVec4::Element::Element(const RegisterVec4& parent, int chan):
-    m_parent(parent),
     m_value(new Register(parent.m_sel, chan, pin_none))
 {
 }
 
 RegisterVec4::Element::Element(const RegisterVec4& parent, PRegister value):
-    m_parent(parent),
     m_value(value)
 {
 }
@@ -613,7 +633,7 @@ InlineConstant::print(std::ostream& os) const
    } else if (sel() >= ALU_SRC_PARAM_BASE && sel() < ALU_SRC_PARAM_BASE + 32) {
       os << "Param" << sel() - ALU_SRC_PARAM_BASE << "." << chanchar[chan()];
    } else {
-      unreachable("Unknown inline constant");
+      UNREACHABLE("Unknown inline constant");
    }
 }
 
@@ -656,7 +676,7 @@ InlineConstant::from_string(const std::string& s)
       use_chan = entry->second.second;
    }
 
-   ASSERT_OR_THROW(value != ALU_SRC_UNKNOWN, "Unknwon inline constant was given");
+   ASSERT_OR_THROW(value != ALU_SRC_UNKNOWN, "Unknown inline constant was given");
 
    if (use_chan) {
       ASSERT_OR_THROW(s[i + 1] == '.', "inline const channel not started with '.'");
@@ -683,7 +703,7 @@ InlineConstant::from_string(const std::string& s)
          chan = 7;
          break;
       default:
-         ASSERT_OR_THROW(0, "invalied inline const channel ");
+         ASSERT_OR_THROW(0, "invalid inline const channel ");
       }
    }
    return new InlineConstant(value, chan);
@@ -718,7 +738,7 @@ InlineConstant::param_from_string(const std::string& s)
       chan = 3;
       break;
    default:
-      unreachable("unsupported channel char");
+      UNREACHABLE("unsupported channel char");
    }
 
    return new InlineConstant(ALU_SRC_PARAM_BASE + param, chan);
@@ -756,6 +776,11 @@ UniformValue::buf_addr() const
    return m_buf_addr;
 }
 
+void UniformValue::set_buf_addr(PVirtualValue addr)
+{
+   m_buf_addr = addr; 
+}
+
 void
 UniformValue::print(std::ostream& os) const
 {
@@ -781,10 +806,12 @@ UniformValue::equal_buf_and_cache(const UniformValue& other) const
 }
 
 UniformValue::Pointer
-UniformValue::from_string(const std::string& s)
+UniformValue::from_string(const std::string& s, ValueFactory *factory)
 {
    assert(s[1] == 'C');
    std::istringstream is(s.substr(2));
+
+   VirtualValue *bufid = nullptr;
    int bank;
    char c;
    is >> bank;
@@ -792,10 +819,31 @@ UniformValue::from_string(const std::string& s)
 
    assert(c == '[');
 
+   std::stringstream index0_ss;
+
    int index;
-   is >> index;
 
    is >> c;
+   while (c != ']' && is.good()) {
+      index0_ss << c;
+      is >> c;
+   }
+
+   auto index0_str = index0_ss.str();
+   if (isdigit(index0_str[0])) {
+      std::istringstream is_digit(index0_str);
+      is_digit >> index;
+   } else {
+      bufid = factory ?
+                 factory->src_from_string(index0_str) :
+                 Register::from_string(index0_str);
+      assert(c == ']');
+      is >> c;
+      assert(c == '[');
+      is >> index;
+      is >> c;
+   }
+
    assert(c == ']');
    is >> c;
    assert(c == '.');
@@ -816,9 +864,12 @@ UniformValue::from_string(const std::string& s)
       chan = 3;
       break;
    default:
-      unreachable("Unknown channle when reading uniform");
+      UNREACHABLE("Unknown channel when reading uniform");
    }
-   return new UniformValue(index + 512, chan, bank);
+   if (bufid)
+      return new UniformValue(index + 512, chan, bufid, bank);
+   else
+      return new UniformValue(index + 512, chan, bank);
 }
 
 LocalArray::LocalArray(int base_sel, int nchannels, int size, int frac):
@@ -835,17 +886,11 @@ LocalArray::LocalArray(int base_sel, int nchannels, int size, int frac):
    sfn_log << SfnLog::reg << "Allocate array A" << base_sel << "(" << size << ", " << frac
            << ", " << nchannels << ")\n";
 
+   auto pin = m_size > 1 ? pin_array : (nchannels > 1 ? pin_none : pin_free);
    for (int c = 0; c < nchannels; ++c) {
       for (unsigned i = 0; i < m_size; ++i) {
-         PRegister reg = new Register(base_sel + i, c + frac, pin_array);
+         PRegister reg = new Register(base_sel + i, c + frac, pin);
          m_values[m_size * c + i] = new LocalArrayValue(reg, *this);
-
-         /* Pin the array register on the start, because currently we don't
-          * don't track the first write to an array element as write to all
-          * array elements, and it seems that the one can not just use
-          * registers that are not written to in an array for other purpouses
-          */
-         m_values[m_size * c + i]->set_flag(Register::pin_start);
       }
    }
 }
@@ -898,11 +943,21 @@ LocalArray::element(size_t offset, PVirtualValue indirect, uint32_t chan)
    if (indirect) {
       class ResolveDirectArrayElement : public ConstRegisterVisitor {
       public:
-         void visit(const Register& value) { (void)value; };
+         void visit(const Register& value)
+         {
+            if (value.has_flag(Register::ssa)) {
+               assert(value.parents().size() == 1);
+               auto p = (*value.parents().begin())->as_alu();
+               if (p && p->can_propagate_src()) {
+                  auto& s = p->src(0);
+                  s.accept(*this);
+               }
+            }
+         }
          void visit(const LocalArray& value)
          {
             (void)value;
-            unreachable("An array can't be used as address");
+            UNREACHABLE("An array can't be used as address");
          }
          void visit(const LocalArrayValue& value) { (void)value; }
          void visit(const UniformValue& value) { (void)value; }
@@ -911,7 +966,20 @@ LocalArray::element(size_t offset, PVirtualValue indirect, uint32_t chan)
             offset = value.value();
             is_contant = true;
          }
-         void visit(const InlineConstant& value) { (void)value; }
+         void visit(const InlineConstant& value)
+         {
+            switch (value.sel()) {
+            case ALU_SRC_0:
+               offset = 0;
+               is_contant = true;
+               break;
+            case ALU_SRC_1_INT:
+               offset = 1;
+               is_contant = true;
+               break;
+            default:;
+            }
+         }
 
          ResolveDirectArrayElement():
              offset(0),
@@ -941,6 +1009,13 @@ LocalArray::element(size_t offset, PVirtualValue indirect, uint32_t chan)
 
    sfn_log << SfnLog::reg << "  got " << *reg << "\n";
    return reg;
+}
+
+void LocalArray::add_parent_to_elements(int chan, Instr *instr)
+{
+   for (auto& e : m_values)
+      if (e->chan() == chan)
+         e->add_parent(instr);
 }
 
 bool
@@ -996,6 +1071,12 @@ LocalArrayValue::addr() const
    return m_addr;
 }
 
+void LocalArrayValue::set_addr(PRegister addr)
+{
+   m_addr = addr;
+}
+
+
 const LocalArray&
 LocalArrayValue::array() const
 {
@@ -1032,6 +1113,8 @@ void
 LocalArrayValue::add_parent_to_array(Instr *instr)
 {
    m_array.add_parent(instr);
+   if (m_addr)
+      m_array.add_parent_to_elements(chan(), instr);
 }
 
 void

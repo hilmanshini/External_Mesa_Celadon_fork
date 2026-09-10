@@ -27,9 +27,8 @@
 static void
 fail_instr(struct vc4_compile *c, struct qinst *inst, const char *msg)
 {
-        fprintf(stderr, "qir_validate: %s: ", msg);
-        qir_dump_inst(c, inst);
-        fprintf(stderr, "\n");
+        char *dump = qir_dump_inst(c, inst);
+        mesa_loge("qir_validate: %s: %s", msg, dump);
         abort();
 }
 
@@ -42,7 +41,7 @@ void qir_validate(struct vc4_compile *c)
          * keep compiling the validation code to make sure it doesn't get
          * broken.
          */
-#ifndef DEBUG
+#if !MESA_DEBUG
         return;
 #endif
 

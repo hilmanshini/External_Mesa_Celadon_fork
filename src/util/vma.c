@@ -49,7 +49,8 @@ util_vma_heap_init(struct util_vma_heap *heap,
 {
    list_inithead(&heap->holes);
    heap->free_size = 0;
-   util_vma_heap_free(heap, start, size);
+   if (size > 0)
+      util_vma_heap_free(heap, start, size);
 
    /* Default to using high addresses */
    heap->alloc_high = true;
@@ -166,7 +167,7 @@ util_vma_heap_alloc(struct util_vma_heap *heap,
     * alignment.
     */
    if (heap->nospan_shift) {
-      assert(ALIGN(BITFIELD64_BIT(heap->nospan_shift), alignment) ==
+      assert(align64(BITFIELD64_BIT(heap->nospan_shift), alignment) ==
             BITFIELD64_BIT(heap->nospan_shift));
    }
 
@@ -349,6 +350,17 @@ util_vma_heap_free(struct util_vma_heap *heap,
 
    heap->free_size += size;
    util_vma_heap_validate(heap);
+}
+
+uint64_t
+util_vma_heap_get_max_free_continuous_size(struct util_vma_heap *heap)
+{
+   uint64_t max_size = 0;
+   util_vma_foreach_hole_safe(hole, heap) {
+      max_size = MAX2(max_size, hole->size);
+   }
+
+   return max_size;
 }
 
 void

@@ -28,6 +28,7 @@
 #ifndef H_ETNAVIV_SCREEN
 #define H_ETNAVIV_SCREEN
 
+#include "etna_core_info.h"
 #include "etnaviv_internal.h"
 #include "etnaviv_perfmon.h"
 
@@ -39,54 +40,29 @@
 #include "util/u_dynarray.h"
 #include "util/u_helpers.h"
 #include "util/u_queue.h"
+#include "util/u_shader_variant_cache.h"
 #include "compiler/nir/nir.h"
+#include "etnaviv_ml.h"
+#include "pipe/p_state.h"
 
 struct etna_bo;
-
-/* Enum with indices for each of the feature words */
-enum viv_features_word {
-   viv_chipFeatures = 0,
-   viv_chipMinorFeatures0 = 1,
-   viv_chipMinorFeatures1 = 2,
-   viv_chipMinorFeatures2 = 3,
-   viv_chipMinorFeatures3 = 4,
-   viv_chipMinorFeatures4 = 5,
-   viv_chipMinorFeatures5 = 6,
-   viv_chipMinorFeatures6 = 7,
-   viv_chipMinorFeatures7 = 8,
-   viv_chipMinorFeatures8 = 9,
-   viv_chipMinorFeatures9 = 10,
-   viv_chipMinorFeatures10 = 11,
-   viv_chipMinorFeatures11 = 12,
-   viv_chipMinorFeatures12 = 13,
-   VIV_FEATURES_WORD_COUNT /* Must be last */
-};
-
-/** Convenience macro to probe features from state.xml.h:
- * VIV_FEATURE(chipFeatures, FAST_CLEAR)
- * VIV_FEATURE(chipMinorFeatures1, AUTO_DISABLE)
- */
-#define VIV_FEATURE(screen, word, feature) \
-   ((screen->features[viv_ ## word] & (word ## _ ## feature)) != 0)
 
 struct etna_screen {
    struct pipe_screen base;
 
-   int refcnt;
-   void *winsys_priv;
-
    struct etna_device *dev;
    struct etna_gpu *gpu;
+   struct etna_gpu *npu;
    struct etna_pipe *pipe;
+   struct etna_pipe *pipe_nn;
    struct etna_perfmon *perfmon;
    struct renderonly *ro;
+   struct etna_ml_device ml_device;
 
    struct util_dynarray supported_pm_queries;
    struct slab_parent_pool transfer_pool;
 
-   uint32_t model;
-   uint32_t revision;
-   uint32_t features[VIV_FEATURES_WORD_COUNT];
+   struct etna_core_info *info;
 
    struct etna_specs specs;
 
@@ -94,6 +70,10 @@ struct etna_screen {
 
    struct etna_compiler *compiler;
    struct util_queue shader_compiler_queue;
+   struct util_shader_variant_cache_options variant_opts;
+
+   /* dummy BO available to user that don't care about the content */
+   struct etna_bo *dummy_bo;
 
    /* dummy render target for GPUs that can't fully disable the color pipe */
    struct etna_reloc dummy_rt_reloc;
@@ -102,10 +82,23 @@ struct etna_screen {
    struct etna_reloc dummy_desc_reloc;
 };
 
+static inline bool
+VIV_FEATURE(const struct etna_screen *screen, enum etna_feature feature)
+{
+   return etna_core_has_feature(screen->info, feature);
+}
+
 static inline struct etna_screen *
 etna_screen(struct pipe_screen *pscreen)
 {
    return (struct etna_screen *)pscreen;
+}
+
+static inline struct etna_screen *
+etna_ml_device_screen(struct pipe_ml_device *pdevice)
+{
+   struct etna_ml_device *dev = etna_ml_device(pdevice);
+   return container_of(dev, struct etna_screen, ml_device);
 }
 
 struct etna_bo *
@@ -114,14 +107,14 @@ etna_screen_bo_from_handle(struct pipe_screen *pscreen,
 
 struct pipe_screen *
 etna_screen_create(struct etna_device *dev, struct etna_gpu *gpu,
-                   struct renderonly *ro);
+                   struct etna_gpu *npu, struct renderonly *ro);
 
 static inline size_t
 etna_screen_get_tile_size(struct etna_screen *screen, uint8_t ts_mode,
                           bool is_msaa)
 {
-   if (!VIV_FEATURE(screen, chipMinorFeatures6, CACHE128B256BPERLINE)) {
-      if (VIV_FEATURE(screen, chipMinorFeatures4, SMALL_MSAA) && is_msaa)
+   if (!VIV_FEATURE(screen, ETNA_FEATURE_CACHE128B256BPERLINE)) {
+      if (VIV_FEATURE(screen, ETNA_FEATURE_SMALL_MSAA) && is_msaa)
          return 256;
       return 64;
    }

@@ -24,6 +24,9 @@ import typing
 
 import pytest
 
+if typing.TYPE_CHECKING:
+    import aiohttp
+
 # AsyncMock is new in 3.8, so if we're using an older version we need the
 # backported version of mock
 if sys.version_info >= (3, 8):
@@ -76,7 +79,7 @@ async def test_gather_commits():
     'content, bugs',
     [
         # It is important to have the title on a new line, as
-        # textwrap.dedent wont work otherwise.
+        # textwrap.dedent won't work otherwise.
 
         # Test the `Closes: #N` syntax
         (
@@ -113,7 +116,7 @@ async def test_gather_commits():
             '''\
             A commit for for something else completely
 
-            Closes: https://github.com/Organiztion/project/1234
+            Closes: https://github.com/Organization/project/1234
             ''',
             [],
         ),
@@ -145,8 +148,9 @@ async def test_gather_commits():
             Closes: https://gitlab.freedesktop.org/mesa/mesa/-/issues/3456
             Closes: https://gitlab.freedesktop.org/mesa/mesa/-/issues/3457
             Closes: https://gitlab.freedesktop.org/mesa/mesa/-/issues/3458
+            Closes: https://gitlab.freedesktop.org/mesa/mesa/-/work_items/1234
             ''',
-            ['3456', '3457', '3458'],
+            ['3456', '3457', '3458', '1234'],
         ),
         (
             '''\
@@ -198,3 +202,26 @@ async def test_parse_issues(content: str, bugs: typing.List[str]) -> None:
             mock.patch('bin.gen_release_notes.gather_commits', mock.AsyncMock(return_value='sha\n')):
         ids = await parse_issues('1234 not used')
         assert set(ids) == set(bugs)
+
+
+@pytest.mark.asyncio
+async def test_rst_escape():
+    out = inliner.quoteInline('foo@bar')
+    assert out == r'foo\@bar'
+
+
+@pytest.mark.asyncio
+async def test_gather_bugs_duplicates():
+    mock_gc = mock.AsyncMock(return_value='something')
+    mock_pi = mock.AsyncMock(return_value=['a', 'b', 'a', 'a', 'c', 'b'])
+
+    async def get_bug(session: 'aiohttp.ClientSession', bug_id: str) -> str:
+        return bug_id
+
+    with mock.patch('bin.gen_release_notes.gather_commits', mock_gc), \
+            mock.patch('bin.gen_release_notes.parse_issues', mock_pi), \
+            mock.patch('bin.gen_release_notes.get_bug', get_bug):
+        bugs = await gather_bugs('')
+
+    assert bugs == ['a', 'b', 'c']
+

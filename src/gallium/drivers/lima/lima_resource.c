@@ -28,6 +28,7 @@
 #include "util/u_inlines.h"
 #include "util/u_math.h"
 #include "util/u_debug.h"
+#include "util/u_resource.h"
 #include "util/u_transfer.h"
 #include "util/u_surface.h"
 #include "util/u_transfer_helper.h"
@@ -59,7 +60,10 @@ lima_resource_create_scanout(struct pipe_screen *pscreen,
    struct lima_screen *screen = lima_screen(pscreen);
    struct renderonly_scanout *scanout;
    struct winsys_handle handle;
-   struct pipe_resource *pres;
+
+   struct lima_resource *res = CALLOC_STRUCT(lima_resource);
+   if (!res)
+      return NULL;
 
    struct pipe_resource scanout_templat = *templat;
    scanout_templat.width0 = width;
@@ -68,23 +72,36 @@ lima_resource_create_scanout(struct pipe_screen *pscreen,
 
    scanout = renderonly_scanout_for_resource(&scanout_templat,
                                              screen->ro, &handle);
-   if (!scanout)
-      return NULL;
-
-   assert(handle.type == WINSYS_HANDLE_TYPE_FD);
-   pres = pscreen->resource_from_handle(pscreen, templat, &handle,
-                                        PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE);
-
-   close(handle.handle);
-   if (!pres) {
-      renderonly_scanout_destroy(scanout, screen->ro);
+   if (!scanout) {
+      FREE(res);
       return NULL;
    }
 
-   struct lima_resource *res = lima_resource(pres);
+   res->base = *templat;
+   res->base.screen = pscreen;
+   pipe_reference_init(&res->base.reference, 1);
+   res->levels[0].offset = handle.offset;
+   res->levels[0].stride = handle.stride;
+
+   assert(handle.type == WINSYS_HANDLE_TYPE_FD);
+   res->bo = lima_bo_import(screen, &handle);
+   if (!res->bo) {
+      FREE(res);
+      return NULL;
+   }
+
+   res->modifier_constant = true;
+
+   close(handle.handle);
+   if (!res->bo) {
+      renderonly_scanout_destroy(scanout, screen->ro);
+      FREE(res);
+      return NULL;
+   }
+
    res->scanout = scanout;
 
-   return pres;
+   return &res->base;
 }
 
 static uint32_t
@@ -228,8 +245,16 @@ _lima_resource_create_with_modifiers(struct pipe_screen *pscreen,
       struct lima_resource *res = lima_resource(pres);
       res->tiled = should_tile;
 
+      res->reload = 0;
+      if (util_format_has_stencil(util_format_description(pres->format)))
+         res->reload |= PIPE_CLEAR_STENCIL;
+      if (util_format_has_depth(util_format_description(pres->format)))
+         res->reload |= PIPE_CLEAR_DEPTH;
+      if (!util_format_is_depth_or_stencil(pres->format))
+         res->reload |= PIPE_CLEAR_COLOR0;
+
       if (templat->bind & PIPE_BIND_INDEX_BUFFER)
-         res->index_cache = CALLOC_STRUCT(panfrost_minmax_cache);
+         res->index_cache = CALLOC_STRUCT(pan_minmax_cache);
 
       debug_printf("%s: pres=%p width=%u height=%u depth=%u target=%d "
                    "bind=%x usage=%d tile=%d last_level=%d\n", __func__,
@@ -279,11 +304,9 @@ lima_resource_destroy(struct pipe_screen *pscreen, struct pipe_resource *pres)
    if (res->scanout)
       renderonly_scanout_destroy(res->scanout, screen->ro);
 
-   if (res->damage.region)
-      FREE(res->damage.region);
+   FREE(res->damage.region);
 
-   if (res->index_cache)
-      FREE(res->index_cache);
+   FREE(res->index_cache);
 
    FREE(res);
 }
@@ -348,12 +371,11 @@ lima_resource_from_handle(struct pipe_screen *pscreen,
    /* check alignment for the buffer */
    if (res->tiled ||
        (pres->bind & (PIPE_BIND_RENDER_TARGET | PIPE_BIND_DEPTH_STENCIL))) {
-      unsigned width, height, stride, size;
+      unsigned width, stride, size;
 
       width = align(pres->width0, 16);
-      height = align(pres->height0, 16);
       stride = util_format_get_stride(pres->format, width);
-      size = util_format_get_2d_size(pres->format, stride, height);
+      size = util_format_get_2d_size(pres->format, stride, pres->height0);
 
       if (res->tiled && res->levels[0].stride != stride) {
          fprintf(stderr, "tiled imported buffer has mismatching stride: %d (BO) != %d (expected)",
@@ -433,7 +455,8 @@ lima_resource_get_param(struct pipe_screen *pscreen,
                         enum pipe_resource_param param,
                         unsigned usage, uint64_t *value)
 {
-   struct lima_resource *res = lima_resource(pres);
+   struct lima_resource *res =
+          (struct lima_resource *)util_resource_at_index(pres, plane);
 
    switch (param) {
    case PIPE_RESOURCE_PARAM_STRIDE:
@@ -447,7 +470,9 @@ lima_resource_get_param(struct pipe_screen *pscreen,
          *value = DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED;
       else
          *value = DRM_FORMAT_MOD_LINEAR;
-
+      return true;
+   case PIPE_RESOURCE_PARAM_NPLANES:
+      *value = util_resource_num(pres);
       return true;
    default:
       return false;
@@ -541,56 +566,6 @@ lima_resource_set_damage_region(struct pipe_screen *pscreen,
    damage->num_region = nrects;
 }
 
-static struct pipe_surface *
-lima_surface_create(struct pipe_context *pctx,
-                    struct pipe_resource *pres,
-                    const struct pipe_surface *surf_tmpl)
-{
-   struct lima_surface *surf = CALLOC_STRUCT(lima_surface);
-
-   if (!surf)
-      return NULL;
-
-   assert(surf_tmpl->u.tex.first_layer == surf_tmpl->u.tex.last_layer);
-
-   struct pipe_surface *psurf = &surf->base;
-   unsigned level = surf_tmpl->u.tex.level;
-
-   pipe_reference_init(&psurf->reference, 1);
-   pipe_resource_reference(&psurf->texture, pres);
-
-   psurf->context = pctx;
-   psurf->format = surf_tmpl->format;
-   psurf->width = u_minify(pres->width0, level);
-   psurf->height = u_minify(pres->height0, level);
-   psurf->nr_samples = surf_tmpl->nr_samples;
-   psurf->u.tex.level = level;
-   psurf->u.tex.first_layer = surf_tmpl->u.tex.first_layer;
-   psurf->u.tex.last_layer = surf_tmpl->u.tex.last_layer;
-
-   surf->tiled_w = align(psurf->width, 16) >> 4;
-   surf->tiled_h = align(psurf->height, 16) >> 4;
-
-   surf->reload = 0;
-   if (util_format_has_stencil(util_format_description(psurf->format)))
-      surf->reload |= PIPE_CLEAR_STENCIL;
-   if (util_format_has_depth(util_format_description(psurf->format)))
-      surf->reload |= PIPE_CLEAR_DEPTH;
-   if (!util_format_is_depth_or_stencil(psurf->format))
-      surf->reload |= PIPE_CLEAR_COLOR0;
-
-   return &surf->base;
-}
-
-static void
-lima_surface_destroy(struct pipe_context *pctx, struct pipe_surface *psurf)
-{
-   struct lima_surface *surf = lima_surface(psurf);
-
-   pipe_resource_reference(&psurf->texture, NULL);
-   FREE(surf);
-}
-
 static void *
 lima_transfer_map(struct pipe_context *pctx,
                   struct pipe_resource *pres,
@@ -638,7 +613,7 @@ lima_transfer_map(struct pipe_context *pctx,
 
       unsigned op = usage & PIPE_MAP_WRITE ?
          LIMA_GEM_WAIT_WRITE : LIMA_GEM_WAIT_READ;
-      lima_bo_wait(bo, op, PIPE_TIMEOUT_INFINITE);
+      lima_bo_wait(bo, op, OS_TIMEOUT_INFINITE);
    }
 
    if (!lima_bo_map(bo))
@@ -670,14 +645,15 @@ lima_transfer_map(struct pipe_context *pctx,
 
          unsigned i;
          for (i = 0; i < ptrans->box.depth; i++)
-            panfrost_load_tiled_image(
+            pan_load_tiled_image(
                trans->staging + i * ptrans->stride * ptrans->box.height,
                bo->map + res->levels[level].offset + (i + box->z) * res->levels[level].layer_stride,
                ptrans->box.x, ptrans->box.y,
                ptrans->box.width, ptrans->box.height,
                ptrans->stride,
                row_stride,
-               pres->format);
+               pres->format,
+               PAN_INTERLEAVE_NONE);
       }
 
       return trans->staging;
@@ -691,7 +667,9 @@ lima_transfer_map(struct pipe_context *pctx,
       ptrans->layer_stride = res->levels[level].layer_stride;
 
       if ((usage & PIPE_MAP_WRITE) && (usage & PIPE_MAP_DIRECTLY))
-         panfrost_minmax_cache_invalidate(res->index_cache, ptrans);
+         pan_minmax_cache_invalidate(res->index_cache,
+                                     util_format_get_blocksize(pres->format),
+                                     ptrans->box.x, ptrans->box.width);
 
       return bo->map + res->levels[level].offset +
          box->z * res->levels[level].layer_stride +
@@ -773,14 +751,15 @@ lima_transfer_flush_region(struct pipe_context *pctx,
             unsigned row_stride = line_stride * row_height;
 
             for (i = 0; i < trans->base.box.depth; i++)
-               panfrost_store_tiled_image(
+               pan_store_tiled_image(
                   bo->map + res->levels[trans->base.level].offset + (i + trans->base.box.z) * res->levels[trans->base.level].layer_stride,
                   trans->staging + i * ptrans->stride * ptrans->box.height,
                   ptrans->box.x, ptrans->box.y,
                   ptrans->box.width, ptrans->box.height,
                   row_stride,
                   ptrans->stride,
-                  pres->format);
+                  pres->format,
+                  PAN_INTERLEAVE_NONE);
          }
       }
    }
@@ -797,9 +776,12 @@ lima_transfer_unmap(struct pipe_context *pctx,
    struct pipe_box box;
    u_box_2d(0, 0, ptrans->box.width, ptrans->box.height, &box);
    lima_transfer_flush_region(pctx, ptrans, &box);
-   if (trans->staging)
-      free(trans->staging);
-   panfrost_minmax_cache_invalidate(res->index_cache, ptrans);
+   free(trans->staging);
+   if (ptrans->usage & PIPE_MAP_WRITE) {
+      pan_minmax_cache_invalidate(res->index_cache,
+                                  util_format_get_blocksize(res->base.format),
+                                  ptrans->box.x, ptrans->box.width);
+   }
 
    pipe_resource_reference(&ptrans->resource, NULL);
    slab_free(&ctx->transfer_pool, trans);
@@ -819,8 +801,8 @@ lima_util_blitter_save_states(struct lima_context *ctx)
    util_blitter_save_scissor(ctx->blitter, &ctx->scissor);
    util_blitter_save_vertex_elements(ctx->blitter,
                                      ctx->vertex_elements);
-   util_blitter_save_vertex_buffer_slot(ctx->blitter,
-                                        ctx->vertex_buffers.vb);
+   util_blitter_save_vertex_buffers(ctx->blitter,
+                                    ctx->vertex_buffers.vb, ctx->vertex_buffers.count);
 
    util_blitter_save_framebuffer(ctx->blitter, &ctx->framebuffer.base);
 
@@ -838,12 +820,17 @@ lima_blit(struct pipe_context *pctx, const struct pipe_blit_info *blit_info)
    struct lima_context *ctx = lima_context(pctx);
    struct pipe_blit_info info = *blit_info;
 
+   /* For a discussion about flushes here see
+    * https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/34054#note_2867478
+    */
+   lima_flush(ctx);
+
    if (lima_do_blit(pctx, blit_info)) {
-       return;
+      goto done;
    }
 
    if (util_try_blit_via_copy_region(pctx, &info, false)) {
-      return; /* done */
+      goto done;
    }
 
    if (info.mask & PIPE_MASK_S) {
@@ -860,7 +847,10 @@ lima_blit(struct pipe_context *pctx, const struct pipe_blit_info *blit_info)
 
    lima_util_blitter_save_states(ctx);
 
-   util_blitter_blit(ctx->blitter, &info);
+   util_blitter_blit(ctx->blitter, &info, NULL);
+
+done:
+   lima_flush(ctx);
 }
 
 static void
@@ -877,7 +867,7 @@ lima_texture_subdata(struct pipe_context *pctx,
                      const struct pipe_box *box,
                      const void *data,
                      unsigned stride,
-                     unsigned layer_stride)
+                     uintptr_t layer_stride)
 {
    struct lima_context *ctx = lima_context(pctx);
    struct lima_resource *res = lima_resource(prsc);
@@ -903,7 +893,7 @@ lima_texture_subdata(struct pipe_context *pctx,
    };
 
    lima_flush_job_accessing_bo(ctx, res->bo, true);
-   lima_bo_wait(res->bo, LIMA_GEM_WAIT_WRITE, PIPE_TIMEOUT_INFINITE);
+   lima_bo_wait(res->bo, LIMA_GEM_WAIT_WRITE, OS_TIMEOUT_INFINITE);
    if (!lima_bo_map(res->bo))
       return;
 
@@ -935,11 +925,14 @@ lima_resource_screen_init(struct lima_screen *screen)
 }
 
 void
+lima_resource_screen_destroy(struct lima_screen *screen)
+{
+   u_transfer_helper_destroy(screen->base.transfer_helper);
+}
+
+void
 lima_resource_context_init(struct lima_context *ctx)
 {
-   ctx->base.create_surface = lima_surface_create;
-   ctx->base.surface_destroy = lima_surface_destroy;
-
    ctx->base.buffer_subdata = u_default_buffer_subdata;
    ctx->base.texture_subdata = lima_texture_subdata;
    /* TODO: optimize resource_copy_region to do copy directly

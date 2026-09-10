@@ -23,10 +23,10 @@ struct test tests[] = {
       1,
       { PIPE_FORMAT_R8G8B8A8_UNORM },
       {
-         .offset_B = { 0 },
+         ._offset_B = { 0 },
          .sample_size_B = 8,
          .nr_samples = 1,
-         .tile_size = { 32, 32 },
+         .tile_size = 32 * 32,
       },
       8192
    },
@@ -35,10 +35,10 @@ struct test tests[] = {
       2,
       { PIPE_FORMAT_R8G8B8A8_UNORM },
       {
-         .offset_B = { 0 },
+         ._offset_B = { 0 },
          .sample_size_B = 8,
          .nr_samples = 2,
-         .tile_size = { 32, 32 },
+         .tile_size = 32 * 32,
       },
       16384
    },
@@ -47,10 +47,10 @@ struct test tests[] = {
       4,
       { PIPE_FORMAT_R8G8B8A8_UNORM },
       {
-         .offset_B = { 0 },
+         ._offset_B = { 0 },
          .sample_size_B = 8,
          .nr_samples = 4,
-         .tile_size = { 32, 16 },
+         .tile_size = 32 * 16,
       },
       16384
    },
@@ -64,10 +64,10 @@ struct test tests[] = {
          PIPE_FORMAT_R32G32_SINT,
       },
       {
-         .offset_B = { 0, 4, 12, 16 },
+         ._offset_B = { 16, 0, 18, 8 },
          .sample_size_B = 24,
          .nr_samples = 1,
-         .tile_size = { 32, 32 },
+         .tile_size = 32 * 32,
       },
       24576
    },
@@ -81,10 +81,10 @@ struct test tests[] = {
          PIPE_FORMAT_R32G32_SINT,
       },
       {
-         .offset_B = { 0, 4, 12, 16 },
+         ._offset_B = { 16, 0, 18, 8 },
          .sample_size_B = 24,
          .nr_samples = 2,
-         .tile_size = { 32, 16 },
+         .tile_size = 32 * 16,
       },
       24576
    },
@@ -98,10 +98,10 @@ struct test tests[] = {
          PIPE_FORMAT_R32G32_SINT,
       },
       {
-         .offset_B = { 0, 4, 12, 16 },
+         ._offset_B = { 16, 0, 18, 8 },
          .sample_size_B = 24,
          .nr_samples = 4,
-         .tile_size = { 16, 16 },
+         .tile_size = 16 * 16,
       },
       24576
    },
@@ -110,10 +110,10 @@ struct test tests[] = {
       1,
       { PIPE_FORMAT_R8_UNORM, PIPE_FORMAT_R16G16_SNORM },
       {
-         .offset_B = { 0, 2 },
+         ._offset_B = { 4, 0 },
          .sample_size_B = 8,
          .nr_samples = 1,
-         .tile_size = { 32, 32 },
+         .tile_size = 32 * 32,
       },
       8192
    },
@@ -122,13 +122,36 @@ struct test tests[] = {
       1,
       { PIPE_FORMAT_R8_UNORM, PIPE_FORMAT_R10G10B10A2_UNORM },
       {
-         .offset_B = { 0, 4 },
+         ._offset_B = { 4, 0 },
          .sample_size_B = 8,
          .nr_samples = 1,
-         .tile_size = { 32, 32 },
+         .tile_size = 32 * 32,
       },
       8192
-   }
+   },
+   {
+      "MRT test that requires spilling to consider alignment requirements",
+      4,
+      {
+         PIPE_FORMAT_R32_FLOAT,
+         PIPE_FORMAT_R32_FLOAT,
+         PIPE_FORMAT_R32_FLOAT,
+         PIPE_FORMAT_R32_FLOAT,
+         PIPE_FORMAT_R32_FLOAT,
+         PIPE_FORMAT_R32_FLOAT,
+         PIPE_FORMAT_R32_FLOAT,
+         PIPE_FORMAT_R32_FLOAT,
+      },
+      {
+         .spilled = { false, false, false, false, false, false, true, true },
+         ._offset_B = { 0, 4, 8, 12, 16, 20, 0, 0},
+         .sample_size_B = 24,
+         .nr_samples = 4,
+         .tile_size = 16 * 16,
+      },
+      24576
+   },
+
 };
 /* clang-format on */
 
@@ -143,16 +166,18 @@ TEST(Tilebuffer, Layouts)
          ;
 
       struct agx_tilebuffer_layout actual = agx_build_tilebuffer_layout(
-         tests[i].formats, nr_cbufs, tests[i].nr_samples);
+         tests[i].formats, nr_cbufs, tests[i].nr_samples, false);
 
       ASSERT_EQ(tests[i].layout.sample_size_B, actual.sample_size_B)
          << tests[i].name;
       ASSERT_EQ(tests[i].layout.nr_samples, actual.nr_samples) << tests[i].name;
-      ASSERT_EQ(tests[i].layout.tile_size.width, actual.tile_size.width)
-         << tests[i].name;
-      ASSERT_EQ(tests[i].layout.tile_size.height, actual.tile_size.height)
-         << tests[i].name;
+      ASSERT_EQ(tests[i].layout.tile_size, actual.tile_size) << tests[i].name;
       ASSERT_EQ(tests[i].total_size, agx_tilebuffer_total_size(&tests[i].layout))
          << tests[i].name;
+
+      for (unsigned j = 0; j < 8; ++j) {
+         ASSERT_EQ(tests[i].layout._offset_B[j], actual._offset_B[j])
+            << tests[i].name << ", render target " << j;
+      }
    }
 }

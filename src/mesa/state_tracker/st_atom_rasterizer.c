@@ -41,6 +41,7 @@
 #include "pipe/p_context.h"
 #include "pipe/p_defines.h"
 #include "cso_cache/cso_context.h"
+#include "main/context.h"
 
 
 static GLuint
@@ -93,14 +94,14 @@ st_update_rasterizer(struct st_context *st)
    }
 
    /* _NEW_LIGHT_STATE */
-   raster->flatshade = !st->lower_flatshade &&
+   raster->flatshade = st->screen->caps.flatshade &&
                        ctx->Light.ShadeModel == GL_FLAT;
 
    raster->flatshade_first = ctx->Light.ProvokingVertex ==
                              GL_FIRST_VERTEX_CONVENTION_EXT;
 
    /* _NEW_LIGHT_STATE | _NEW_PROGRAM */
-   if (!st->lower_two_sided_color)
+   if (st->screen->caps.two_sided_color)
       raster->light_twoside = _mesa_vertex_program_two_side_enabled(ctx);
 
    /*_NEW_LIGHT_STATE | _NEW_BUFFERS */
@@ -164,6 +165,8 @@ st_update_rasterizer(struct st_context *st)
 
    raster->poly_stipple_enable = ctx->Polygon.StippleFlag;
 
+   raster->representative_fragment_test = ctx->RepresentativeFragmentTest;
+
    /* Multisampling disables point, line, and polygon smoothing.
     *
     * GL_ARB_multisample says:
@@ -213,7 +216,7 @@ st_update_rasterizer(struct st_context *st)
        */
       raster->sprite_coord_enable = ctx->Point.CoordReplace &
          ((1u << MAX_TEXTURE_COORD_UNITS) - 1);
-      if (!st->needs_texcoord_semantic &&
+      if (!st->screen->caps.tgsi_texcoord &&
           fragProg->info.inputs_read & VARYING_BIT_PNTC) {
          raster->sprite_coord_enable |=
             1 << st_get_generic_varying_index(st, VARYING_SLOT_PNTC);
@@ -221,7 +224,7 @@ st_update_rasterizer(struct st_context *st)
 
       raster->point_quad_rasterization = 1;
 
-      raster->point_tri_clip = st->ctx->API == API_OPENGLES2;
+      raster->point_line_tri_clip = _mesa_is_gles2(st->ctx);
    }
 
    /* ST_NEW_VERTEX_PROGRAM
@@ -293,6 +296,10 @@ st_update_rasterizer(struct st_context *st)
       if (raster->fill_back != PIPE_POLYGON_MODE_FILL)
          raster->cull_face |= PIPE_FACE_BACK;
    }
+
+   /* Disable two-sided colors if back faces are culled. */
+   if (raster->cull_face & PIPE_FACE_BACK)
+      raster->light_twoside = 0;
 
    /* _NEW_TRANSFORM */
    raster->depth_clip_near = !ctx->Transform.DepthClampNear;

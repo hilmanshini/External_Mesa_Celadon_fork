@@ -2,24 +2,8 @@
  * Copyright 2008 Corbin Simpson <MostAwesomeDude@gmail.com>
  * Copyright 2010 Marek Olšák <maraeo@gmail.com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ * SPDX-License-Identifier: MIT
+ */
 
 #ifndef AMD_FAMILY_H
 #define AMD_FAMILY_H
@@ -27,6 +11,8 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+struct radeon_info;
 
 enum radeon_family
 {
@@ -116,10 +102,12 @@ enum radeon_family
    CHIP_RENOIR,         /* Ryzen 4000, 5000 */
    CHIP_MI100,
    CHIP_MI200,
+   CHIP_GFX940,
    /* GFX10.1 (RDNA 1) */
    CHIP_NAVI10,         /* Radeon 5600, 5700 */
    CHIP_NAVI12,         /* Radeon Pro 5600M */
    CHIP_NAVI14,         /* Radeon 5300, 5500 */
+   CHIP_GFX1013,        /* AMD BC-250 */
    /* GFX10.3 (RDNA 2) */
    CHIP_NAVI21,         /* Radeon 6800, 6900 (formerly "Sienna Cichlid") */
    CHIP_NAVI22,         /* Radeon 6700 (formerly "Navy Flounder") */
@@ -127,12 +115,26 @@ enum radeon_family
    CHIP_NAVI23,         /* Radeon 6600 (formerly "Dimgrey Cavefish") */
    CHIP_NAVI24,         /* Radeon 6400, 6500 (formerly "Beige Goby") */
    CHIP_REMBRANDT,      /* Ryzen 6000 (formerly "Yellow Carp") */
-   CHIP_GFX1036,
-   CHIP_GFX1100,
-   CHIP_GFX1101,
-   CHIP_GFX1102,
-   CHIP_GFX1103_R1,
-   CHIP_GFX1103_R2,
+   CHIP_RAPHAEL_MENDOCINO, /* Ryzen 7000(X), Ryzen 7045, Ryzen 7020 */
+   /* GFX11 (RDNA 3) */
+   CHIP_NAVI31,         /* Radeon 7900 */
+   CHIP_NAVI32,         /* Radeon 7800, 7700 */
+   CHIP_NAVI33,         /* Radeon 7600, 7700S (mobile) */
+   CHIP_PHOENIX,        /* Ryzen Z1 Extreme, Ryzen 7040, Ryzen 8040 */
+   CHIP_PHOENIX2,       /* Ryzen Z1, Ryzen 8040 */
+   /* GFX11.5 (RDNA 3.5) */
+   CHIP_STRIX1,         /* Ryzen AI 360-375 */
+   CHIP_STRIX_HALO,     /* Ryzen AI MAX */
+   CHIP_KRACKAN1,       /* Ryzen AI 330-350 */
+   CHIP_GFX1153,
+   CHIP_GFX1156,
+   /* GFX11.7 */
+   CHIP_GFX1170,
+   CHIP_GFX1171,
+   /* GFX12 (RDNA 4) */
+   CHIP_GFX1200,        /* Radeon 9060 */
+   CHIP_GFX1201,        /* Radeon 9070 */
+   CHIP_GFX1210,
    CHIP_LAST,
 };
 
@@ -153,6 +155,10 @@ enum amd_gfx_level
    GFX10,
    GFX10_3,
    GFX11,
+   GFX11_5,
+   GFX11_7,
+   GFX12,
+   GFX12_1,
 
    NUM_GFX_VERSIONS,
 };
@@ -169,6 +175,7 @@ enum amd_ip_type
    AMD_IP_VCN_ENC,
    AMD_IP_VCN_UNIFIED = AMD_IP_VCN_ENC,
    AMD_IP_VCN_JPEG,
+   AMD_IP_VPE,
    AMD_NUM_IP_TYPES,
 };
 
@@ -184,9 +191,113 @@ enum amd_vram_type {
    AMD_VRAM_TYPE_DDR4,
    AMD_VRAM_TYPE_GDDR6,
    AMD_VRAM_TYPE_DDR5,
+   AMD_VRAM_TYPE_LPDDR4,
+   AMD_VRAM_TYPE_LPDDR5,
+   AMD_VRAM_TYPE_HBM3E,
+   AMD_VRAM_TYPE_HBM4,
+};
+
+enum vcn_version{
+   VCN_UNKNOWN,
+   VCN_1_0_0,
+   VCN_1_0_1,
+
+   VCN_2_0_0,
+   VCN_2_0_2,
+   VCN_2_0_3,
+   VCN_2_2_0,
+   VCN_2_5_0,
+   VCN_2_6_0,
+
+   VCN_3_0_0,
+   VCN_3_0_2,
+   VCN_3_0_16,
+   VCN_3_0_33,
+   VCN_3_1_1,
+   VCN_3_1_2,
+
+   VCN_4_0_0,
+   VCN_4_0_2,
+   VCN_4_0_3,
+   VCN_4_0_4,
+   VCN_4_0_5,
+   VCN_4_0_6,
+
+   VCN_5_0_0,
+   VCN_5_0_1,
+   VCN_5_0_2,
+   VCN_5_3_0,
+};
+
+#define VPE_VERSION_VALUE(major, minor, rev) (((major) << 16) | ((minor) << 8) | (rev))
+
+enum vpe_version {
+   VPE_UNKNOWN = 0,
+   VPE_1_0,
+   VPE_1_1,
+   VPE_2_0,
+   VPE_2_2,
+};
+
+#define SDMA_VERSION_VALUE(major, minor) (((major) << 8) | (minor))
+
+enum sdma_version {
+   SDMA_UNKNOWN = 0,
+   /* GFX6 */
+   SDMA_1_0 = SDMA_VERSION_VALUE(1, 0),
+
+   /* GFX7 */
+   SDMA_2_0 = SDMA_VERSION_VALUE(2, 0),
+
+   /* GFX8 */
+   SDMA_2_4 = SDMA_VERSION_VALUE(2, 4),
+   SDMA_3_0 = SDMA_VERSION_VALUE(3, 0),
+   SDMA_3_1 = SDMA_VERSION_VALUE(3, 1),
+
+   /* GFX9 */
+   SDMA_4_0 = SDMA_VERSION_VALUE(4, 0),
+   SDMA_4_1 = SDMA_VERSION_VALUE(4, 1),
+   SDMA_4_2 = SDMA_VERSION_VALUE(4, 2),
+   SDMA_4_4 = SDMA_VERSION_VALUE(4, 4),
+
+   /* GFX10 */
+   SDMA_5_0 = SDMA_VERSION_VALUE(5, 0),
+
+   /* GFX10.3 */
+   SDMA_5_2 = SDMA_VERSION_VALUE(5, 2),
+
+   /* GFX11 */
+   SDMA_6_0 = SDMA_VERSION_VALUE(6, 0),
+
+   /* GFX11.5 */
+   SDMA_6_1 = SDMA_VERSION_VALUE(6, 1),
+
+   /* GFX12 */
+   SDMA_7_0 = SDMA_VERSION_VALUE(7, 0),
+};
+
+/* The enum values match PAL so they can be written into RRA files. */
+enum rt_version {
+   RT_NONE = 0x0,
+
+   RT_1_0 = 0x1,
+
+   /* GFX10.3 */
+   RT_1_1 = 0x2,
+
+   /* GFX11 */
+   RT_2_0 = 0x3,
+
+   RT_3_0 = 0x4,
+
+   /* GFX12 */
+   RT_3_1 = 0x6,
 };
 
 const char *ac_get_family_name(enum radeon_family family);
+enum amd_gfx_level ac_get_gfx_level(enum radeon_family family);
+const char *ac_get_llvm_processor_name(enum radeon_family family);
+const char *ac_get_ip_type_string(const struct radeon_info *info, enum amd_ip_type ip_type);
 
 #ifdef __cplusplus
 }

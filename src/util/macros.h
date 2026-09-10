@@ -25,9 +25,20 @@
 #define UTIL_MACROS_H
 
 #include <assert.h>
+#if defined(__HAIKU__)  && !defined(__cplusplus)
+#define static_assert _Static_assert
+#endif
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
+
+#ifdef _GAMING_XBOX
+#define strdup _strdup
+#define stricmp _stricmp
+#define unlink _unlink
+#define access(a, b) _access(a, b)
+#endif
 
 /* Compute the size of an array */
 #ifndef ARRAY_SIZE
@@ -55,8 +66,8 @@
 #    define likely(x)   __builtin_expect(!!(x), 1)
 #    define unlikely(x) __builtin_expect(!!(x), 0)
 #  else
-#    define likely(x)   (x)
-#    define unlikely(x) (x)
+#    define likely(x)   (!!(x))
+#    define unlikely(x) (!!(x))
 #  endif
 #endif
 
@@ -92,7 +103,7 @@
 #ifndef __GNUC__
    /* a grown-up compiler is required for the extra type checking: */
 #  define container_of(ptr, type, member)                               \
-      (type*)((uint8_t *)ptr - offsetof(type, member))
+      ((type*)((uint8_t *)ptr - offsetof(type, member)))
 #else
 #  define __same_type(a, b) \
       __builtin_types_compatible_p(__typeof__(a), __typeof__(b))
@@ -110,19 +121,25 @@
  * function" warnings.
  */
 #if defined(HAVE___BUILTIN_UNREACHABLE) || __has_builtin(__builtin_unreachable)
-#define unreachable(str)    \
+#define UNREACHABLE(str)    \
 do {                        \
+   (void)"" str; /* str must be a string literal */ \
    assert(!str);            \
    __builtin_unreachable(); \
 } while (0)
 #elif defined (_MSC_VER)
-#define unreachable(str)    \
+#define UNREACHABLE(str)    \
 do {                        \
+   (void)"" str; /* str must be a string literal */ \
    assert(!str);            \
    __assume(0);             \
 } while (0)
 #else
-#define unreachable(str) assert(!str)
+#define UNREACHABLE(str)    \
+do {                        \
+   (void)"" str; /* str must be a string literal */ \
+   assert(!str);            \
+} while (0)
 #endif
 
 /**
@@ -154,6 +171,12 @@ do {                       \
 #define ATTRIBUTE_CONST __attribute__((__const__))
 #else
 #define ATTRIBUTE_CONST
+#endif
+
+#if defined(HAVE_FUNC_ATTRIBUTE_COLD)
+#define ATTRIBUTE_COLD __attribute__((__cold__))
+#else
+#define ATTRIBUTE_COLD
 #endif
 
 #ifdef HAVE_FUNC_ATTRIBUTE_FLATTEN
@@ -194,9 +217,15 @@ do {                       \
  * packed, to trade off performance for space.
  */
 #ifdef HAVE_FUNC_ATTRIBUTE_PACKED
-#define PACKED __attribute__((__packed__))
+#  if defined(__MINGW32__) || defined(__MINGW64__)
+#    define PACKED __attribute__((gcc_struct,__packed__))
+#  else
+#    define PACKED __attribute__((__packed__))
+#  endif
+#  define ENUM_PACKED __attribute__((packed))
 #else
 #define PACKED
+#define ENUM_PACKED
 #endif
 
 /* Attribute pure is used for functions that have no effects other than their
@@ -222,6 +251,18 @@ do {                       \
 #  else
 #    define NORETURN
 #  endif
+#endif
+
+#ifdef HAVE_FUNC_ATTRIBUTE_OPTIMIZE
+#define ATTRIBUTE_OPTIMIZE(flags) __attribute__((__optimize__((flags))))
+#else
+#define ATTRIBUTE_OPTIMIZE(flags)
+#endif
+
+#ifdef HAVE_FUNC_ATTRIBUTE_NO_SANITIZE_VPTR
+#define ATTRIBUTE_NO_SANITIZE_VPTR __attribute__((no_sanitize(("vptr"))))
+#else
+#define ATTRIBUTE_NO_SANITIZE_VPTR
 #endif
 
 #ifdef __cplusplus
@@ -253,24 +294,16 @@ do {                       \
 #endif
 
 /**
- * PUBLIC/USED macros
- *
- * If we build the library with gcc's -fvisibility=hidden flag, we'll
- * use the PUBLIC macro to mark functions that are to be exported.
- *
- * We also need to define a USED attribute, so the optimizer doesn't
- * inline a static function that we later use in an alias. - ajax
+ * This marks symbols that should be visible to dynamic library consumers.
+ * On win32, symbols use def file to export, do not use __declspec(dllexport)
  */
 #ifndef PUBLIC
 #  if defined(_WIN32)
-#    define PUBLIC __declspec(dllexport)
-#    define USED
+#    define PUBLIC
 #  elif defined(__GNUC__)
 #    define PUBLIC __attribute__((visibility("default")))
-#    define USED __attribute__((used))
 #  else
 #    define PUBLIC
-#    define USED
 #  endif
 #endif
 
@@ -334,7 +367,11 @@ do {                       \
 /** Compute ceiling of integer quotient of A divided by B. */
 #define DIV_ROUND_UP( A, B )  ( ((A) + (B) - 1) / (B) )
 
-/** Clamp X to [MIN,MAX].  Turn NaN into MIN, arbitrarily. */
+/**
+ * Clamp X to [MIN, MAX].
+ * This is a macro to allow float, int, unsigned, etc. types.
+ * We arbitrarily turn NaN into MIN.
+ */
 #define CLAMP( X, MIN, MAX )  ( (X)>(MIN) ? ((X)>(MAX) ? (MAX) : (X)) : (MIN) )
 
 /* Syntax sugar occuring frequently in graphics code */
@@ -346,9 +383,17 @@ do {                       \
 /** Maximum of two values: */
 #define MAX2( A, B )   ( (A)>(B) ? (A) : (B) )
 
-/** Minimum and maximum of three values: */
+/** Minimum of three values: */
 #define MIN3( A, B, C ) ((A) < (B) ? MIN2(A, C) : MIN2(B, C))
+
+/** Maximum of three values: */
 #define MAX3( A, B, C ) ((A) > (B) ? MAX2(A, C) : MAX2(B, C))
+
+/** Minimum of four values: */
+#define MIN4( A, B, C, D ) ((A) < (B) ? MIN3(A, C, D) : MIN3(B, C, D))
+
+/** Maximum of four values: */
+#define MAX4( A, B, C, D ) ((A) > (B) ? MAX3(A, C, D) : MAX3(B, C, D))
 
 /** Align a value to a power of two */
 #define ALIGN_POT(x, pot_align) (((x) + (pot_align) - 1) & ~((pot_align) - 1))
@@ -356,20 +401,23 @@ do {                       \
 /** Checks is a value is a power of two. Does not handle zero. */
 #define IS_POT(v) (((v) & ((v) - 1)) == 0)
 
+/** Checks is a value is a power of two. Zero handled. */
+#define IS_POT_NONZERO(v) ((v) != 0 && IS_POT(v))
+
 /** Set a single bit */
 #define BITFIELD_BIT(b)      (1u << (b))
 /** Set all bits up to excluding bit b */
 #define BITFIELD_MASK(b)      \
-   ((b) == 32 ? (~0u) : BITFIELD_BIT((b) % 32) - 1)
+   ((b) == 32 ? (~0u) : BITFIELD_BIT((b) & 31) - 1)
 /** Set count bits starting from bit b  */
 #define BITFIELD_RANGE(b, count) \
    (BITFIELD_MASK((b) + (count)) & ~BITFIELD_MASK(b))
 
 /** Set a single bit */
-#define BITFIELD64_BIT(b)      (1ull << (b))
+#define BITFIELD64_BIT(b)      (UINT64_C(1) << (b))
 /** Set all bits up to excluding bit b */
 #define BITFIELD64_MASK(b)      \
-   ((b) == 64 ? (~0ull) : BITFIELD64_BIT(b) - 1)
+   ((b) == 64 ? (~UINT64_C(0)) : BITFIELD64_BIT((b) & 63) - 1)
 /** Set count bits starting from bit b  */
 #define BITFIELD64_RANGE(b, count) \
    (BITFIELD64_MASK((b) + (count)) & ~BITFIELD64_MASK(b))
@@ -461,18 +509,24 @@ typedef int lock_cap_t;
 #define PRAGMA_DIAGNOSTIC_ERROR(X)   DO_PRAGMA( clang diagnostic error #X )
 #define PRAGMA_DIAGNOSTIC_WARNING(X) DO_PRAGMA( clang diagnostic warning #X )
 #define PRAGMA_DIAGNOSTIC_IGNORED(X) DO_PRAGMA( clang diagnostic ignored #X )
+#define PRAGMA_DIAGNOSTIC_IGNORED_CLANG(X) DO_PRAGMA( clang diagnostic ignored #X )
+#define PRAGMA_DIAGNOSTIC_IGNORED_GCC(X)
 #elif defined(__GNUC__)
 #define PRAGMA_DIAGNOSTIC_PUSH       _Pragma("GCC diagnostic push")
 #define PRAGMA_DIAGNOSTIC_POP        _Pragma("GCC diagnostic pop")
 #define PRAGMA_DIAGNOSTIC_ERROR(X)   DO_PRAGMA( GCC diagnostic error #X )
 #define PRAGMA_DIAGNOSTIC_WARNING(X) DO_PRAGMA( GCC diagnostic warning #X )
 #define PRAGMA_DIAGNOSTIC_IGNORED(X) DO_PRAGMA( GCC diagnostic ignored #X )
+#define PRAGMA_DIAGNOSTIC_IGNORED_CLANG(X)
+#define PRAGMA_DIAGNOSTIC_IGNORED_GCC(X) DO_PRAGMA( GCC diagnostic ignored #X )
 #else
 #define PRAGMA_DIAGNOSTIC_PUSH
 #define PRAGMA_DIAGNOSTIC_POP
 #define PRAGMA_DIAGNOSTIC_ERROR(X)
 #define PRAGMA_DIAGNOSTIC_WARNING(X)
 #define PRAGMA_DIAGNOSTIC_IGNORED(X)
+#define PRAGMA_DIAGNOSTIC_IGNORED_CLANG(X)
+#define PRAGMA_DIAGNOSTIC_IGNORED_GCC(X)
 #endif
 
 #define PASTE2(a, b) a ## b
@@ -482,5 +536,43 @@ typedef int lock_cap_t;
 #define CONCAT2(a, b) PASTE2(a, b)
 #define CONCAT3(a, b, c) PASTE3(a, b, c)
 #define CONCAT4(a, b, c, d) PASTE4(a, b, c, d)
+
+#if defined(__GNUC__)
+#define PRAGMA_POISON(X) DO_PRAGMA( GCC poison X )
+#elif defined(__clang__)
+#define PRAGMA_POISON(X) DO_PRAGMA( clang poison X )
+#else
+#define PRAGMA_POISON
+#endif
+
+/*
+ * SWAP - swap value of @a and @b
+ */
+#define SWAP(a, b)                                                             \
+   do {                                                                        \
+      __typeof__(a) __tmp = (a);                                               \
+      (a) = (b);                                                               \
+      (b) = __tmp;                                                             \
+   } while (0)
+
+#define typed_memcpy(dest, src, count) do { \
+   STATIC_ASSERT(sizeof(*(src)) == sizeof(*(dest))); \
+   uint8_t *d = (uint8_t*)(dest); \
+   const uint8_t *s = (const uint8_t*)(src); \
+   if (d != NULL && s != NULL && (count) > 0) { \
+       memcpy(d, s, (count) * sizeof(*(src))); \
+   } \
+} while (0)
+
+/*
+ * Swap bits a and b. From Bithacks
+ * https://graphics.stanford.edu/~seander/bithacks.html#SwappingBitsXOR
+ */
+static inline uint32_t
+util_bit_swap(uint32_t v, unsigned a, unsigned b)
+{
+   uint32_t x = ((v >> a) ^ (v >> b)) & 1;
+   return v ^ ((x << a) | (x << b));
+}
 
 #endif /* UTIL_MACROS_H */

@@ -45,7 +45,7 @@
 #include "varray.h"
 #include "glthread_marshal.h"
 
-#include "main/dispatch.h"
+#include "dispatch.h"
 
 #include "vbo/vbo_save.h"
 #include "util/u_inlines.h"
@@ -495,7 +495,7 @@ typedef enum
    OPCODE_TEXPARAMETER_I,
    OPCODE_TEXPARAMETER_UI,
 
-   /* GL_ARB_instanced_arrays */
+   /* GL_EXT/ARB_instanced_arrays */
    OPCODE_VERTEX_ATTRIB_DIVISOR,
 
    /* GL_NV_texture_barrier */
@@ -730,7 +730,8 @@ union int64_pair
 #define BLOCK_SIZE 256
 
 
-void mesa_print_display_list(GLuint list);
+static void
+print_list(struct gl_context *ctx, GLuint list, const char *fname);
 
 
 /**
@@ -829,7 +830,7 @@ struct gl_display_list *
 _mesa_lookup_list(struct gl_context *ctx, GLuint list, bool locked)
 {
    return (struct gl_display_list *)
-      _mesa_HashLookupMaybeLocked(ctx->Shared->DisplayList, list, locked);
+      _mesa_HashLookupMaybeLocked(&ctx->Shared->DisplayList, list, locked);
 }
 
 
@@ -1113,7 +1114,7 @@ destroy_list(struct gl_context *ctx, GLuint list)
       return;
 
    _mesa_delete_list(ctx, dlist);
-   _mesa_HashRemoveLocked(ctx->Shared->DisplayList, list);
+   _mesa_HashRemoveLocked(&ctx->Shared->DisplayList, list);
 }
 
 
@@ -1220,7 +1221,7 @@ dlist_alloc(struct gl_context *ctx, OpCode opcode, GLuint bytes, bool align8)
       ctx->ListState.CurrentPos++;
    }
 
-   if (ctx->ListState.CurrentPos + numNodes + contNodes > BLOCK_SIZE) {
+   if (ctx->ListState.CurrentPos + numNodes + contNodes >= BLOCK_SIZE) {
       /* This block is full.  Allocate a new block and chain to it */
       Node *newblock;
       Node *n = ctx->ListState.CurrentBlock + ctx->ListState.CurrentPos;
@@ -1298,7 +1299,7 @@ save_Accum(GLenum op, GLfloat value)
       n[2].f = value;
    }
    if (ctx->ExecuteFlag) {
-      CALL_Accum(ctx->Exec, (op, value));
+      CALL_Accum(ctx->Dispatch.Exec, (op, value));
    }
 }
 
@@ -1315,7 +1316,7 @@ save_AlphaFunc(GLenum func, GLclampf ref)
       n[2].f = (GLfloat) ref;
    }
    if (ctx->ExecuteFlag) {
-      CALL_AlphaFunc(ctx->Exec, (func, ref));
+      CALL_AlphaFunc(ctx->Dispatch.Exec, (func, ref));
    }
 }
 
@@ -1332,7 +1333,7 @@ save_BindTexture(GLenum target, GLuint texture)
       n[2].ui = texture;
    }
    if (ctx->ExecuteFlag) {
-      CALL_BindTexture(ctx->Exec, (target, texture));
+      CALL_BindTexture(ctx->Dispatch.Exec, (target, texture));
    }
 }
 
@@ -1345,12 +1346,17 @@ save_Bitmap(GLsizei width, GLsizei height,
    GET_CURRENT_CONTEXT(ctx);
    Node *n;
    ASSERT_OUTSIDE_SAVE_BEGIN_END_AND_FLUSH(ctx);
-   struct pipe_resource *tex =
-      st_make_bitmap_texture(ctx, width, height, &ctx->Unpack, pixels);
+   struct pipe_resource *tex = NULL;
 
-   if (!tex) {
-      _mesa_error(ctx, GL_OUT_OF_MEMORY, "glNewList -> glBitmap");
-      return;
+   if (width > 0 && height > 0) {
+      tex = st_make_bitmap_texture(ctx, width, height, &ctx->Unpack, pixels);
+
+      if (!tex) {
+         _mesa_error(ctx, GL_OUT_OF_MEMORY, "glNewList -> glBitmap");
+         return;
+      }
+
+      ctx->ListState.Current.NeedsFlush = true;
    }
 
    n = alloc_instruction(ctx, OPCODE_BITMAP, 6 + POINTER_DWORDS);
@@ -1386,7 +1392,7 @@ save_BlendEquation(GLenum mode)
       n[1].e = mode;
    }
    if (ctx->ExecuteFlag) {
-      CALL_BlendEquation(ctx->Exec, (mode));
+      CALL_BlendEquation(ctx->Dispatch.Exec, (mode));
    }
 }
 
@@ -1403,7 +1409,7 @@ save_BlendEquationSeparate(GLenum modeRGB, GLenum modeA)
       n[2].e = modeA;
    }
    if (ctx->ExecuteFlag) {
-      CALL_BlendEquationSeparate(ctx->Exec, (modeRGB, modeA));
+      CALL_BlendEquationSeparate(ctx->Dispatch.Exec, (modeRGB, modeA));
    }
 }
 
@@ -1423,7 +1429,7 @@ save_BlendFuncSeparate(GLenum sfactorRGB, GLenum dfactorRGB,
       n[4].e = dfactorA;
    }
    if (ctx->ExecuteFlag) {
-      CALL_BlendFuncSeparate(ctx->Exec,
+      CALL_BlendFuncSeparate(ctx->Dispatch.Exec,
                                 (sfactorRGB, dfactorRGB, sfactorA, dfactorA));
    }
 }
@@ -1450,7 +1456,7 @@ save_BlendColor(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha)
       n[4].f = alpha;
    }
    if (ctx->ExecuteFlag) {
-      CALL_BlendColor(ctx->Exec, (red, green, blue, alpha));
+      CALL_BlendColor(ctx->Dispatch.Exec, (red, green, blue, alpha));
    }
 }
 
@@ -1471,7 +1477,7 @@ save_BlendFuncSeparateiARB(GLuint buf, GLenum sfactorRGB, GLenum dfactorRGB,
       n[5].e = dfactorA;
    }
    if (ctx->ExecuteFlag) {
-      CALL_BlendFuncSeparateiARB(ctx->Exec, (buf, sfactorRGB, dfactorRGB,
+      CALL_BlendFuncSeparateiARB(ctx->Dispatch.Exec, (buf, sfactorRGB, dfactorRGB,
                                              sfactorA, dfactorA));
    }
 }
@@ -1490,7 +1496,7 @@ save_BlendFunciARB(GLuint buf, GLenum sfactor, GLenum dfactor)
       n[3].e = dfactor;
    }
    if (ctx->ExecuteFlag) {
-      CALL_BlendFunciARB(ctx->Exec, (buf, sfactor, dfactor));
+      CALL_BlendFunciARB(ctx->Dispatch.Exec, (buf, sfactor, dfactor));
    }
 }
 
@@ -1507,7 +1513,7 @@ save_BlendEquationiARB(GLuint buf, GLenum mode)
       n[2].e = mode;
    }
    if (ctx->ExecuteFlag) {
-      CALL_BlendEquationiARB(ctx->Exec, (buf, mode));
+      CALL_BlendEquationiARB(ctx->Dispatch.Exec, (buf, mode));
    }
 }
 
@@ -1525,7 +1531,7 @@ save_BlendEquationSeparateiARB(GLuint buf, GLenum modeRGB, GLenum modeA)
       n[3].e = modeA;
    }
    if (ctx->ExecuteFlag) {
-      CALL_BlendEquationSeparateiARB(ctx->Exec, (buf, modeRGB, modeA));
+      CALL_BlendEquationSeparateiARB(ctx->Dispatch.Exec, (buf, modeRGB, modeA));
    }
 }
 
@@ -1750,7 +1756,7 @@ save_CallLists(GLsizei num, GLenum type, const GLvoid * lists)
    invalidate_saved_current_state( ctx );
 
    if (ctx->ExecuteFlag) {
-      CALL_CallLists(ctx->Exec, (num, type, lists));
+      CALL_CallLists(ctx->Dispatch.Exec, (num, type, lists));
    }
 }
 
@@ -1766,7 +1772,7 @@ save_Clear(GLbitfield mask)
       n[1].bf = mask;
    }
    if (ctx->ExecuteFlag) {
-      CALL_Clear(ctx->Exec, (mask));
+      CALL_Clear(ctx->Dispatch.Exec, (mask));
    }
 }
 
@@ -1794,7 +1800,7 @@ save_ClearBufferiv(GLenum buffer, GLint drawbuffer, const GLint *value)
       }
    }
    if (ctx->ExecuteFlag) {
-      CALL_ClearBufferiv(ctx->Exec, (buffer, drawbuffer, value));
+      CALL_ClearBufferiv(ctx->Dispatch.Exec, (buffer, drawbuffer, value));
    }
 }
 
@@ -1822,7 +1828,7 @@ save_ClearBufferuiv(GLenum buffer, GLint drawbuffer, const GLuint *value)
       }
    }
    if (ctx->ExecuteFlag) {
-      CALL_ClearBufferuiv(ctx->Exec, (buffer, drawbuffer, value));
+      CALL_ClearBufferuiv(ctx->Dispatch.Exec, (buffer, drawbuffer, value));
    }
 }
 
@@ -1850,7 +1856,7 @@ save_ClearBufferfv(GLenum buffer, GLint drawbuffer, const GLfloat *value)
       }
    }
    if (ctx->ExecuteFlag) {
-      CALL_ClearBufferfv(ctx->Exec, (buffer, drawbuffer, value));
+      CALL_ClearBufferfv(ctx->Dispatch.Exec, (buffer, drawbuffer, value));
    }
 }
 
@@ -1870,7 +1876,7 @@ save_ClearBufferfi(GLenum buffer, GLint drawbuffer,
       n[4].i = stencil;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ClearBufferfi(ctx->Exec, (buffer, drawbuffer, depth, stencil));
+      CALL_ClearBufferfi(ctx->Dispatch.Exec, (buffer, drawbuffer, depth, stencil));
    }
 }
 
@@ -1889,7 +1895,7 @@ save_ClearAccum(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha)
       n[4].f = alpha;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ClearAccum(ctx->Exec, (red, green, blue, alpha));
+      CALL_ClearAccum(ctx->Dispatch.Exec, (red, green, blue, alpha));
    }
 }
 
@@ -1908,7 +1914,7 @@ save_ClearColor(GLclampf red, GLclampf green, GLclampf blue, GLclampf alpha)
       n[4].f = alpha;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ClearColor(ctx->Exec, (red, green, blue, alpha));
+      CALL_ClearColor(ctx->Dispatch.Exec, (red, green, blue, alpha));
    }
 }
 
@@ -1924,7 +1930,7 @@ save_ClearDepth(GLclampd depth)
       n[1].f = (GLfloat) depth;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ClearDepth(ctx->Exec, (depth));
+      CALL_ClearDepth(ctx->Dispatch.Exec, (depth));
    }
 }
 
@@ -1940,7 +1946,7 @@ save_ClearIndex(GLfloat c)
       n[1].f = c;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ClearIndex(ctx->Exec, (c));
+      CALL_ClearIndex(ctx->Dispatch.Exec, (c));
    }
 }
 
@@ -1956,7 +1962,7 @@ save_ClearStencil(GLint s)
       n[1].i = s;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ClearStencil(ctx->Exec, (s));
+      CALL_ClearStencil(ctx->Dispatch.Exec, (s));
    }
 }
 
@@ -1976,7 +1982,7 @@ save_ClipPlane(GLenum plane, const GLdouble * equ)
       n[5].f = (GLfloat) equ[3];
    }
    if (ctx->ExecuteFlag) {
-      CALL_ClipPlane(ctx->Exec, (plane, equ));
+      CALL_ClipPlane(ctx->Dispatch.Exec, (plane, equ));
    }
 }
 
@@ -1997,7 +2003,7 @@ save_ColorMask(GLboolean red, GLboolean green,
       n[4].b = alpha;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ColorMask(ctx->Exec, (red, green, blue, alpha));
+      CALL_ColorMask(ctx->Dispatch.Exec, (red, green, blue, alpha));
    }
 }
 
@@ -2018,7 +2024,7 @@ save_ColorMaski(GLuint buf, GLboolean red, GLboolean green,
       n[5].b = alpha;
    }
    if (ctx->ExecuteFlag) {
-      /*CALL_ColorMaski(ctx->Exec, (buf, red, green, blue, alpha));*/
+      /*CALL_ColorMaski(ctx->Dispatch.Exec, (buf, red, green, blue, alpha));*/
    }
 }
 
@@ -2036,7 +2042,7 @@ save_ColorMaterial(GLenum face, GLenum mode)
       n[2].e = mode;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ColorMaterial(ctx->Exec, (face, mode));
+      CALL_ColorMaterial(ctx->Dispatch.Exec, (face, mode));
    }
 }
 
@@ -2056,7 +2062,7 @@ save_CopyPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum type)
       n[5].e = type;
    }
    if (ctx->ExecuteFlag) {
-      CALL_CopyPixels(ctx->Exec, (x, y, width, height, type));
+      CALL_CopyPixels(ctx->Dispatch.Exec, (x, y, width, height, type));
    }
 }
 
@@ -2080,7 +2086,7 @@ save_CopyTexImage1D(GLenum target, GLint level, GLenum internalformat,
       n[7].i = border;
    }
    if (ctx->ExecuteFlag) {
-      CALL_CopyTexImage1D(ctx->Exec, (target, level, internalformat,
+      CALL_CopyTexImage1D(ctx->Dispatch.Exec, (target, level, internalformat,
                                       x, y, width, border));
    }
 }
@@ -2107,7 +2113,7 @@ save_CopyTexImage2D(GLenum target, GLint level,
       n[8].i = border;
    }
    if (ctx->ExecuteFlag) {
-      CALL_CopyTexImage2D(ctx->Exec, (target, level, internalformat,
+      CALL_CopyTexImage2D(ctx->Dispatch.Exec, (target, level, internalformat,
                                       x, y, width, height, border));
    }
 }
@@ -2131,7 +2137,7 @@ save_CopyTexSubImage1D(GLenum target, GLint level,
       n[6].i = width;
    }
    if (ctx->ExecuteFlag) {
-      CALL_CopyTexSubImage1D(ctx->Exec,
+      CALL_CopyTexSubImage1D(ctx->Dispatch.Exec,
                              (target, level, xoffset, x, y, width));
    }
 }
@@ -2157,7 +2163,7 @@ save_CopyTexSubImage2D(GLenum target, GLint level,
       n[8].i = height;
    }
    if (ctx->ExecuteFlag) {
-      CALL_CopyTexSubImage2D(ctx->Exec, (target, level, xoffset, yoffset,
+      CALL_CopyTexSubImage2D(ctx->Dispatch.Exec, (target, level, xoffset, yoffset,
                                          x, y, width, height));
    }
 }
@@ -2184,7 +2190,7 @@ save_CopyTexSubImage3D(GLenum target, GLint level,
       n[9].i = height;
    }
    if (ctx->ExecuteFlag) {
-      CALL_CopyTexSubImage3D(ctx->Exec, (target, level,
+      CALL_CopyTexSubImage3D(ctx->Dispatch.Exec, (target, level,
                                          xoffset, yoffset, zoffset,
                                          x, y, width, height));
    }
@@ -2202,7 +2208,7 @@ save_CullFace(GLenum mode)
       n[1].e = mode;
    }
    if (ctx->ExecuteFlag) {
-      CALL_CullFace(ctx->Exec, (mode));
+      CALL_CullFace(ctx->Dispatch.Exec, (mode));
    }
 }
 
@@ -2218,7 +2224,7 @@ save_DepthFunc(GLenum func)
       n[1].e = func;
    }
    if (ctx->ExecuteFlag) {
-      CALL_DepthFunc(ctx->Exec, (func));
+      CALL_DepthFunc(ctx->Dispatch.Exec, (func));
    }
 }
 
@@ -2234,7 +2240,7 @@ save_DepthMask(GLboolean mask)
       n[1].b = mask;
    }
    if (ctx->ExecuteFlag) {
-      CALL_DepthMask(ctx->Exec, (mask));
+      CALL_DepthMask(ctx->Dispatch.Exec, (mask));
    }
 }
 
@@ -2251,7 +2257,7 @@ save_DepthRange(GLclampd nearval, GLclampd farval)
       n[2].f = (GLfloat) farval;
    }
    if (ctx->ExecuteFlag) {
-      CALL_DepthRange(ctx->Exec, (nearval, farval));
+      CALL_DepthRange(ctx->Dispatch.Exec, (nearval, farval));
    }
 }
 
@@ -2267,7 +2273,7 @@ save_Disable(GLenum cap)
       n[1].e = cap;
    }
    if (ctx->ExecuteFlag) {
-      CALL_Disable(ctx->Exec, (cap));
+      CALL_Disable(ctx->Dispatch.Exec, (cap));
    }
 }
 
@@ -2284,7 +2290,7 @@ save_Disablei(GLuint index, GLenum cap)
       n[2].e = cap;
    }
    if (ctx->ExecuteFlag) {
-      CALL_Disablei(ctx->Exec, (index, cap));
+      CALL_Disablei(ctx->Dispatch.Exec, (index, cap));
    }
 }
 
@@ -2300,7 +2306,7 @@ save_DrawBuffer(GLenum mode)
       n[1].e = mode;
    }
    if (ctx->ExecuteFlag) {
-      CALL_DrawBuffer(ctx->Exec, (mode));
+      CALL_DrawBuffer(ctx->Dispatch.Exec, (mode));
    }
 }
 
@@ -2325,7 +2331,7 @@ save_DrawPixels(GLsizei width, GLsizei height,
                                 pixels, &ctx->Unpack));
    }
    if (ctx->ExecuteFlag) {
-      CALL_DrawPixels(ctx->Exec, (width, height, format, type, pixels));
+      CALL_DrawPixels(ctx->Dispatch.Exec, (width, height, format, type, pixels));
    }
 }
 
@@ -2342,7 +2348,7 @@ save_Enable(GLenum cap)
       n[1].e = cap;
    }
    if (ctx->ExecuteFlag) {
-      CALL_Enable(ctx->Exec, (cap));
+      CALL_Enable(ctx->Dispatch.Exec, (cap));
    }
 }
 
@@ -2360,7 +2366,7 @@ save_Enablei(GLuint index, GLenum cap)
       n[2].e = cap;
    }
    if (ctx->ExecuteFlag) {
-      CALL_Enablei(ctx->Exec, (index, cap));
+      CALL_Enablei(ctx->Dispatch.Exec, (index, cap));
    }
 }
 
@@ -2379,7 +2385,7 @@ save_EvalMesh1(GLenum mode, GLint i1, GLint i2)
       n[3].i = i2;
    }
    if (ctx->ExecuteFlag) {
-      CALL_EvalMesh1(ctx->Exec, (mode, i1, i2));
+      CALL_EvalMesh1(ctx->Dispatch.Exec, (mode, i1, i2));
    }
 }
 
@@ -2399,7 +2405,7 @@ save_EvalMesh2(GLenum mode, GLint i1, GLint i2, GLint j1, GLint j2)
       n[5].i = j2;
    }
    if (ctx->ExecuteFlag) {
-      CALL_EvalMesh2(ctx->Exec, (mode, i1, i2, j1, j2));
+      CALL_EvalMesh2(ctx->Dispatch.Exec, (mode, i1, i2, j1, j2));
    }
 }
 
@@ -2421,7 +2427,7 @@ save_Fogfv(GLenum pname, const GLfloat *params)
       n[5].f = params[3];
    }
    if (ctx->ExecuteFlag) {
-      CALL_Fogfv(ctx->Exec, (pname, params));
+      CALL_Fogfv(ctx->Dispatch.Exec, (pname, params));
    }
 }
 
@@ -2487,7 +2493,7 @@ save_FrontFace(GLenum mode)
       n[1].e = mode;
    }
    if (ctx->ExecuteFlag) {
-      CALL_FrontFace(ctx->Exec, (mode));
+      CALL_FrontFace(ctx->Dispatch.Exec, (mode));
    }
 }
 
@@ -2509,7 +2515,7 @@ save_Frustum(GLdouble left, GLdouble right,
       n[6].f = (GLfloat) farval;
    }
    if (ctx->ExecuteFlag) {
-      CALL_Frustum(ctx->Exec, (left, right, bottom, top, nearval, farval));
+      CALL_Frustum(ctx->Dispatch.Exec, (left, right, bottom, top, nearval, farval));
    }
 }
 
@@ -2526,7 +2532,7 @@ save_Hint(GLenum target, GLenum mode)
       n[2].e = mode;
    }
    if (ctx->ExecuteFlag) {
-      CALL_Hint(ctx->Exec, (target, mode));
+      CALL_Hint(ctx->Dispatch.Exec, (target, mode));
    }
 }
 
@@ -2542,7 +2548,7 @@ save_IndexMask(GLuint mask)
       n[1].ui = mask;
    }
    if (ctx->ExecuteFlag) {
-      CALL_IndexMask(ctx->Exec, (mask));
+      CALL_IndexMask(ctx->Dispatch.Exec, (mask));
    }
 }
 
@@ -2554,7 +2560,7 @@ save_InitNames(void)
    ASSERT_OUTSIDE_SAVE_BEGIN_END_AND_FLUSH(ctx);
    (void) alloc_instruction(ctx, OPCODE_INIT_NAMES, 0);
    if (ctx->ExecuteFlag) {
-      CALL_InitNames(ctx->Exec, ());
+      CALL_InitNames(ctx->Dispatch.Exec, ());
    }
 }
 
@@ -2609,7 +2615,7 @@ save_Lightfv(GLenum light, GLenum pname, const GLfloat *params)
       }
    }
    if (ctx->ExecuteFlag) {
-      CALL_Lightfv(ctx->Exec, (light, pname, params));
+      CALL_Lightfv(ctx->Dispatch.Exec, (light, pname, params));
    }
 }
 
@@ -2688,7 +2694,7 @@ save_LightModelfv(GLenum pname, const GLfloat *params)
       n[5].f = params[3];
    }
    if (ctx->ExecuteFlag) {
-      CALL_LightModelfv(ctx->Exec, (pname, params));
+      CALL_LightModelfv(ctx->Dispatch.Exec, (pname, params));
    }
 }
 
@@ -2752,7 +2758,7 @@ save_LineStipple(GLint factor, GLushort pattern)
       n[2].us = pattern;
    }
    if (ctx->ExecuteFlag) {
-      CALL_LineStipple(ctx->Exec, (factor, pattern));
+      CALL_LineStipple(ctx->Dispatch.Exec, (factor, pattern));
    }
 }
 
@@ -2768,7 +2774,7 @@ save_LineWidth(GLfloat width)
       n[1].f = width;
    }
    if (ctx->ExecuteFlag) {
-      CALL_LineWidth(ctx->Exec, (width));
+      CALL_LineWidth(ctx->Dispatch.Exec, (width));
    }
 }
 
@@ -2784,7 +2790,7 @@ save_ListBase(GLuint base)
       n[1].ui = base;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ListBase(ctx->Exec, (base));
+      CALL_ListBase(ctx->Dispatch.Exec, (base));
    }
 }
 
@@ -2796,7 +2802,7 @@ save_LoadIdentity(void)
    ASSERT_OUTSIDE_SAVE_BEGIN_END_AND_FLUSH(ctx);
    (void) alloc_instruction(ctx, OPCODE_LOAD_IDENTITY, 0);
    if (ctx->ExecuteFlag) {
-      CALL_LoadIdentity(ctx->Exec, ());
+      CALL_LoadIdentity(ctx->Dispatch.Exec, ());
    }
 }
 
@@ -2815,7 +2821,7 @@ save_LoadMatrixf(const GLfloat * m)
       }
    }
    if (ctx->ExecuteFlag) {
-      CALL_LoadMatrixf(ctx->Exec, (m));
+      CALL_LoadMatrixf(ctx->Dispatch.Exec, (m));
    }
 }
 
@@ -2843,7 +2849,7 @@ save_LoadName(GLuint name)
       n[1].ui = name;
    }
    if (ctx->ExecuteFlag) {
-      CALL_LoadName(ctx->Exec, (name));
+      CALL_LoadName(ctx->Dispatch.Exec, (name));
    }
 }
 
@@ -2859,7 +2865,7 @@ save_LogicOp(GLenum opcode)
       n[1].e = opcode;
    }
    if (ctx->ExecuteFlag) {
-      CALL_LogicOp(ctx->Exec, (opcode));
+      CALL_LogicOp(ctx->Dispatch.Exec, (opcode));
    }
 }
 
@@ -2882,7 +2888,7 @@ save_Map1d(GLenum target, GLdouble u1, GLdouble u2, GLint stride,
       save_pointer(&n[6], pnts);
    }
    if (ctx->ExecuteFlag) {
-      CALL_Map1d(ctx->Exec, (target, u1, u2, stride, order, points));
+      CALL_Map1d(ctx->Dispatch.Exec, (target, u1, u2, stride, order, points));
    }
 }
 
@@ -2904,7 +2910,7 @@ save_Map1f(GLenum target, GLfloat u1, GLfloat u2, GLint stride,
       save_pointer(&n[6], pnts);
    }
    if (ctx->ExecuteFlag) {
-      CALL_Map1f(ctx->Exec, (target, u1, u2, stride, order, points));
+      CALL_Map1f(ctx->Dispatch.Exec, (target, u1, u2, stride, order, points));
    }
 }
 
@@ -2935,7 +2941,7 @@ save_Map2d(GLenum target,
       save_pointer(&n[10], pnts);
    }
    if (ctx->ExecuteFlag) {
-      CALL_Map2d(ctx->Exec, (target,
+      CALL_Map2d(ctx->Dispatch.Exec, (target,
                              u1, u2, ustride, uorder,
                              v1, v2, vstride, vorder, points));
    }
@@ -2968,7 +2974,7 @@ save_Map2f(GLenum target,
       save_pointer(&n[10], pnts);
    }
    if (ctx->ExecuteFlag) {
-      CALL_Map2f(ctx->Exec, (target, u1, u2, ustride, uorder,
+      CALL_Map2f(ctx->Dispatch.Exec, (target, u1, u2, ustride, uorder,
                              v1, v2, vstride, vorder, points));
    }
 }
@@ -2987,7 +2993,7 @@ save_MapGrid1f(GLint un, GLfloat u1, GLfloat u2)
       n[3].f = u2;
    }
    if (ctx->ExecuteFlag) {
-      CALL_MapGrid1f(ctx->Exec, (un, u1, u2));
+      CALL_MapGrid1f(ctx->Dispatch.Exec, (un, u1, u2));
    }
 }
 
@@ -3016,7 +3022,7 @@ save_MapGrid2f(GLint un, GLfloat u1, GLfloat u2,
       n[6].f = v2;
    }
    if (ctx->ExecuteFlag) {
-      CALL_MapGrid2f(ctx->Exec, (un, u1, u2, vn, v1, v2));
+      CALL_MapGrid2f(ctx->Dispatch.Exec, (un, u1, u2, vn, v1, v2));
    }
 }
 
@@ -3042,7 +3048,7 @@ save_MatrixMode(GLenum mode)
       n[1].e = mode;
    }
    if (ctx->ExecuteFlag) {
-      CALL_MatrixMode(ctx->Exec, (mode));
+      CALL_MatrixMode(ctx->Dispatch.Exec, (mode));
    }
 }
 
@@ -3061,7 +3067,7 @@ save_MultMatrixf(const GLfloat * m)
       }
    }
    if (ctx->ExecuteFlag) {
-      CALL_MultMatrixf(ctx->Exec, (m));
+      CALL_MultMatrixf(ctx->Dispatch.Exec, (m));
    }
 }
 
@@ -3107,7 +3113,7 @@ save_Ortho(GLdouble left, GLdouble right,
       n[6].f = (GLfloat) farval;
    }
    if (ctx->ExecuteFlag) {
-      CALL_Ortho(ctx->Exec, (left, right, bottom, top, nearval, farval));
+      CALL_Ortho(ctx->Dispatch.Exec, (left, right, bottom, top, nearval, farval));
    }
 }
 
@@ -3124,7 +3130,7 @@ save_PatchParameteri(GLenum pname, const GLint value)
       n[2].i = value;
    }
    if (ctx->ExecuteFlag) {
-      CALL_PatchParameteri(ctx->Exec, (pname, value));
+      CALL_PatchParameteri(ctx->Dispatch.Exec, (pname, value));
    }
 }
 
@@ -3155,7 +3161,7 @@ save_PatchParameterfv(GLenum pname, const GLfloat *params)
       }
    }
    if (ctx->ExecuteFlag) {
-      CALL_PatchParameterfv(ctx->Exec, (pname, params));
+      CALL_PatchParameterfv(ctx->Dispatch.Exec, (pname, params));
    }
 }
 
@@ -3173,7 +3179,7 @@ save_PixelMapfv(GLenum map, GLint mapsize, const GLfloat *values)
       save_pointer(&n[3], memdup(values, mapsize * sizeof(GLfloat)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_PixelMapfv(ctx->Exec, (map, mapsize, values));
+      CALL_PixelMapfv(ctx->Dispatch.Exec, (map, mapsize, values));
    }
 }
 
@@ -3228,7 +3234,7 @@ save_PixelTransferf(GLenum pname, GLfloat param)
       n[2].f = param;
    }
    if (ctx->ExecuteFlag) {
-      CALL_PixelTransferf(ctx->Exec, (pname, param));
+      CALL_PixelTransferf(ctx->Dispatch.Exec, (pname, param));
    }
 }
 
@@ -3252,7 +3258,7 @@ save_PixelZoom(GLfloat xfactor, GLfloat yfactor)
       n[2].f = yfactor;
    }
    if (ctx->ExecuteFlag) {
-      CALL_PixelZoom(ctx->Exec, (xfactor, yfactor));
+      CALL_PixelZoom(ctx->Dispatch.Exec, (xfactor, yfactor));
    }
 }
 
@@ -3271,7 +3277,7 @@ save_PointParameterfv(GLenum pname, const GLfloat *params)
       n[4].f = params[2];
    }
    if (ctx->ExecuteFlag) {
-      CALL_PointParameterfv(ctx->Exec, (pname, params));
+      CALL_PointParameterfv(ctx->Dispatch.Exec, (pname, params));
    }
 }
 
@@ -3315,7 +3321,7 @@ save_PointSize(GLfloat size)
       n[1].f = size;
    }
    if (ctx->ExecuteFlag) {
-      CALL_PointSize(ctx->Exec, (size));
+      CALL_PointSize(ctx->Dispatch.Exec, (size));
    }
 }
 
@@ -3332,7 +3338,7 @@ save_PolygonMode(GLenum face, GLenum mode)
       n[2].e = mode;
    }
    if (ctx->ExecuteFlag) {
-      CALL_PolygonMode(ctx->Exec, (face, mode));
+      CALL_PolygonMode(ctx->Dispatch.Exec, (face, mode));
    }
 }
 
@@ -3352,7 +3358,7 @@ save_PolygonStipple(const GLubyte * pattern)
                                 pattern, &ctx->Unpack));
    }
    if (ctx->ExecuteFlag) {
-      CALL_PolygonStipple(ctx->Exec, ((GLubyte *) pattern));
+      CALL_PolygonStipple(ctx->Dispatch.Exec, ((GLubyte *) pattern));
    }
 }
 
@@ -3369,7 +3375,7 @@ save_PolygonOffset(GLfloat factor, GLfloat units)
       n[2].f = units;
    }
    if (ctx->ExecuteFlag) {
-      CALL_PolygonOffset(ctx->Exec, (factor, units));
+      CALL_PolygonOffset(ctx->Dispatch.Exec, (factor, units));
    }
 }
 
@@ -3387,7 +3393,7 @@ save_PolygonOffsetClampEXT(GLfloat factor, GLfloat units, GLfloat clamp)
       n[3].f = clamp;
    }
    if (ctx->ExecuteFlag) {
-      CALL_PolygonOffsetClampEXT(ctx->Exec, (factor, units, clamp));
+      CALL_PolygonOffsetClampEXT(ctx->Dispatch.Exec, (factor, units, clamp));
    }
 }
 
@@ -3398,7 +3404,7 @@ save_PopAttrib(void)
    ASSERT_OUTSIDE_SAVE_BEGIN_END_AND_FLUSH(ctx);
    (void) alloc_instruction(ctx, OPCODE_POP_ATTRIB, 0);
    if (ctx->ExecuteFlag) {
-      CALL_PopAttrib(ctx->Exec, ());
+      CALL_PopAttrib(ctx->Dispatch.Exec, ());
    }
 }
 
@@ -3410,7 +3416,7 @@ save_PopMatrix(void)
    ASSERT_OUTSIDE_SAVE_BEGIN_END_AND_FLUSH(ctx);
    (void) alloc_instruction(ctx, OPCODE_POP_MATRIX, 0);
    if (ctx->ExecuteFlag) {
-      CALL_PopMatrix(ctx->Exec, ());
+      CALL_PopMatrix(ctx->Dispatch.Exec, ());
    }
 }
 
@@ -3422,7 +3428,7 @@ save_PopName(void)
    ASSERT_OUTSIDE_SAVE_BEGIN_END_AND_FLUSH(ctx);
    (void) alloc_instruction(ctx, OPCODE_POP_NAME, 0);
    if (ctx->ExecuteFlag) {
-      CALL_PopName(ctx->Exec, ());
+      CALL_PopName(ctx->Dispatch.Exec, ());
    }
 }
 
@@ -3444,7 +3450,7 @@ save_PrioritizeTextures(GLsizei num, const GLuint * textures,
       }
    }
    if (ctx->ExecuteFlag) {
-      CALL_PrioritizeTextures(ctx->Exec, (num, textures, priorities));
+      CALL_PrioritizeTextures(ctx->Dispatch.Exec, (num, textures, priorities));
    }
 }
 
@@ -3460,7 +3466,7 @@ save_PushAttrib(GLbitfield mask)
       n[1].bf = mask;
    }
    if (ctx->ExecuteFlag) {
-      CALL_PushAttrib(ctx->Exec, (mask));
+      CALL_PushAttrib(ctx->Dispatch.Exec, (mask));
    }
 }
 
@@ -3472,7 +3478,7 @@ save_PushMatrix(void)
    ASSERT_OUTSIDE_SAVE_BEGIN_END_AND_FLUSH(ctx);
    (void) alloc_instruction(ctx, OPCODE_PUSH_MATRIX, 0);
    if (ctx->ExecuteFlag) {
-      CALL_PushMatrix(ctx->Exec, ());
+      CALL_PushMatrix(ctx->Dispatch.Exec, ());
    }
 }
 
@@ -3488,7 +3494,7 @@ save_PushName(GLuint name)
       n[1].ui = name;
    }
    if (ctx->ExecuteFlag) {
-      CALL_PushName(ctx->Exec, (name));
+      CALL_PushName(ctx->Dispatch.Exec, (name));
    }
 }
 
@@ -3507,7 +3513,7 @@ save_RasterPos4f(GLfloat x, GLfloat y, GLfloat z, GLfloat w)
       n[4].f = w;
    }
    if (ctx->ExecuteFlag) {
-      CALL_RasterPos4f(ctx->Exec, (x, y, z, w));
+      CALL_RasterPos4f(ctx->Dispatch.Exec, (x, y, z, w));
    }
 }
 
@@ -3663,7 +3669,7 @@ save_PassThrough(GLfloat token)
       n[1].f = token;
    }
    if (ctx->ExecuteFlag) {
-      CALL_PassThrough(ctx->Exec, (token));
+      CALL_PassThrough(ctx->Dispatch.Exec, (token));
    }
 }
 
@@ -3679,7 +3685,7 @@ save_ReadBuffer(GLenum mode)
       n[1].e = mode;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ReadBuffer(ctx->Exec, (mode));
+      CALL_ReadBuffer(ctx->Dispatch.Exec, (mode));
    }
 }
 
@@ -3698,7 +3704,7 @@ save_Rotatef(GLfloat angle, GLfloat x, GLfloat y, GLfloat z)
       n[4].f = z;
    }
    if (ctx->ExecuteFlag) {
-      CALL_Rotatef(ctx->Exec, (angle, x, y, z));
+      CALL_Rotatef(ctx->Dispatch.Exec, (angle, x, y, z));
    }
 }
 
@@ -3723,7 +3729,7 @@ save_Scalef(GLfloat x, GLfloat y, GLfloat z)
       n[3].f = z;
    }
    if (ctx->ExecuteFlag) {
-      CALL_Scalef(ctx->Exec, (x, y, z));
+      CALL_Scalef(ctx->Dispatch.Exec, (x, y, z));
    }
 }
 
@@ -3749,7 +3755,7 @@ save_Scissor(GLint x, GLint y, GLsizei width, GLsizei height)
       n[4].i = height;
    }
    if (ctx->ExecuteFlag) {
-      CALL_Scissor(ctx->Exec, (x, y, width, height));
+      CALL_Scissor(ctx->Dispatch.Exec, (x, y, width, height));
    }
 }
 
@@ -3762,7 +3768,7 @@ save_ShadeModel(GLenum mode)
    ASSERT_OUTSIDE_SAVE_BEGIN_END(ctx);
 
    if (ctx->ExecuteFlag) {
-      CALL_ShadeModel(ctx->Exec, (mode));
+      CALL_ShadeModel(ctx->Dispatch.Exec, (mode));
    }
 
    /* Don't compile this call if it's a no-op.
@@ -3796,7 +3802,7 @@ save_StencilFunc(GLenum func, GLint ref, GLuint mask)
       n[3].ui = mask;
    }
    if (ctx->ExecuteFlag) {
-      CALL_StencilFunc(ctx->Exec, (func, ref, mask));
+      CALL_StencilFunc(ctx->Dispatch.Exec, (func, ref, mask));
    }
 }
 
@@ -3812,7 +3818,7 @@ save_StencilMask(GLuint mask)
       n[1].ui = mask;
    }
    if (ctx->ExecuteFlag) {
-      CALL_StencilMask(ctx->Exec, (mask));
+      CALL_StencilMask(ctx->Dispatch.Exec, (mask));
    }
 }
 
@@ -3830,7 +3836,7 @@ save_StencilOp(GLenum fail, GLenum zfail, GLenum zpass)
       n[3].e = zpass;
    }
    if (ctx->ExecuteFlag) {
-      CALL_StencilOp(ctx->Exec, (fail, zfail, zpass));
+      CALL_StencilOp(ctx->Dispatch.Exec, (fail, zfail, zpass));
    }
 }
 
@@ -3849,7 +3855,7 @@ save_StencilFuncSeparate(GLenum face, GLenum func, GLint ref, GLuint mask)
       n[4].ui = mask;
    }
    if (ctx->ExecuteFlag) {
-      CALL_StencilFuncSeparate(ctx->Exec, (face, func, ref, mask));
+      CALL_StencilFuncSeparate(ctx->Dispatch.Exec, (face, func, ref, mask));
    }
 }
 
@@ -3878,8 +3884,8 @@ save_StencilFuncSeparateATI(GLenum frontfunc, GLenum backfunc, GLint ref,
       n[4].ui = mask;
    }
    if (ctx->ExecuteFlag) {
-      CALL_StencilFuncSeparate(ctx->Exec, (GL_FRONT, frontfunc, ref, mask));
-      CALL_StencilFuncSeparate(ctx->Exec, (GL_BACK, backfunc, ref, mask));
+      CALL_StencilFuncSeparate(ctx->Dispatch.Exec, (GL_FRONT, frontfunc, ref, mask));
+      CALL_StencilFuncSeparate(ctx->Dispatch.Exec, (GL_BACK, backfunc, ref, mask));
    }
 }
 
@@ -3896,7 +3902,7 @@ save_StencilMaskSeparate(GLenum face, GLuint mask)
       n[2].ui = mask;
    }
    if (ctx->ExecuteFlag) {
-      CALL_StencilMaskSeparate(ctx->Exec, (face, mask));
+      CALL_StencilMaskSeparate(ctx->Dispatch.Exec, (face, mask));
    }
 }
 
@@ -3915,7 +3921,7 @@ save_StencilOpSeparate(GLenum face, GLenum fail, GLenum zfail, GLenum zpass)
       n[4].e = zpass;
    }
    if (ctx->ExecuteFlag) {
-      CALL_StencilOpSeparate(ctx->Exec, (face, fail, zfail, zpass));
+      CALL_StencilOpSeparate(ctx->Dispatch.Exec, (face, fail, zfail, zpass));
    }
 }
 
@@ -3942,7 +3948,7 @@ save_TexEnvfv(GLenum target, GLenum pname, const GLfloat *params)
       }
    }
    if (ctx->ExecuteFlag) {
-      CALL_TexEnvfv(ctx->Exec, (target, pname, params));
+      CALL_TexEnvfv(ctx->Dispatch.Exec, (target, pname, params));
    }
 }
 
@@ -4001,7 +4007,7 @@ save_TexGenfv(GLenum coord, GLenum pname, const GLfloat *params)
       n[6].f = params[3];
    }
    if (ctx->ExecuteFlag) {
-      CALL_TexGenfv(ctx->Exec, (coord, pname, params));
+      CALL_TexGenfv(ctx->Dispatch.Exec, (coord, pname, params));
    }
 }
 
@@ -4076,7 +4082,7 @@ save_TexParameterfv(GLenum target, GLenum pname, const GLfloat *params)
       n[6].f = params[3];
    }
    if (ctx->ExecuteFlag) {
-      CALL_TexParameterfv(ctx->Exec, (target, pname, params));
+      CALL_TexParameterfv(ctx->Dispatch.Exec, (target, pname, params));
    }
 }
 
@@ -4120,7 +4126,7 @@ save_TexImage1D(GLenum target,
    GET_CURRENT_CONTEXT(ctx);
    if (target == GL_PROXY_TEXTURE_1D) {
       /* don't compile, execute immediately */
-      CALL_TexImage1D(ctx->Exec, (target, level, components, width,
+      CALL_TexImage1D(ctx->Dispatch.Exec, (target, level, components, width,
                                   border, format, type, pixels));
    }
    else {
@@ -4140,7 +4146,7 @@ save_TexImage1D(GLenum target,
                                    pixels, &ctx->Unpack));
       }
       if (ctx->ExecuteFlag) {
-         CALL_TexImage1D(ctx->Exec, (target, level, components, width,
+         CALL_TexImage1D(ctx->Dispatch.Exec, (target, level, components, width,
                                      border, format, type, pixels));
       }
    }
@@ -4156,7 +4162,7 @@ save_TexImage2D(GLenum target,
    GET_CURRENT_CONTEXT(ctx);
    if (target == GL_PROXY_TEXTURE_2D) {
       /* don't compile, execute immediately */
-      CALL_TexImage2D(ctx->Exec, (target, level, components, width,
+      CALL_TexImage2D(ctx->Dispatch.Exec, (target, level, components, width,
                                   height, border, format, type, pixels));
    }
    else {
@@ -4177,7 +4183,7 @@ save_TexImage2D(GLenum target,
                                    pixels, &ctx->Unpack));
       }
       if (ctx->ExecuteFlag) {
-         CALL_TexImage2D(ctx->Exec, (target, level, components, width,
+         CALL_TexImage2D(ctx->Dispatch.Exec, (target, level, components, width,
                                      height, border, format, type, pixels));
       }
    }
@@ -4194,7 +4200,7 @@ save_TexImage3D(GLenum target,
    GET_CURRENT_CONTEXT(ctx);
    if (target == GL_PROXY_TEXTURE_3D) {
       /* don't compile, execute immediately */
-      CALL_TexImage3D(ctx->Exec, (target, level, internalFormat, width,
+      CALL_TexImage3D(ctx->Dispatch.Exec, (target, level, internalFormat, width,
                                   height, depth, border, format, type,
                                   pixels));
    }
@@ -4217,7 +4223,7 @@ save_TexImage3D(GLenum target,
                                    pixels, &ctx->Unpack));
       }
       if (ctx->ExecuteFlag) {
-         CALL_TexImage3D(ctx->Exec, (target, level, internalFormat, width,
+         CALL_TexImage3D(ctx->Dispatch.Exec, (target, level, internalFormat, width,
                                      height, depth, border, format, type,
                                      pixels));
       }
@@ -4248,7 +4254,7 @@ save_TexSubImage1D(GLenum target, GLint level, GLint xoffset,
                                 pixels, &ctx->Unpack));
    }
    if (ctx->ExecuteFlag) {
-      CALL_TexSubImage1D(ctx->Exec, (target, level, xoffset, width,
+      CALL_TexSubImage1D(ctx->Dispatch.Exec, (target, level, xoffset, width,
                                      format, type, pixels));
    }
 }
@@ -4280,7 +4286,7 @@ save_TexSubImage2D(GLenum target, GLint level,
                                 pixels, &ctx->Unpack));
    }
    if (ctx->ExecuteFlag) {
-      CALL_TexSubImage2D(ctx->Exec, (target, level, xoffset, yoffset,
+      CALL_TexSubImage2D(ctx->Dispatch.Exec, (target, level, xoffset, yoffset,
                                      width, height, format, type, pixels));
    }
 }
@@ -4314,7 +4320,7 @@ save_TexSubImage3D(GLenum target, GLint level,
                                 pixels, &ctx->Unpack));
    }
    if (ctx->ExecuteFlag) {
-      CALL_TexSubImage3D(ctx->Exec, (target, level,
+      CALL_TexSubImage3D(ctx->Dispatch.Exec, (target, level,
                                      xoffset, yoffset, zoffset,
                                      width, height, depth, format, type,
                                      pixels));
@@ -4335,7 +4341,7 @@ save_Translatef(GLfloat x, GLfloat y, GLfloat z)
       n[3].f = z;
    }
    if (ctx->ExecuteFlag) {
-      CALL_Translatef(ctx->Exec, (x, y, z));
+      CALL_Translatef(ctx->Dispatch.Exec, (x, y, z));
    }
 }
 
@@ -4362,7 +4368,7 @@ save_Viewport(GLint x, GLint y, GLsizei width, GLsizei height)
       n[4].i = (GLint) height;
    }
    if (ctx->ExecuteFlag) {
-      CALL_Viewport(ctx->Exec, (x, y, width, height));
+      CALL_Viewport(ctx->Dispatch.Exec, (x, y, width, height));
    }
 }
 
@@ -4382,7 +4388,7 @@ save_ViewportIndexedf(GLuint index, GLfloat x, GLfloat y, GLfloat width,
       n[5].f = height;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ViewportIndexedf(ctx->Exec, (index, x, y, width, height));
+      CALL_ViewportIndexedf(ctx->Dispatch.Exec, (index, x, y, width, height));
    }
 }
 
@@ -4401,7 +4407,7 @@ save_ViewportIndexedfv(GLuint index, const GLfloat *v)
       n[5].f = v[3];
    }
    if (ctx->ExecuteFlag) {
-      CALL_ViewportIndexedfv(ctx->Exec, (index, v));
+      CALL_ViewportIndexedfv(ctx->Dispatch.Exec, (index, v));
    }
 }
 
@@ -4418,7 +4424,7 @@ save_ViewportArrayv(GLuint first, GLsizei count, const GLfloat *v)
       save_pointer(&n[3], memdup(v, count * 4 * sizeof(GLfloat)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ViewportArrayv(ctx->Exec, (first, count, v));
+      CALL_ViewportArrayv(ctx->Dispatch.Exec, (first, count, v));
    }
 }
 
@@ -4438,7 +4444,7 @@ save_ScissorIndexed(GLuint index, GLint left, GLint bottom, GLsizei width,
       n[5].si = height;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ScissorIndexed(ctx->Exec, (index, left, bottom, width, height));
+      CALL_ScissorIndexed(ctx->Dispatch.Exec, (index, left, bottom, width, height));
    }
 }
 
@@ -4457,7 +4463,7 @@ save_ScissorIndexedv(GLuint index, const GLint *v)
       n[5].si = v[3];
    }
    if (ctx->ExecuteFlag) {
-      CALL_ScissorIndexedv(ctx->Exec, (index, v));
+      CALL_ScissorIndexedv(ctx->Dispatch.Exec, (index, v));
    }
 }
 
@@ -4474,7 +4480,7 @@ save_ScissorArrayv(GLuint first, GLsizei count, const GLint *v)
       save_pointer(&n[3], memdup(v, count * 4 * sizeof(GLint)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ScissorArrayv(ctx->Exec, (first, count, v));
+      CALL_ScissorArrayv(ctx->Dispatch.Exec, (first, count, v));
    }
 }
 
@@ -4494,7 +4500,7 @@ save_DepthRangeIndexed(GLuint index, GLclampd n, GLclampd f)
       node[3].f = f;
    }
    if (ctx->ExecuteFlag) {
-      CALL_DepthRangeIndexed(ctx->Exec, (index, n, f));
+      CALL_DepthRangeIndexed(ctx->Dispatch.Exec, (index, n, f));
    }
 }
 
@@ -4511,7 +4517,7 @@ save_DepthRangeArrayv(GLuint first, GLsizei count, const GLclampd *v)
       save_pointer(&n[3], memdup(v, count * 2 * sizeof(GLclampd)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_DepthRangeArrayv(ctx->Exec, (first, count, v));
+      CALL_DepthRangeArrayv(ctx->Dispatch.Exec, (first, count, v));
    }
 }
 
@@ -4529,7 +4535,7 @@ save_WindowPos4fMESA(GLfloat x, GLfloat y, GLfloat z, GLfloat w)
       n[4].f = w;
    }
    if (ctx->ExecuteFlag) {
-      CALL_WindowPos4fMESA(ctx->Exec, (x, y, z, w));
+      CALL_WindowPos4fMESA(ctx->Dispatch.Exec, (x, y, z, w));
    }
 }
 
@@ -4687,7 +4693,7 @@ save_ActiveTexture(GLenum target)
       n[1].e = target;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ActiveTexture(ctx->Exec, (target));
+      CALL_ActiveTexture(ctx->Dispatch.Exec, (target));
    }
 }
 
@@ -4758,7 +4764,7 @@ save_CompressedTexImage1D(GLenum target, GLint level,
    GET_CURRENT_CONTEXT(ctx);
    if (target == GL_PROXY_TEXTURE_1D) {
       /* don't compile, execute immediately */
-      CALL_CompressedTexImage1D(ctx->Exec, (target, level, internalFormat,
+      CALL_CompressedTexImage1D(ctx->Dispatch.Exec, (target, level, internalFormat,
                                                width, border, imageSize,
                                                data));
    }
@@ -4779,7 +4785,7 @@ save_CompressedTexImage1D(GLenum target, GLint level,
                       copy_data(data, imageSize, "glCompressedTexImage1DARB"));
       }
       if (ctx->ExecuteFlag) {
-         CALL_CompressedTexImage1D(ctx->Exec,
+         CALL_CompressedTexImage1D(ctx->Dispatch.Exec,
                                       (target, level, internalFormat, width,
                                        border, imageSize, data));
       }
@@ -4796,7 +4802,7 @@ save_CompressedTexImage2D(GLenum target, GLint level,
    GET_CURRENT_CONTEXT(ctx);
    if (target == GL_PROXY_TEXTURE_2D) {
       /* don't compile, execute immediately */
-      CALL_CompressedTexImage2D(ctx->Exec, (target, level, internalFormat,
+      CALL_CompressedTexImage2D(ctx->Dispatch.Exec, (target, level, internalFormat,
                                                width, height, border,
                                                imageSize, data));
    }
@@ -4818,7 +4824,7 @@ save_CompressedTexImage2D(GLenum target, GLint level,
                       copy_data(data, imageSize, "glCompressedTexImage2DARB"));
       }
       if (ctx->ExecuteFlag) {
-         CALL_CompressedTexImage2D(ctx->Exec,
+         CALL_CompressedTexImage2D(ctx->Dispatch.Exec,
                                       (target, level, internalFormat, width,
                                        height, border, imageSize, data));
       }
@@ -4835,7 +4841,7 @@ save_CompressedTexImage3D(GLenum target, GLint level,
    GET_CURRENT_CONTEXT(ctx);
    if (target == GL_PROXY_TEXTURE_3D) {
       /* don't compile, execute immediately */
-      CALL_CompressedTexImage3D(ctx->Exec, (target, level, internalFormat,
+      CALL_CompressedTexImage3D(ctx->Dispatch.Exec, (target, level, internalFormat,
                                                width, height, depth, border,
                                                imageSize, data));
    }
@@ -4858,7 +4864,7 @@ save_CompressedTexImage3D(GLenum target, GLint level,
                       copy_data(data, imageSize, "glCompressedTexImage3DARB"));
       }
       if (ctx->ExecuteFlag) {
-         CALL_CompressedTexImage3D(ctx->Exec,
+         CALL_CompressedTexImage3D(ctx->Dispatch.Exec,
                                       (target, level, internalFormat, width,
                                        height, depth, border, imageSize,
                                        data));
@@ -4889,7 +4895,7 @@ save_CompressedTexSubImage1D(GLenum target, GLint level, GLint xoffset,
                    copy_data(data, imageSize, "glCompressedTexSubImage1DARB"));
    }
    if (ctx->ExecuteFlag) {
-      CALL_CompressedTexSubImage1D(ctx->Exec, (target, level, xoffset,
+      CALL_CompressedTexSubImage1D(ctx->Dispatch.Exec, (target, level, xoffset,
                                                   width, format, imageSize,
                                                   data));
    }
@@ -4921,7 +4927,7 @@ save_CompressedTexSubImage2D(GLenum target, GLint level, GLint xoffset,
                    copy_data(data, imageSize, "glCompressedTexSubImage2DARB"));
    }
    if (ctx->ExecuteFlag) {
-      CALL_CompressedTexSubImage2D(ctx->Exec,
+      CALL_CompressedTexSubImage2D(ctx->Dispatch.Exec,
                                       (target, level, xoffset, yoffset, width,
                                        height, format, imageSize, data));
    }
@@ -4955,7 +4961,7 @@ save_CompressedTexSubImage3D(GLenum target, GLint level, GLint xoffset,
                    copy_data(data, imageSize, "glCompressedTexSubImage3DARB"));
    }
    if (ctx->ExecuteFlag) {
-      CALL_CompressedTexSubImage3D(ctx->Exec,
+      CALL_CompressedTexSubImage3D(ctx->Dispatch.Exec,
                                       (target, level, xoffset, yoffset,
                                        zoffset, width, height, depth, format,
                                        imageSize, data));
@@ -4976,7 +4982,7 @@ save_SampleCoverage(GLclampf value, GLboolean invert)
       n[2].b = invert;
    }
    if (ctx->ExecuteFlag) {
-      CALL_SampleCoverage(ctx->Exec, (value, invert));
+      CALL_SampleCoverage(ctx->Dispatch.Exec, (value, invert));
    }
 }
 
@@ -4996,7 +5002,7 @@ save_BindProgramARB(GLenum target, GLuint id)
       n[2].ui = id;
    }
    if (ctx->ExecuteFlag) {
-      CALL_BindProgramARB(ctx->Exec, (target, id));
+      CALL_BindProgramARB(ctx->Dispatch.Exec, (target, id));
    }
 }
 
@@ -5017,7 +5023,7 @@ save_ProgramEnvParameter4fARB(GLenum target, GLuint index,
       n[6].f = w;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramEnvParameter4fARB(ctx->Exec, (target, index, x, y, z, w));
+      CALL_ProgramEnvParameter4fARB(ctx->Dispatch.Exec, (target, index, x, y, z, w));
    }
 }
 
@@ -5058,7 +5064,7 @@ save_ProgramEnvParameters4fvEXT(GLenum target, GLuint index, GLsizei count,
    }
 
    if (ctx->ExecuteFlag) {
-      CALL_ProgramEnvParameters4fvEXT(ctx->Exec, (target, index, count, params));
+      CALL_ProgramEnvParameters4fvEXT(ctx->Dispatch.Exec, (target, index, count, params));
    }
 }
 
@@ -5101,7 +5107,7 @@ save_ProgramLocalParameter4fARB(GLenum target, GLuint index,
       n[6].f = w;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramLocalParameter4fARB(ctx->Exec, (target, index, x, y, z, w));
+      CALL_ProgramLocalParameter4fARB(ctx->Dispatch.Exec, (target, index, x, y, z, w));
    }
 }
 
@@ -5123,7 +5129,7 @@ save_ProgramLocalParameter4fvARB(GLenum target, GLuint index,
       n[6].f = params[3];
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramLocalParameter4fvARB(ctx->Exec, (target, index, params));
+      CALL_ProgramLocalParameter4fvARB(ctx->Dispatch.Exec, (target, index, params));
    }
 }
 
@@ -5155,7 +5161,7 @@ save_ProgramLocalParameters4fvEXT(GLenum target, GLuint index, GLsizei count,
    }
 
    if (ctx->ExecuteFlag) {
-      CALL_ProgramLocalParameters4fvEXT(ctx->Exec, (target, index, count, params));
+      CALL_ProgramLocalParameters4fvEXT(ctx->Dispatch.Exec, (target, index, count, params));
    }
 }
 
@@ -5178,7 +5184,7 @@ save_ProgramLocalParameter4dARB(GLenum target, GLuint index,
       n[6].f = (GLfloat) w;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramLocalParameter4dARB(ctx->Exec, (target, index, x, y, z, w));
+      CALL_ProgramLocalParameter4dARB(ctx->Dispatch.Exec, (target, index, x, y, z, w));
    }
 }
 
@@ -5200,7 +5206,7 @@ save_ProgramLocalParameter4dvARB(GLenum target, GLuint index,
       n[6].f = (GLfloat) params[3];
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramLocalParameter4dvARB(ctx->Exec, (target, index, params));
+      CALL_ProgramLocalParameter4dvARB(ctx->Dispatch.Exec, (target, index, params));
    }
 }
 
@@ -5217,7 +5223,7 @@ save_ActiveStencilFaceEXT(GLenum face)
       n[1].e = face;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ActiveStencilFaceEXT(ctx->Exec, (face));
+      CALL_ActiveStencilFaceEXT(ctx->Dispatch.Exec, (face));
    }
 }
 
@@ -5235,7 +5241,7 @@ save_DepthBoundsEXT(GLclampd zmin, GLclampd zmax)
       n[2].f = (GLfloat) zmax;
    }
    if (ctx->ExecuteFlag) {
-      CALL_DepthBoundsEXT(ctx->Exec, (zmin, zmax));
+      CALL_DepthBoundsEXT(ctx->Dispatch.Exec, (zmin, zmax));
    }
 }
 
@@ -5264,7 +5270,7 @@ save_ProgramStringARB(GLenum target, GLenum format, GLsizei len,
       save_pointer(&n[4], programCopy);
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramStringARB(ctx->Exec, (target, format, len, string));
+      CALL_ProgramStringARB(ctx->Dispatch.Exec, (target, format, len, string));
    }
 }
 
@@ -5281,7 +5287,7 @@ save_BeginQuery(GLenum target, GLuint id)
       n[2].ui = id;
    }
    if (ctx->ExecuteFlag) {
-      CALL_BeginQuery(ctx->Exec, (target, id));
+      CALL_BeginQuery(ctx->Dispatch.Exec, (target, id));
    }
 }
 
@@ -5296,7 +5302,7 @@ save_EndQuery(GLenum target)
       n[1].e = target;
    }
    if (ctx->ExecuteFlag) {
-      CALL_EndQuery(ctx->Exec, (target));
+      CALL_EndQuery(ctx->Dispatch.Exec, (target));
    }
 }
 
@@ -5312,7 +5318,7 @@ save_QueryCounter(GLuint id, GLenum target)
       n[2].e = target;
    }
    if (ctx->ExecuteFlag) {
-      CALL_QueryCounter(ctx->Exec, (id, target));
+      CALL_QueryCounter(ctx->Dispatch.Exec, (id, target));
    }
 }
 
@@ -5329,7 +5335,7 @@ save_BeginQueryIndexed(GLenum target, GLuint index, GLuint id)
       n[3].ui = id;
    }
    if (ctx->ExecuteFlag) {
-      CALL_BeginQueryIndexed(ctx->Exec, (target, index, id));
+      CALL_BeginQueryIndexed(ctx->Dispatch.Exec, (target, index, id));
    }
 }
 
@@ -5345,7 +5351,7 @@ save_EndQueryIndexed(GLenum target, GLuint index)
       n[2].ui = index;
    }
    if (ctx->ExecuteFlag) {
-      CALL_EndQueryIndexed(ctx->Exec, (target, index));
+      CALL_EndQueryIndexed(ctx->Dispatch.Exec, (target, index));
    }
 }
 
@@ -5367,7 +5373,7 @@ save_DrawBuffers(GLsizei count, const GLenum * buffers)
       }
    }
    if (ctx->ExecuteFlag) {
-      CALL_DrawBuffers(ctx->Exec, (count, buffers));
+      CALL_DrawBuffers(ctx->Dispatch.Exec, (count, buffers));
    }
 }
 
@@ -5382,7 +5388,7 @@ save_BindFragmentShaderATI(GLuint id)
       n[1].ui = id;
    }
    if (ctx->ExecuteFlag) {
-      CALL_BindFragmentShaderATI(ctx->Exec, (id));
+      CALL_BindFragmentShaderATI(ctx->Dispatch.Exec, (id));
    }
 }
 
@@ -5401,7 +5407,7 @@ save_SetFragmentShaderConstantATI(GLuint dst, const GLfloat *value)
       n[5].f = value[3];
    }
    if (ctx->ExecuteFlag) {
-      CALL_SetFragmentShaderConstantATI(ctx->Exec, (dst, value));
+      CALL_SetFragmentShaderConstantATI(ctx->Dispatch.Exec, (dst, value));
    }
 }
 
@@ -5416,7 +5422,7 @@ save_EvalCoord1f(GLfloat x)
       n[1].f = x;
    }
    if (ctx->ExecuteFlag) {
-      CALL_EvalCoord1f(ctx->Exec, (x));
+      CALL_EvalCoord1f(ctx->Dispatch.Exec, (x));
    }
 }
 
@@ -5438,7 +5444,7 @@ save_EvalCoord2f(GLfloat x, GLfloat y)
       n[2].f = y;
    }
    if (ctx->ExecuteFlag) {
-      CALL_EvalCoord2f(ctx->Exec, (x, y));
+      CALL_EvalCoord2f(ctx->Dispatch.Exec, (x, y));
    }
 }
 
@@ -5460,7 +5466,7 @@ save_EvalPoint1(GLint x)
       n[1].i = x;
    }
    if (ctx->ExecuteFlag) {
-      CALL_EvalPoint1(ctx->Exec, (x));
+      CALL_EvalPoint1(ctx->Dispatch.Exec, (x));
    }
 }
 
@@ -5476,7 +5482,7 @@ save_EvalPoint2(GLint x, GLint y)
       n[2].i = y;
    }
    if (ctx->ExecuteFlag) {
-      CALL_EvalPoint2(ctx->Exec, (x, y));
+      CALL_EvalPoint2(ctx->Dispatch.Exec, (x, y));
    }
 }
 
@@ -5534,7 +5540,7 @@ save_Materialfv(GLenum face, GLenum pname, const GLfloat * param)
    }
 
    if (ctx->ExecuteFlag) {
-      CALL_Materialfv(ctx->Exec, (face, pname, param));
+      CALL_Materialfv(ctx->Dispatch.Exec, (face, pname, param));
    }
 
    bitmask = _mesa_material_bitmask(ctx, face, pname, ~0, NULL);
@@ -5600,7 +5606,7 @@ save_End(void)
    (void) alloc_instruction(ctx, OPCODE_END, 0);
    ctx->Driver.CurrentSavePrimitive = PRIM_OUTSIDE_BEGIN_END;
    if (ctx->ExecuteFlag) {
-      CALL_End(ctx->Exec, ());
+      CALL_End(ctx->Dispatch.Exec, ());
    }
 }
 
@@ -5612,7 +5618,7 @@ save_PrimitiveRestartNV(void)
    ASSERT_OUTSIDE_SAVE_BEGIN_END_AND_FLUSH(ctx);
    (void) alloc_instruction(ctx, OPCODE_PRIMITIVE_RESTART_NV, 0);
    if (ctx->ExecuteFlag) {
-      CALL_PrimitiveRestartNV(ctx->Exec, ());
+      CALL_PrimitiveRestartNV(ctx->Dispatch.Exec, ());
    }
 }
 
@@ -5639,7 +5645,7 @@ save_BlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
       n[10].e = filter;
    }
    if (ctx->ExecuteFlag) {
-      CALL_BlitFramebuffer(ctx->Exec, (srcX0, srcY0, srcX1, srcY1,
+      CALL_BlitFramebuffer(ctx->Dispatch.Exec, (srcX0, srcY0, srcX1, srcY1,
                                           dstX0, dstY0, dstX1, dstY1,
                                           mask, filter));
    }
@@ -5658,7 +5664,7 @@ save_ProvokingVertex(GLenum mode)
       n[1].e = mode;
    }
    if (ctx->ExecuteFlag) {
-      /*CALL_ProvokingVertex(ctx->Exec, (mode));*/
+      /*CALL_ProvokingVertex(ctx->Dispatch.Exec, (mode));*/
       _mesa_ProvokingVertex(mode);
    }
 }
@@ -5676,7 +5682,7 @@ save_BeginTransformFeedback(GLenum mode)
       n[1].e = mode;
    }
    if (ctx->ExecuteFlag) {
-      CALL_BeginTransformFeedback(ctx->Exec, (mode));
+      CALL_BeginTransformFeedback(ctx->Dispatch.Exec, (mode));
    }
 }
 
@@ -5689,7 +5695,7 @@ save_EndTransformFeedback(void)
    ASSERT_OUTSIDE_SAVE_BEGIN_END_AND_FLUSH(ctx);
    (void) alloc_instruction(ctx, OPCODE_END_TRANSFORM_FEEDBACK, 0);
    if (ctx->ExecuteFlag) {
-      CALL_EndTransformFeedback(ctx->Exec, ());
+      CALL_EndTransformFeedback(ctx->Dispatch.Exec, ());
    }
 }
 
@@ -5705,7 +5711,7 @@ save_BindTransformFeedback(GLenum target, GLuint name)
       n[2].ui = name;
    }
    if (ctx->ExecuteFlag) {
-      CALL_BindTransformFeedback(ctx->Exec, (target, name));
+      CALL_BindTransformFeedback(ctx->Dispatch.Exec, (target, name));
    }
 }
 
@@ -5716,7 +5722,7 @@ save_PauseTransformFeedback(void)
    ASSERT_OUTSIDE_SAVE_BEGIN_END_AND_FLUSH(ctx);
    (void) alloc_instruction(ctx, OPCODE_PAUSE_TRANSFORM_FEEDBACK, 0);
    if (ctx->ExecuteFlag) {
-      CALL_PauseTransformFeedback(ctx->Exec, ());
+      CALL_PauseTransformFeedback(ctx->Dispatch.Exec, ());
    }
 }
 
@@ -5727,7 +5733,7 @@ save_ResumeTransformFeedback(void)
    ASSERT_OUTSIDE_SAVE_BEGIN_END_AND_FLUSH(ctx);
    (void) alloc_instruction(ctx, OPCODE_RESUME_TRANSFORM_FEEDBACK, 0);
    if (ctx->ExecuteFlag) {
-      CALL_ResumeTransformFeedback(ctx->Exec, ());
+      CALL_ResumeTransformFeedback(ctx->Dispatch.Exec, ());
    }
 }
 
@@ -5743,7 +5749,7 @@ save_DrawTransformFeedback(GLenum mode, GLuint name)
       n[2].ui = name;
    }
    if (ctx->ExecuteFlag) {
-      CALL_DrawTransformFeedback(ctx->Exec, (mode, name));
+      CALL_DrawTransformFeedback(ctx->Dispatch.Exec, (mode, name));
    }
 }
 
@@ -5760,7 +5766,7 @@ save_DrawTransformFeedbackStream(GLenum mode, GLuint name, GLuint stream)
       n[3].ui = stream;
    }
    if (ctx->ExecuteFlag) {
-      CALL_DrawTransformFeedbackStream(ctx->Exec, (mode, name, stream));
+      CALL_DrawTransformFeedbackStream(ctx->Dispatch.Exec, (mode, name, stream));
    }
 }
 
@@ -5778,7 +5784,7 @@ save_DrawTransformFeedbackInstanced(GLenum mode, GLuint name,
       n[3].si = primcount;
    }
    if (ctx->ExecuteFlag) {
-      CALL_DrawTransformFeedbackInstanced(ctx->Exec, (mode, name, primcount));
+      CALL_DrawTransformFeedbackInstanced(ctx->Dispatch.Exec, (mode, name, primcount));
    }
 }
 
@@ -5797,7 +5803,7 @@ save_DrawTransformFeedbackStreamInstanced(GLenum mode, GLuint name,
       n[4].si = primcount;
    }
    if (ctx->ExecuteFlag) {
-      CALL_DrawTransformFeedbackStreamInstanced(ctx->Exec, (mode, name, stream,
+      CALL_DrawTransformFeedbackStreamInstanced(ctx->Dispatch.Exec, (mode, name, stream,
                                                             primcount));
    }
 }
@@ -5816,7 +5822,7 @@ save_DispatchCompute(GLuint num_groups_x, GLuint num_groups_y,
       n[3].ui = num_groups_z;
    }
    if (ctx->ExecuteFlag) {
-      CALL_DispatchCompute(ctx->Exec, (num_groups_x, num_groups_y,
+      CALL_DispatchCompute(ctx->Dispatch.Exec, (num_groups_x, num_groups_y,
                                        num_groups_z));
    }
 }
@@ -5870,32 +5876,32 @@ save_Attr32bit(struct gl_context *ctx, unsigned attr, unsigned size,
       if (type == GL_FLOAT) {
          if (base_op == OPCODE_ATTR_1F_NV) {
             if (size == 4)
-               CALL_VertexAttrib4fNV(ctx->Exec, (attr, uif(x), uif(y), uif(z), uif(w)));
+               CALL_VertexAttrib4fNV(ctx->Dispatch.Exec, (attr, uif(x), uif(y), uif(z), uif(w)));
             else if (size == 3)
-               CALL_VertexAttrib3fNV(ctx->Exec, (attr, uif(x), uif(y), uif(z)));
+               CALL_VertexAttrib3fNV(ctx->Dispatch.Exec, (attr, uif(x), uif(y), uif(z)));
             else if (size == 2)
-               CALL_VertexAttrib2fNV(ctx->Exec, (attr, uif(x), uif(y)));
+               CALL_VertexAttrib2fNV(ctx->Dispatch.Exec, (attr, uif(x), uif(y)));
             else
-               CALL_VertexAttrib1fNV(ctx->Exec, (attr, uif(x)));
+               CALL_VertexAttrib1fNV(ctx->Dispatch.Exec, (attr, uif(x)));
          } else {
             if (size == 4)
-               CALL_VertexAttrib4fARB(ctx->Exec, (attr, uif(x), uif(y), uif(z), uif(w)));
+               CALL_VertexAttrib4fARB(ctx->Dispatch.Exec, (attr, uif(x), uif(y), uif(z), uif(w)));
             else if (size == 3)
-               CALL_VertexAttrib3fARB(ctx->Exec, (attr, uif(x), uif(y), uif(z)));
+               CALL_VertexAttrib3fARB(ctx->Dispatch.Exec, (attr, uif(x), uif(y), uif(z)));
             else if (size == 2)
-               CALL_VertexAttrib2fARB(ctx->Exec, (attr, uif(x), uif(y)));
+               CALL_VertexAttrib2fARB(ctx->Dispatch.Exec, (attr, uif(x), uif(y)));
             else
-               CALL_VertexAttrib1fARB(ctx->Exec, (attr, uif(x)));
+               CALL_VertexAttrib1fARB(ctx->Dispatch.Exec, (attr, uif(x)));
          }
       } else {
          if (size == 4)
-            CALL_VertexAttribI4iEXT(ctx->Exec, (attr, x, y, z, w));
+            CALL_VertexAttribI4iEXT(ctx->Dispatch.Exec, (attr, x, y, z, w));
          else if (size == 3)
-            CALL_VertexAttribI3iEXT(ctx->Exec, (attr, x, y, z));
+            CALL_VertexAttribI3iEXT(ctx->Dispatch.Exec, (attr, x, y, z));
          else if (size == 2)
-            CALL_VertexAttribI2iEXT(ctx->Exec, (attr, x, y));
+            CALL_VertexAttribI2iEXT(ctx->Dispatch.Exec, (attr, x, y));
          else
-            CALL_VertexAttribI1iEXT(ctx->Exec, (attr, x));
+            CALL_VertexAttribI1iEXT(ctx->Dispatch.Exec, (attr, x));
       }
    }
 }
@@ -5933,15 +5939,15 @@ save_Attr64bit(struct gl_context *ctx, unsigned attr, unsigned size,
       uint64_t v[] = {x, y, z, w};
       if (type == GL_DOUBLE) {
          if (size == 4)
-            CALL_VertexAttribL4dv(ctx->Exec, (attr, (GLdouble*)v));
+            CALL_VertexAttribL4dv(ctx->Dispatch.Exec, (attr, (GLdouble*)v));
          else if (size == 3)
-            CALL_VertexAttribL3dv(ctx->Exec, (attr, (GLdouble*)v));
+            CALL_VertexAttribL3dv(ctx->Dispatch.Exec, (attr, (GLdouble*)v));
          else if (size == 2)
-            CALL_VertexAttribL2dv(ctx->Exec, (attr, (GLdouble*)v));
+            CALL_VertexAttribL2dv(ctx->Dispatch.Exec, (attr, (GLdouble*)v));
          else
-            CALL_VertexAttribL1d(ctx->Exec, (attr, UINT64_AS_DOUBLE(x)));
+            CALL_VertexAttribL1d(ctx->Dispatch.Exec, (attr, UINT64_AS_DOUBLE(x)));
       } else {
-         CALL_VertexAttribL1ui64ARB(ctx->Exec, (attr, x));
+         CALL_VertexAttribL1ui64ARB(ctx->Dispatch.Exec, (attr, x));
       }
    }
 }
@@ -6005,7 +6011,7 @@ save_UseProgram(GLuint program)
       n[1].ui = program;
    }
    if (ctx->ExecuteFlag) {
-      CALL_UseProgram(ctx->Exec, (program));
+      CALL_UseProgram(ctx->Dispatch.Exec, (program));
    }
 }
 
@@ -6022,7 +6028,7 @@ save_Uniform1f(GLint location, GLfloat x)
       n[2].f = x;
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform1f(ctx->Exec, (location, x));
+      CALL_Uniform1f(ctx->Dispatch.Exec, (location, x));
    }
 }
 
@@ -6040,7 +6046,7 @@ save_Uniform2f(GLint location, GLfloat x, GLfloat y)
       n[3].f = y;
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform2f(ctx->Exec, (location, x, y));
+      CALL_Uniform2f(ctx->Dispatch.Exec, (location, x, y));
    }
 }
 
@@ -6059,7 +6065,7 @@ save_Uniform3f(GLint location, GLfloat x, GLfloat y, GLfloat z)
       n[4].f = z;
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform3f(ctx->Exec, (location, x, y, z));
+      CALL_Uniform3f(ctx->Dispatch.Exec, (location, x, y, z));
    }
 }
 
@@ -6079,7 +6085,7 @@ save_Uniform4f(GLint location, GLfloat x, GLfloat y, GLfloat z, GLfloat w)
       n[5].f = w;
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform4f(ctx->Exec, (location, x, y, z, w));
+      CALL_Uniform4f(ctx->Dispatch.Exec, (location, x, y, z, w));
    }
 }
 
@@ -6097,7 +6103,7 @@ save_Uniform1fv(GLint location, GLsizei count, const GLfloat *v)
       save_pointer(&n[3], memdup(v, count * 1 * sizeof(GLfloat)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform1fv(ctx->Exec, (location, count, v));
+      CALL_Uniform1fv(ctx->Dispatch.Exec, (location, count, v));
    }
 }
 
@@ -6114,7 +6120,7 @@ save_Uniform2fv(GLint location, GLsizei count, const GLfloat *v)
       save_pointer(&n[3], memdup(v, count * 2 * sizeof(GLfloat)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform2fv(ctx->Exec, (location, count, v));
+      CALL_Uniform2fv(ctx->Dispatch.Exec, (location, count, v));
    }
 }
 
@@ -6131,7 +6137,7 @@ save_Uniform3fv(GLint location, GLsizei count, const GLfloat *v)
       save_pointer(&n[3], memdup(v, count * 3 * sizeof(GLfloat)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform3fv(ctx->Exec, (location, count, v));
+      CALL_Uniform3fv(ctx->Dispatch.Exec, (location, count, v));
    }
 }
 
@@ -6148,7 +6154,7 @@ save_Uniform4fv(GLint location, GLsizei count, const GLfloat *v)
       save_pointer(&n[3], memdup(v, count * 4 * sizeof(GLfloat)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform4fv(ctx->Exec, (location, count, v));
+      CALL_Uniform4fv(ctx->Dispatch.Exec, (location, count, v));
    }
 }
 
@@ -6165,7 +6171,7 @@ save_Uniform1d(GLint location, GLdouble x)
       ASSIGN_DOUBLE_TO_NODES(n, 2, x);
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform1d(ctx->Exec, (location, x));
+      CALL_Uniform1d(ctx->Dispatch.Exec, (location, x));
    }
 }
 
@@ -6183,7 +6189,7 @@ save_Uniform2d(GLint location, GLdouble x, GLdouble y)
       ASSIGN_DOUBLE_TO_NODES(n, 4, y);
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform2d(ctx->Exec, (location, x, y));
+      CALL_Uniform2d(ctx->Dispatch.Exec, (location, x, y));
    }
 }
 
@@ -6202,7 +6208,7 @@ save_Uniform3d(GLint location, GLdouble x, GLdouble y, GLdouble z)
       ASSIGN_DOUBLE_TO_NODES(n, 6, z);
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform3d(ctx->Exec, (location, x, y, z));
+      CALL_Uniform3d(ctx->Dispatch.Exec, (location, x, y, z));
    }
 }
 
@@ -6222,7 +6228,7 @@ save_Uniform4d(GLint location, GLdouble x, GLdouble y, GLdouble z, GLdouble w)
       ASSIGN_DOUBLE_TO_NODES(n, 8, w);
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform4d(ctx->Exec, (location, x, y, z, w));
+      CALL_Uniform4d(ctx->Dispatch.Exec, (location, x, y, z, w));
    }
 }
 
@@ -6240,7 +6246,7 @@ save_Uniform1dv(GLint location, GLsizei count, const GLdouble *v)
       save_pointer(&n[3], memdup(v, count * 1 * sizeof(GLdouble)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform1dv(ctx->Exec, (location, count, v));
+      CALL_Uniform1dv(ctx->Dispatch.Exec, (location, count, v));
    }
 }
 
@@ -6258,7 +6264,7 @@ save_Uniform2dv(GLint location, GLsizei count, const GLdouble *v)
       save_pointer(&n[3], memdup(v, count * 2 * sizeof(GLdouble)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform2dv(ctx->Exec, (location, count, v));
+      CALL_Uniform2dv(ctx->Dispatch.Exec, (location, count, v));
    }
 }
 
@@ -6276,7 +6282,7 @@ save_Uniform3dv(GLint location, GLsizei count, const GLdouble *v)
       save_pointer(&n[3], memdup(v, count * 3 * sizeof(GLdouble)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform3dv(ctx->Exec, (location, count, v));
+      CALL_Uniform3dv(ctx->Dispatch.Exec, (location, count, v));
    }
 }
 
@@ -6294,7 +6300,7 @@ save_Uniform4dv(GLint location, GLsizei count, const GLdouble *v)
       save_pointer(&n[3], memdup(v, count * 4 * sizeof(GLdouble)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform4dv(ctx->Exec, (location, count, v));
+      CALL_Uniform4dv(ctx->Dispatch.Exec, (location, count, v));
    }
 }
 
@@ -6311,7 +6317,7 @@ save_Uniform1i(GLint location, GLint x)
       n[2].i = x;
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform1i(ctx->Exec, (location, x));
+      CALL_Uniform1i(ctx->Dispatch.Exec, (location, x));
    }
 }
 
@@ -6328,7 +6334,7 @@ save_Uniform2i(GLint location, GLint x, GLint y)
       n[3].i = y;
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform2i(ctx->Exec, (location, x, y));
+      CALL_Uniform2i(ctx->Dispatch.Exec, (location, x, y));
    }
 }
 
@@ -6346,7 +6352,7 @@ save_Uniform3i(GLint location, GLint x, GLint y, GLint z)
       n[4].i = z;
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform3i(ctx->Exec, (location, x, y, z));
+      CALL_Uniform3i(ctx->Dispatch.Exec, (location, x, y, z));
    }
 }
 
@@ -6365,7 +6371,7 @@ save_Uniform4i(GLint location, GLint x, GLint y, GLint z, GLint w)
       n[5].i = w;
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform4i(ctx->Exec, (location, x, y, z, w));
+      CALL_Uniform4i(ctx->Dispatch.Exec, (location, x, y, z, w));
    }
 }
 
@@ -6384,7 +6390,7 @@ save_Uniform1iv(GLint location, GLsizei count, const GLint *v)
       save_pointer(&n[3], memdup(v, count * 1 * sizeof(GLint)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform1iv(ctx->Exec, (location, count, v));
+      CALL_Uniform1iv(ctx->Dispatch.Exec, (location, count, v));
    }
 }
 
@@ -6401,7 +6407,7 @@ save_Uniform2iv(GLint location, GLsizei count, const GLint *v)
       save_pointer(&n[3], memdup(v, count * 2 * sizeof(GLint)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform2iv(ctx->Exec, (location, count, v));
+      CALL_Uniform2iv(ctx->Dispatch.Exec, (location, count, v));
    }
 }
 
@@ -6418,7 +6424,7 @@ save_Uniform3iv(GLint location, GLsizei count, const GLint *v)
       save_pointer(&n[3], memdup(v, count * 3 * sizeof(GLint)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform3iv(ctx->Exec, (location, count, v));
+      CALL_Uniform3iv(ctx->Dispatch.Exec, (location, count, v));
    }
 }
 
@@ -6435,7 +6441,7 @@ save_Uniform4iv(GLint location, GLsizei count, const GLint *v)
       save_pointer(&n[3], memdup(v, count * 4 * sizeof(GLfloat)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform4iv(ctx->Exec, (location, count, v));
+      CALL_Uniform4iv(ctx->Dispatch.Exec, (location, count, v));
    }
 }
 
@@ -6453,7 +6459,7 @@ save_Uniform1ui(GLint location, GLuint x)
       n[2].i = x;
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform1ui(ctx->Exec, (location, x));
+      CALL_Uniform1ui(ctx->Dispatch.Exec, (location, x));
    }
 }
 
@@ -6470,7 +6476,7 @@ save_Uniform2ui(GLint location, GLuint x, GLuint y)
       n[3].i = y;
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform2ui(ctx->Exec, (location, x, y));
+      CALL_Uniform2ui(ctx->Dispatch.Exec, (location, x, y));
    }
 }
 
@@ -6488,7 +6494,7 @@ save_Uniform3ui(GLint location, GLuint x, GLuint y, GLuint z)
       n[4].i = z;
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform3ui(ctx->Exec, (location, x, y, z));
+      CALL_Uniform3ui(ctx->Dispatch.Exec, (location, x, y, z));
    }
 }
 
@@ -6507,7 +6513,7 @@ save_Uniform4ui(GLint location, GLuint x, GLuint y, GLuint z, GLuint w)
       n[5].i = w;
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform4ui(ctx->Exec, (location, x, y, z, w));
+      CALL_Uniform4ui(ctx->Dispatch.Exec, (location, x, y, z, w));
    }
 }
 
@@ -6526,7 +6532,7 @@ save_Uniform1uiv(GLint location, GLsizei count, const GLuint *v)
       save_pointer(&n[3], memdup(v, count * 1 * sizeof(*v)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform1uiv(ctx->Exec, (location, count, v));
+      CALL_Uniform1uiv(ctx->Dispatch.Exec, (location, count, v));
    }
 }
 
@@ -6543,7 +6549,7 @@ save_Uniform2uiv(GLint location, GLsizei count, const GLuint *v)
       save_pointer(&n[3], memdup(v, count * 2 * sizeof(*v)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform2uiv(ctx->Exec, (location, count, v));
+      CALL_Uniform2uiv(ctx->Dispatch.Exec, (location, count, v));
    }
 }
 
@@ -6560,7 +6566,7 @@ save_Uniform3uiv(GLint location, GLsizei count, const GLuint *v)
       save_pointer(&n[3], memdup(v, count * 3 * sizeof(*v)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform3uiv(ctx->Exec, (location, count, v));
+      CALL_Uniform3uiv(ctx->Dispatch.Exec, (location, count, v));
    }
 }
 
@@ -6577,7 +6583,7 @@ save_Uniform4uiv(GLint location, GLsizei count, const GLuint *v)
       save_pointer(&n[3], memdup(v, count * 4 * sizeof(*v)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform4uiv(ctx->Exec, (location, count, v));
+      CALL_Uniform4uiv(ctx->Dispatch.Exec, (location, count, v));
    }
 }
 
@@ -6598,7 +6604,7 @@ save_UniformMatrix2fv(GLint location, GLsizei count, GLboolean transpose,
       save_pointer(&n[4], memdup(m, count * 2 * 2 * sizeof(GLfloat)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_UniformMatrix2fv(ctx->Exec, (location, count, transpose, m));
+      CALL_UniformMatrix2fv(ctx->Dispatch.Exec, (location, count, transpose, m));
    }
 }
 
@@ -6617,7 +6623,7 @@ save_UniformMatrix3fv(GLint location, GLsizei count, GLboolean transpose,
       save_pointer(&n[4], memdup(m, count * 3 * 3 * sizeof(GLfloat)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_UniformMatrix3fv(ctx->Exec, (location, count, transpose, m));
+      CALL_UniformMatrix3fv(ctx->Dispatch.Exec, (location, count, transpose, m));
    }
 }
 
@@ -6636,7 +6642,7 @@ save_UniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose,
       save_pointer(&n[4], memdup(m, count * 4 * 4 * sizeof(GLfloat)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_UniformMatrix4fv(ctx->Exec, (location, count, transpose, m));
+      CALL_UniformMatrix4fv(ctx->Dispatch.Exec, (location, count, transpose, m));
    }
 }
 
@@ -6656,7 +6662,7 @@ save_UniformMatrix2x3fv(GLint location, GLsizei count, GLboolean transpose,
       save_pointer(&n[4], memdup(m, count * 2 * 3 * sizeof(GLfloat)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_UniformMatrix2x3fv(ctx->Exec, (location, count, transpose, m));
+      CALL_UniformMatrix2x3fv(ctx->Dispatch.Exec, (location, count, transpose, m));
    }
 }
 
@@ -6675,7 +6681,7 @@ save_UniformMatrix3x2fv(GLint location, GLsizei count, GLboolean transpose,
       save_pointer(&n[4], memdup(m, count * 3 * 2 * sizeof(GLfloat)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_UniformMatrix3x2fv(ctx->Exec, (location, count, transpose, m));
+      CALL_UniformMatrix3x2fv(ctx->Dispatch.Exec, (location, count, transpose, m));
    }
 }
 
@@ -6695,7 +6701,7 @@ save_UniformMatrix2x4fv(GLint location, GLsizei count, GLboolean transpose,
       save_pointer(&n[4], memdup(m, count * 2 * 4 * sizeof(GLfloat)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_UniformMatrix2x4fv(ctx->Exec, (location, count, transpose, m));
+      CALL_UniformMatrix2x4fv(ctx->Dispatch.Exec, (location, count, transpose, m));
    }
 }
 
@@ -6714,7 +6720,7 @@ save_UniformMatrix4x2fv(GLint location, GLsizei count, GLboolean transpose,
       save_pointer(&n[4], memdup(m, count * 4 * 2 * sizeof(GLfloat)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_UniformMatrix4x2fv(ctx->Exec, (location, count, transpose, m));
+      CALL_UniformMatrix4x2fv(ctx->Dispatch.Exec, (location, count, transpose, m));
    }
 }
 
@@ -6734,7 +6740,7 @@ save_UniformMatrix3x4fv(GLint location, GLsizei count, GLboolean transpose,
       save_pointer(&n[4], memdup(m, count * 3 * 4 * sizeof(GLfloat)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_UniformMatrix3x4fv(ctx->Exec, (location, count, transpose, m));
+      CALL_UniformMatrix3x4fv(ctx->Dispatch.Exec, (location, count, transpose, m));
    }
 }
 
@@ -6753,7 +6759,7 @@ save_UniformMatrix4x3fv(GLint location, GLsizei count, GLboolean transpose,
       save_pointer(&n[4], memdup(m, count * 4 * 3 * sizeof(GLfloat)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_UniformMatrix4x3fv(ctx->Exec, (location, count, transpose, m));
+      CALL_UniformMatrix4x3fv(ctx->Dispatch.Exec, (location, count, transpose, m));
    }
 }
 
@@ -6773,7 +6779,7 @@ save_UniformMatrix2dv(GLint location, GLsizei count, GLboolean transpose,
       save_pointer(&n[4], memdup(m, count * 2 * 2 * sizeof(GLdouble)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_UniformMatrix2dv(ctx->Exec, (location, count, transpose, m));
+      CALL_UniformMatrix2dv(ctx->Dispatch.Exec, (location, count, transpose, m));
    }
 }
 
@@ -6792,7 +6798,7 @@ save_UniformMatrix3dv(GLint location, GLsizei count, GLboolean transpose,
       save_pointer(&n[4], memdup(m, count * 3 * 3 * sizeof(GLdouble)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_UniformMatrix3dv(ctx->Exec, (location, count, transpose, m));
+      CALL_UniformMatrix3dv(ctx->Dispatch.Exec, (location, count, transpose, m));
    }
 }
 
@@ -6811,7 +6817,7 @@ save_UniformMatrix4dv(GLint location, GLsizei count, GLboolean transpose,
       save_pointer(&n[4], memdup(m, count * 4 * 4 * sizeof(GLdouble)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_UniformMatrix4dv(ctx->Exec, (location, count, transpose, m));
+      CALL_UniformMatrix4dv(ctx->Dispatch.Exec, (location, count, transpose, m));
    }
 }
 
@@ -6831,7 +6837,7 @@ save_UniformMatrix2x3dv(GLint location, GLsizei count, GLboolean transpose,
       save_pointer(&n[4], memdup(m, count * 2 * 3 * sizeof(GLdouble)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_UniformMatrix2x3dv(ctx->Exec, (location, count, transpose, m));
+      CALL_UniformMatrix2x3dv(ctx->Dispatch.Exec, (location, count, transpose, m));
    }
 }
 
@@ -6851,7 +6857,7 @@ save_UniformMatrix3x2dv(GLint location, GLsizei count, GLboolean transpose,
       save_pointer(&n[4], memdup(m, count * 3 * 2 * sizeof(GLdouble)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_UniformMatrix3x2dv(ctx->Exec, (location, count, transpose, m));
+      CALL_UniformMatrix3x2dv(ctx->Dispatch.Exec, (location, count, transpose, m));
    }
 }
 
@@ -6871,7 +6877,7 @@ save_UniformMatrix2x4dv(GLint location, GLsizei count, GLboolean transpose,
       save_pointer(&n[4], memdup(m, count * 2 * 4 * sizeof(GLdouble)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_UniformMatrix2x4dv(ctx->Exec, (location, count, transpose, m));
+      CALL_UniformMatrix2x4dv(ctx->Dispatch.Exec, (location, count, transpose, m));
    }
 }
 
@@ -6890,7 +6896,7 @@ save_UniformMatrix4x2dv(GLint location, GLsizei count, GLboolean transpose,
       save_pointer(&n[4], memdup(m, count * 4 * 2 * sizeof(GLdouble)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_UniformMatrix4x2dv(ctx->Exec, (location, count, transpose, m));
+      CALL_UniformMatrix4x2dv(ctx->Dispatch.Exec, (location, count, transpose, m));
    }
 }
 
@@ -6910,7 +6916,7 @@ save_UniformMatrix3x4dv(GLint location, GLsizei count, GLboolean transpose,
       save_pointer(&n[4], memdup(m, count * 3 * 4 * sizeof(GLdouble)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_UniformMatrix3x4dv(ctx->Exec, (location, count, transpose, m));
+      CALL_UniformMatrix3x4dv(ctx->Dispatch.Exec, (location, count, transpose, m));
    }
 }
 
@@ -6930,7 +6936,7 @@ save_UniformMatrix4x3dv(GLint location, GLsizei count, GLboolean transpose,
       save_pointer(&n[4], memdup(m, count * 4 * 3 * sizeof(GLdouble)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_UniformMatrix4x3dv(ctx->Exec, (location, count, transpose, m));
+      CALL_UniformMatrix4x3dv(ctx->Dispatch.Exec, (location, count, transpose, m));
    }
 }
 
@@ -6946,7 +6952,7 @@ save_Uniform1i64ARB(GLint location, GLint64 x)
       ASSIGN_INT64_TO_NODES(n, 2, x);
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform1i64ARB(ctx->Exec, (location, x));
+      CALL_Uniform1i64ARB(ctx->Dispatch.Exec, (location, x));
    }
 }
 
@@ -6963,7 +6969,7 @@ save_Uniform2i64ARB(GLint location, GLint64 x, GLint64 y)
       ASSIGN_INT64_TO_NODES(n, 4, y);
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform2i64ARB(ctx->Exec, (location, x, y));
+      CALL_Uniform2i64ARB(ctx->Dispatch.Exec, (location, x, y));
    }
 }
 
@@ -6981,7 +6987,7 @@ save_Uniform3i64ARB(GLint location, GLint64 x, GLint64 y, GLint64 z)
       ASSIGN_INT64_TO_NODES(n, 6, z);
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform3i64ARB(ctx->Exec, (location, x, y, z));
+      CALL_Uniform3i64ARB(ctx->Dispatch.Exec, (location, x, y, z));
    }
 }
 
@@ -7000,7 +7006,7 @@ save_Uniform4i64ARB(GLint location, GLint64 x, GLint64 y, GLint64 z, GLint64 w)
       ASSIGN_INT64_TO_NODES(n, 8, w);
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform4i64ARB(ctx->Exec, (location, x, y, z, w));
+      CALL_Uniform4i64ARB(ctx->Dispatch.Exec, (location, x, y, z, w));
    }
 }
 
@@ -7017,7 +7023,7 @@ save_Uniform1i64vARB(GLint location, GLsizei count, const GLint64 *v)
      save_pointer(&n[3], memdup(v, count * 1 * sizeof(GLint64)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform1i64vARB(ctx->Exec, (location, count, v));
+      CALL_Uniform1i64vARB(ctx->Dispatch.Exec, (location, count, v));
    }
 }
 
@@ -7034,7 +7040,7 @@ save_Uniform2i64vARB(GLint location, GLsizei count, const GLint64 *v)
      save_pointer(&n[3], memdup(v, count * 2 * sizeof(GLint64)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform2i64vARB(ctx->Exec, (location, count, v));
+      CALL_Uniform2i64vARB(ctx->Dispatch.Exec, (location, count, v));
    }
 }
 
@@ -7051,7 +7057,7 @@ save_Uniform3i64vARB(GLint location, GLsizei count, const GLint64 *v)
      save_pointer(&n[3], memdup(v, count * 3 * sizeof(GLint64)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform3i64vARB(ctx->Exec, (location, count, v));
+      CALL_Uniform3i64vARB(ctx->Dispatch.Exec, (location, count, v));
    }
 }
 
@@ -7068,7 +7074,7 @@ save_Uniform4i64vARB(GLint location, GLsizei count, const GLint64 *v)
      save_pointer(&n[3], memdup(v, count * 4 * sizeof(GLint64)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform4i64vARB(ctx->Exec, (location, count, v));
+      CALL_Uniform4i64vARB(ctx->Dispatch.Exec, (location, count, v));
    }
 }
 
@@ -7084,7 +7090,7 @@ save_Uniform1ui64ARB(GLint location, GLuint64 x)
       ASSIGN_UINT64_TO_NODES(n, 2, x);
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform1ui64ARB(ctx->Exec, (location, x));
+      CALL_Uniform1ui64ARB(ctx->Dispatch.Exec, (location, x));
    }
 }
 
@@ -7101,7 +7107,7 @@ save_Uniform2ui64ARB(GLint location, GLuint64 x, GLuint64 y)
       ASSIGN_UINT64_TO_NODES(n, 4, y);
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform2ui64ARB(ctx->Exec, (location, x, y));
+      CALL_Uniform2ui64ARB(ctx->Dispatch.Exec, (location, x, y));
    }
 }
 
@@ -7119,7 +7125,7 @@ save_Uniform3ui64ARB(GLint location, GLuint64 x, GLuint64 y, GLuint64 z)
       ASSIGN_UINT64_TO_NODES(n, 6, z);
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform3ui64ARB(ctx->Exec, (location, x, y, z));
+      CALL_Uniform3ui64ARB(ctx->Dispatch.Exec, (location, x, y, z));
    }
 }
 
@@ -7138,7 +7144,7 @@ save_Uniform4ui64ARB(GLint location, GLuint64 x, GLuint64 y, GLuint64 z, GLuint6
       ASSIGN_UINT64_TO_NODES(n, 8, w);
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform4ui64ARB(ctx->Exec, (location, x, y, z, w));
+      CALL_Uniform4ui64ARB(ctx->Dispatch.Exec, (location, x, y, z, w));
    }
 }
 
@@ -7155,7 +7161,7 @@ save_Uniform1ui64vARB(GLint location, GLsizei count, const GLuint64 *v)
      save_pointer(&n[3], memdup(v, count * 1 * sizeof(GLuint64)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform1ui64vARB(ctx->Exec, (location, count, v));
+      CALL_Uniform1ui64vARB(ctx->Dispatch.Exec, (location, count, v));
    }
 }
 
@@ -7172,7 +7178,7 @@ save_Uniform2ui64vARB(GLint location, GLsizei count, const GLuint64 *v)
      save_pointer(&n[3], memdup(v, count * 2 * sizeof(GLuint64)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform2ui64vARB(ctx->Exec, (location, count, v));
+      CALL_Uniform2ui64vARB(ctx->Dispatch.Exec, (location, count, v));
    }
 }
 
@@ -7189,7 +7195,7 @@ save_Uniform3ui64vARB(GLint location, GLsizei count, const GLuint64 *v)
      save_pointer(&n[3], memdup(v, count * 3 * sizeof(GLuint64)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform3ui64vARB(ctx->Exec, (location, count, v));
+      CALL_Uniform3ui64vARB(ctx->Dispatch.Exec, (location, count, v));
    }
 }
 
@@ -7206,7 +7212,7 @@ save_Uniform4ui64vARB(GLint location, GLsizei count, const GLuint64 *v)
      save_pointer(&n[3], memdup(v, count * 4 * sizeof(GLuint64)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_Uniform4ui64vARB(ctx->Exec, (location, count, v));
+      CALL_Uniform4ui64vARB(ctx->Dispatch.Exec, (location, count, v));
    }
 }
 
@@ -7223,7 +7229,7 @@ save_ProgramUniform1i64ARB(GLuint program, GLint location, GLint64 x)
       ASSIGN_INT64_TO_NODES(n, 3, x);
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform1i64ARB(ctx->Exec, (program, location, x));
+      CALL_ProgramUniform1i64ARB(ctx->Dispatch.Exec, (program, location, x));
    }
 }
 
@@ -7242,7 +7248,7 @@ save_ProgramUniform2i64ARB(GLuint program, GLint location, GLint64 x,
       ASSIGN_INT64_TO_NODES(n, 5, y);
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform2i64ARB(ctx->Exec, (program, location, x, y));
+      CALL_ProgramUniform2i64ARB(ctx->Dispatch.Exec, (program, location, x, y));
    }
 }
 
@@ -7262,7 +7268,7 @@ save_ProgramUniform3i64ARB(GLuint program, GLint location, GLint64 x,
       ASSIGN_INT64_TO_NODES(n, 7, z);
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform3i64ARB(ctx->Exec, (program, location, x, y, z));
+      CALL_ProgramUniform3i64ARB(ctx->Dispatch.Exec, (program, location, x, y, z));
    }
 }
 
@@ -7283,7 +7289,7 @@ save_ProgramUniform4i64ARB(GLuint program, GLint location, GLint64 x,
       ASSIGN_INT64_TO_NODES(n, 9, w);
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform4i64ARB(ctx->Exec, (program, location, x, y, z, w));
+      CALL_ProgramUniform4i64ARB(ctx->Dispatch.Exec, (program, location, x, y, z, w));
    }
 }
 
@@ -7302,7 +7308,7 @@ save_ProgramUniform1i64vARB(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[4], memdup(v, count * 1 * sizeof(GLint64)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform1i64vARB(ctx->Exec, (program, location, count, v));
+      CALL_ProgramUniform1i64vARB(ctx->Dispatch.Exec, (program, location, count, v));
    }
 }
 
@@ -7321,7 +7327,7 @@ save_ProgramUniform2i64vARB(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[4], memdup(v, count * 1 * sizeof(GLint64)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform2i64vARB(ctx->Exec, (program, location, count, v));
+      CALL_ProgramUniform2i64vARB(ctx->Dispatch.Exec, (program, location, count, v));
    }
 }
 
@@ -7340,7 +7346,7 @@ save_ProgramUniform3i64vARB(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[4], memdup(v, count * 1 * sizeof(GLint64)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform3i64vARB(ctx->Exec, (program, location, count, v));
+      CALL_ProgramUniform3i64vARB(ctx->Dispatch.Exec, (program, location, count, v));
    }
 }
 
@@ -7359,7 +7365,7 @@ save_ProgramUniform4i64vARB(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[4], memdup(v, count * 1 * sizeof(GLint64)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform4i64vARB(ctx->Exec, (program, location, count, v));
+      CALL_ProgramUniform4i64vARB(ctx->Dispatch.Exec, (program, location, count, v));
    }
 }
 
@@ -7376,7 +7382,7 @@ save_ProgramUniform1ui64ARB(GLuint program, GLint location, GLuint64 x)
       ASSIGN_UINT64_TO_NODES(n, 3, x);
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform1ui64ARB(ctx->Exec, (program, location, x));
+      CALL_ProgramUniform1ui64ARB(ctx->Dispatch.Exec, (program, location, x));
    }
 }
 
@@ -7395,7 +7401,7 @@ save_ProgramUniform2ui64ARB(GLuint program, GLint location, GLuint64 x,
       ASSIGN_UINT64_TO_NODES(n, 5, y);
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform2ui64ARB(ctx->Exec, (program, location, x, y));
+      CALL_ProgramUniform2ui64ARB(ctx->Dispatch.Exec, (program, location, x, y));
    }
 }
 
@@ -7415,7 +7421,7 @@ save_ProgramUniform3ui64ARB(GLuint program, GLint location, GLuint64 x,
       ASSIGN_UINT64_TO_NODES(n, 7, z);
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform3ui64ARB(ctx->Exec, (program, location, x, y, z));
+      CALL_ProgramUniform3ui64ARB(ctx->Dispatch.Exec, (program, location, x, y, z));
    }
 }
 
@@ -7436,7 +7442,7 @@ save_ProgramUniform4ui64ARB(GLuint program, GLint location, GLuint64 x,
       ASSIGN_UINT64_TO_NODES(n, 9, w);
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform4i64ARB(ctx->Exec, (program, location, x, y, z, w));
+      CALL_ProgramUniform4i64ARB(ctx->Dispatch.Exec, (program, location, x, y, z, w));
    }
 }
 
@@ -7456,7 +7462,7 @@ save_ProgramUniform1ui64vARB(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[4], memdup(v, count * 1 * sizeof(GLuint64)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform1ui64vARB(ctx->Exec, (program, location, count, v));
+      CALL_ProgramUniform1ui64vARB(ctx->Dispatch.Exec, (program, location, count, v));
    }
 }
 
@@ -7476,7 +7482,7 @@ save_ProgramUniform2ui64vARB(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[4], memdup(v, count * 1 * sizeof(GLuint64)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform2ui64vARB(ctx->Exec, (program, location, count, v));
+      CALL_ProgramUniform2ui64vARB(ctx->Dispatch.Exec, (program, location, count, v));
    }
 }
 
@@ -7496,7 +7502,7 @@ save_ProgramUniform3ui64vARB(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[4], memdup(v, count * 1 * sizeof(GLuint64)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform3ui64vARB(ctx->Exec, (program, location, count, v));
+      CALL_ProgramUniform3ui64vARB(ctx->Dispatch.Exec, (program, location, count, v));
    }
 }
 
@@ -7516,7 +7522,7 @@ save_ProgramUniform4ui64vARB(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[4], memdup(v, count * 1 * sizeof(GLuint64)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform4ui64vARB(ctx->Exec, (program, location, count, v));
+      CALL_ProgramUniform4ui64vARB(ctx->Dispatch.Exec, (program, location, count, v));
    }
 }
 
@@ -7534,7 +7540,7 @@ save_UseProgramStages(GLuint pipeline, GLbitfield stages, GLuint program)
       n[3].ui = program;
    }
    if (ctx->ExecuteFlag) {
-      CALL_UseProgramStages(ctx->Exec, (pipeline, stages, program));
+      CALL_UseProgramStages(ctx->Dispatch.Exec, (pipeline, stages, program));
    }
 }
 
@@ -7551,7 +7557,7 @@ save_ProgramUniform1f(GLuint program, GLint location, GLfloat x)
       n[3].f = x;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform1f(ctx->Exec, (program, location, x));
+      CALL_ProgramUniform1f(ctx->Dispatch.Exec, (program, location, x));
    }
 }
 
@@ -7569,7 +7575,7 @@ save_ProgramUniform2f(GLuint program, GLint location, GLfloat x, GLfloat y)
       n[4].f = y;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform2f(ctx->Exec, (program, location, x, y));
+      CALL_ProgramUniform2f(ctx->Dispatch.Exec, (program, location, x, y));
    }
 }
 
@@ -7589,7 +7595,7 @@ save_ProgramUniform3f(GLuint program, GLint location,
       n[5].f = z;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform3f(ctx->Exec, (program, location, x, y, z));
+      CALL_ProgramUniform3f(ctx->Dispatch.Exec, (program, location, x, y, z));
    }
 }
 
@@ -7610,7 +7616,7 @@ save_ProgramUniform4f(GLuint program, GLint location,
       n[6].f = w;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform4f(ctx->Exec, (program, location, x, y, z, w));
+      CALL_ProgramUniform4f(ctx->Dispatch.Exec, (program, location, x, y, z, w));
    }
 }
 
@@ -7629,7 +7635,7 @@ save_ProgramUniform1fv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[4], memdup(v, count * 1 * sizeof(GLfloat)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform1fv(ctx->Exec, (program, location, count, v));
+      CALL_ProgramUniform1fv(ctx->Dispatch.Exec, (program, location, count, v));
    }
 }
 
@@ -7648,7 +7654,7 @@ save_ProgramUniform2fv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[4], memdup(v, count * 2 * sizeof(GLfloat)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform2fv(ctx->Exec, (program, location, count, v));
+      CALL_ProgramUniform2fv(ctx->Dispatch.Exec, (program, location, count, v));
    }
 }
 
@@ -7667,7 +7673,7 @@ save_ProgramUniform3fv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[4], memdup(v, count * 3 * sizeof(GLfloat)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform3fv(ctx->Exec, (program, location, count, v));
+      CALL_ProgramUniform3fv(ctx->Dispatch.Exec, (program, location, count, v));
    }
 }
 
@@ -7686,7 +7692,7 @@ save_ProgramUniform4fv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[4], memdup(v, count * 4 * sizeof(GLfloat)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform4fv(ctx->Exec, (program, location, count, v));
+      CALL_ProgramUniform4fv(ctx->Dispatch.Exec, (program, location, count, v));
    }
 }
 
@@ -7703,7 +7709,7 @@ save_ProgramUniform1d(GLuint program, GLint location, GLdouble x)
       ASSIGN_DOUBLE_TO_NODES(n, 3, x);
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform1d(ctx->Exec, (program, location, x));
+      CALL_ProgramUniform1d(ctx->Dispatch.Exec, (program, location, x));
    }
 }
 
@@ -7721,7 +7727,7 @@ save_ProgramUniform2d(GLuint program, GLint location, GLdouble x, GLdouble y)
       ASSIGN_DOUBLE_TO_NODES(n, 5, y);
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform2d(ctx->Exec, (program, location, x, y));
+      CALL_ProgramUniform2d(ctx->Dispatch.Exec, (program, location, x, y));
    }
 }
 
@@ -7741,7 +7747,7 @@ save_ProgramUniform3d(GLuint program, GLint location,
       ASSIGN_DOUBLE_TO_NODES(n, 7, z);
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform3d(ctx->Exec, (program, location, x, y, z));
+      CALL_ProgramUniform3d(ctx->Dispatch.Exec, (program, location, x, y, z));
    }
 }
 
@@ -7762,7 +7768,7 @@ save_ProgramUniform4d(GLuint program, GLint location,
       ASSIGN_DOUBLE_TO_NODES(n, 9, w);
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform4d(ctx->Exec, (program, location, x, y, z, w));
+      CALL_ProgramUniform4d(ctx->Dispatch.Exec, (program, location, x, y, z, w));
    }
 }
 
@@ -7781,7 +7787,7 @@ save_ProgramUniform1dv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[4], memdup(v, count * 1 * sizeof(GLdouble)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform1dv(ctx->Exec, (program, location, count, v));
+      CALL_ProgramUniform1dv(ctx->Dispatch.Exec, (program, location, count, v));
    }
 }
 
@@ -7800,7 +7806,7 @@ save_ProgramUniform2dv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[4], memdup(v, count * 2 * sizeof(GLdouble)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform2dv(ctx->Exec, (program, location, count, v));
+      CALL_ProgramUniform2dv(ctx->Dispatch.Exec, (program, location, count, v));
    }
 }
 
@@ -7819,7 +7825,7 @@ save_ProgramUniform3dv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[4], memdup(v, count * 3 * sizeof(GLdouble)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform3dv(ctx->Exec, (program, location, count, v));
+      CALL_ProgramUniform3dv(ctx->Dispatch.Exec, (program, location, count, v));
    }
 }
 
@@ -7838,7 +7844,7 @@ save_ProgramUniform4dv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[4], memdup(v, count * 4 * sizeof(GLdouble)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform4dv(ctx->Exec, (program, location, count, v));
+      CALL_ProgramUniform4dv(ctx->Dispatch.Exec, (program, location, count, v));
    }
 }
 
@@ -7855,7 +7861,7 @@ save_ProgramUniform1i(GLuint program, GLint location, GLint x)
       n[3].i = x;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform1i(ctx->Exec, (program, location, x));
+      CALL_ProgramUniform1i(ctx->Dispatch.Exec, (program, location, x));
    }
 }
 
@@ -7873,7 +7879,7 @@ save_ProgramUniform2i(GLuint program, GLint location, GLint x, GLint y)
       n[4].i = y;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform2i(ctx->Exec, (program, location, x, y));
+      CALL_ProgramUniform2i(ctx->Dispatch.Exec, (program, location, x, y));
    }
 }
 
@@ -7893,7 +7899,7 @@ save_ProgramUniform3i(GLuint program, GLint location,
       n[5].i = z;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform3i(ctx->Exec, (program, location, x, y, z));
+      CALL_ProgramUniform3i(ctx->Dispatch.Exec, (program, location, x, y, z));
    }
 }
 
@@ -7914,7 +7920,7 @@ save_ProgramUniform4i(GLuint program, GLint location,
       n[6].i = w;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform4i(ctx->Exec, (program, location, x, y, z, w));
+      CALL_ProgramUniform4i(ctx->Dispatch.Exec, (program, location, x, y, z, w));
    }
 }
 
@@ -7933,7 +7939,7 @@ save_ProgramUniform1iv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[4], memdup(v, count * 1 * sizeof(GLint)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform1iv(ctx->Exec, (program, location, count, v));
+      CALL_ProgramUniform1iv(ctx->Dispatch.Exec, (program, location, count, v));
    }
 }
 
@@ -7952,7 +7958,7 @@ save_ProgramUniform2iv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[4], memdup(v, count * 2 * sizeof(GLint)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform2iv(ctx->Exec, (program, location, count, v));
+      CALL_ProgramUniform2iv(ctx->Dispatch.Exec, (program, location, count, v));
    }
 }
 
@@ -7971,7 +7977,7 @@ save_ProgramUniform3iv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[4], memdup(v, count * 3 * sizeof(GLint)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform3iv(ctx->Exec, (program, location, count, v));
+      CALL_ProgramUniform3iv(ctx->Dispatch.Exec, (program, location, count, v));
    }
 }
 
@@ -7990,7 +7996,7 @@ save_ProgramUniform4iv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[4], memdup(v, count * 4 * sizeof(GLint)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform4iv(ctx->Exec, (program, location, count, v));
+      CALL_ProgramUniform4iv(ctx->Dispatch.Exec, (program, location, count, v));
    }
 }
 
@@ -8007,7 +8013,7 @@ save_ProgramUniform1ui(GLuint program, GLint location, GLuint x)
       n[3].ui = x;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform1ui(ctx->Exec, (program, location, x));
+      CALL_ProgramUniform1ui(ctx->Dispatch.Exec, (program, location, x));
    }
 }
 
@@ -8025,7 +8031,7 @@ save_ProgramUniform2ui(GLuint program, GLint location, GLuint x, GLuint y)
       n[4].ui = y;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform2ui(ctx->Exec, (program, location, x, y));
+      CALL_ProgramUniform2ui(ctx->Dispatch.Exec, (program, location, x, y));
    }
 }
 
@@ -8045,7 +8051,7 @@ save_ProgramUniform3ui(GLuint program, GLint location,
       n[5].ui = z;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform3ui(ctx->Exec, (program, location, x, y, z));
+      CALL_ProgramUniform3ui(ctx->Dispatch.Exec, (program, location, x, y, z));
    }
 }
 
@@ -8066,7 +8072,7 @@ save_ProgramUniform4ui(GLuint program, GLint location,
       n[6].ui = w;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform4ui(ctx->Exec, (program, location, x, y, z, w));
+      CALL_ProgramUniform4ui(ctx->Dispatch.Exec, (program, location, x, y, z, w));
    }
 }
 
@@ -8085,7 +8091,7 @@ save_ProgramUniform1uiv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[4], memdup(v, count * 1 * sizeof(GLuint)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform1uiv(ctx->Exec, (program, location, count, v));
+      CALL_ProgramUniform1uiv(ctx->Dispatch.Exec, (program, location, count, v));
    }
 }
 
@@ -8104,7 +8110,7 @@ save_ProgramUniform2uiv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[4], memdup(v, count * 2 * sizeof(GLuint)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform2uiv(ctx->Exec, (program, location, count, v));
+      CALL_ProgramUniform2uiv(ctx->Dispatch.Exec, (program, location, count, v));
    }
 }
 
@@ -8123,7 +8129,7 @@ save_ProgramUniform3uiv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[4], memdup(v, count * 3 * sizeof(GLuint)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform3uiv(ctx->Exec, (program, location, count, v));
+      CALL_ProgramUniform3uiv(ctx->Dispatch.Exec, (program, location, count, v));
    }
 }
 
@@ -8142,7 +8148,7 @@ save_ProgramUniform4uiv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[4], memdup(v, count * 4 * sizeof(GLuint)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniform4uiv(ctx->Exec, (program, location, count, v));
+      CALL_ProgramUniform4uiv(ctx->Dispatch.Exec, (program, location, count, v));
    }
 }
 
@@ -8163,7 +8169,7 @@ save_ProgramUniformMatrix2fv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[5], memdup(v, count * 2 * 2 * sizeof(GLfloat)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniformMatrix2fv(ctx->Exec,
+      CALL_ProgramUniformMatrix2fv(ctx->Dispatch.Exec,
                                    (program, location, count, transpose, v));
    }
 }
@@ -8185,7 +8191,7 @@ save_ProgramUniformMatrix2x3fv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[5], memdup(v, count * 2 * 3 * sizeof(GLfloat)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniformMatrix2x3fv(ctx->Exec,
+      CALL_ProgramUniformMatrix2x3fv(ctx->Dispatch.Exec,
                                      (program, location, count, transpose, v));
    }
 }
@@ -8207,7 +8213,7 @@ save_ProgramUniformMatrix2x4fv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[5], memdup(v, count * 2 * 4 * sizeof(GLfloat)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniformMatrix2x4fv(ctx->Exec,
+      CALL_ProgramUniformMatrix2x4fv(ctx->Dispatch.Exec,
                                      (program, location, count, transpose, v));
    }
 }
@@ -8229,7 +8235,7 @@ save_ProgramUniformMatrix3x2fv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[5], memdup(v, count * 3 * 2 * sizeof(GLfloat)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniformMatrix3x2fv(ctx->Exec,
+      CALL_ProgramUniformMatrix3x2fv(ctx->Dispatch.Exec,
                                      (program, location, count, transpose, v));
    }
 }
@@ -8251,7 +8257,7 @@ save_ProgramUniformMatrix3fv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[5], memdup(v, count * 3 * 3 * sizeof(GLfloat)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniformMatrix3fv(ctx->Exec,
+      CALL_ProgramUniformMatrix3fv(ctx->Dispatch.Exec,
                                    (program, location, count, transpose, v));
    }
 }
@@ -8273,7 +8279,7 @@ save_ProgramUniformMatrix3x4fv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[5], memdup(v, count * 3 * 4 * sizeof(GLfloat)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniformMatrix3x4fv(ctx->Exec,
+      CALL_ProgramUniformMatrix3x4fv(ctx->Dispatch.Exec,
                                      (program, location, count, transpose, v));
    }
 }
@@ -8295,7 +8301,7 @@ save_ProgramUniformMatrix4x2fv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[5], memdup(v, count * 4 * 2 * sizeof(GLfloat)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniformMatrix4x2fv(ctx->Exec,
+      CALL_ProgramUniformMatrix4x2fv(ctx->Dispatch.Exec,
                                      (program, location, count, transpose, v));
    }
 }
@@ -8317,7 +8323,7 @@ save_ProgramUniformMatrix4x3fv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[5], memdup(v, count * 4 * 3 * sizeof(GLfloat)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniformMatrix4x3fv(ctx->Exec,
+      CALL_ProgramUniformMatrix4x3fv(ctx->Dispatch.Exec,
                                      (program, location, count, transpose, v));
    }
 }
@@ -8339,7 +8345,7 @@ save_ProgramUniformMatrix4fv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[5], memdup(v, count * 4 * 4 * sizeof(GLfloat)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniformMatrix4fv(ctx->Exec,
+      CALL_ProgramUniformMatrix4fv(ctx->Dispatch.Exec,
                                    (program, location, count, transpose, v));
    }
 }
@@ -8361,7 +8367,7 @@ save_ProgramUniformMatrix2dv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[5], memdup(v, count * 2 * 2 * sizeof(GLdouble)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniformMatrix2dv(ctx->Exec,
+      CALL_ProgramUniformMatrix2dv(ctx->Dispatch.Exec,
                                    (program, location, count, transpose, v));
    }
 }
@@ -8383,7 +8389,7 @@ save_ProgramUniformMatrix2x3dv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[5], memdup(v, count * 2 * 3 * sizeof(GLdouble)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniformMatrix2x3dv(ctx->Exec,
+      CALL_ProgramUniformMatrix2x3dv(ctx->Dispatch.Exec,
                                      (program, location, count, transpose, v));
    }
 }
@@ -8405,7 +8411,7 @@ save_ProgramUniformMatrix2x4dv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[5], memdup(v, count * 2 * 4 * sizeof(GLdouble)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniformMatrix2x4dv(ctx->Exec,
+      CALL_ProgramUniformMatrix2x4dv(ctx->Dispatch.Exec,
                                      (program, location, count, transpose, v));
    }
 }
@@ -8427,7 +8433,7 @@ save_ProgramUniformMatrix3x2dv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[5], memdup(v, count * 3 * 2 * sizeof(GLdouble)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniformMatrix3x2dv(ctx->Exec,
+      CALL_ProgramUniformMatrix3x2dv(ctx->Dispatch.Exec,
                                      (program, location, count, transpose, v));
    }
 }
@@ -8449,7 +8455,7 @@ save_ProgramUniformMatrix3dv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[5], memdup(v, count * 3 * 3 * sizeof(GLdouble)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniformMatrix3dv(ctx->Exec,
+      CALL_ProgramUniformMatrix3dv(ctx->Dispatch.Exec,
                                    (program, location, count, transpose, v));
    }
 }
@@ -8471,7 +8477,7 @@ save_ProgramUniformMatrix3x4dv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[5], memdup(v, count * 3 * 4 * sizeof(GLdouble)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniformMatrix3x4dv(ctx->Exec,
+      CALL_ProgramUniformMatrix3x4dv(ctx->Dispatch.Exec,
                                      (program, location, count, transpose, v));
    }
 }
@@ -8493,7 +8499,7 @@ save_ProgramUniformMatrix4x2dv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[5], memdup(v, count * 4 * 2 * sizeof(GLdouble)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniformMatrix4x2dv(ctx->Exec,
+      CALL_ProgramUniformMatrix4x2dv(ctx->Dispatch.Exec,
                                      (program, location, count, transpose, v));
    }
 }
@@ -8515,7 +8521,7 @@ save_ProgramUniformMatrix4x3dv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[5], memdup(v, count * 4 * 3 * sizeof(GLdouble)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniformMatrix4x3dv(ctx->Exec,
+      CALL_ProgramUniformMatrix4x3dv(ctx->Dispatch.Exec,
                                      (program, location, count, transpose, v));
    }
 }
@@ -8537,7 +8543,7 @@ save_ProgramUniformMatrix4dv(GLuint program, GLint location, GLsizei count,
       save_pointer(&n[5], memdup(v, count * 4 * 4 * sizeof(GLdouble)));
    }
    if (ctx->ExecuteFlag) {
-      CALL_ProgramUniformMatrix4dv(ctx->Exec,
+      CALL_ProgramUniformMatrix4dv(ctx->Dispatch.Exec,
                                    (program, location, count, transpose, v));
    }
 }
@@ -8554,7 +8560,7 @@ save_ClipControl(GLenum origin, GLenum depth)
       n[2].e = depth;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ClipControl(ctx->Exec, (origin, depth));
+      CALL_ClipControl(ctx->Dispatch.Exec, (origin, depth));
    }
 }
 
@@ -8570,7 +8576,7 @@ save_ClampColor(GLenum target, GLenum clamp)
       n[2].e = clamp;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ClampColor(ctx->Exec, (target, clamp));
+      CALL_ClampColor(ctx->Dispatch.Exec, (target, clamp));
    }
 }
 
@@ -8589,7 +8595,7 @@ save_ClearColorIiEXT(GLint red, GLint green, GLint blue, GLint alpha)
       n[4].i = alpha;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ClearColorIiEXT(ctx->Exec, (red, green, blue, alpha));
+      CALL_ClearColorIiEXT(ctx->Dispatch.Exec, (red, green, blue, alpha));
    }
 }
 
@@ -8608,7 +8614,7 @@ save_ClearColorIuiEXT(GLuint red, GLuint green, GLuint blue, GLuint alpha)
       n[4].ui = alpha;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ClearColorIuiEXT(ctx->Exec, (red, green, blue, alpha));
+      CALL_ClearColorIuiEXT(ctx->Dispatch.Exec, (red, green, blue, alpha));
    }
 }
 
@@ -8629,7 +8635,7 @@ save_TexParameterIiv(GLenum target, GLenum pname, const GLint *params)
       n[6].i = params[3];
    }
    if (ctx->ExecuteFlag) {
-      CALL_TexParameterIiv(ctx->Exec, (target, pname, params));
+      CALL_TexParameterIiv(ctx->Dispatch.Exec, (target, pname, params));
    }
 }
 
@@ -8650,11 +8656,11 @@ save_TexParameterIuiv(GLenum target, GLenum pname, const GLuint *params)
       n[6].ui = params[3];
    }
    if (ctx->ExecuteFlag) {
-      CALL_TexParameterIuiv(ctx->Exec, (target, pname, params));
+      CALL_TexParameterIuiv(ctx->Dispatch.Exec, (target, pname, params));
    }
 }
 
-/* GL_ARB_instanced_arrays */
+/* GL_EXT/ARB_instanced_arrays */
 void GLAPIENTRY
 save_VertexAttribDivisor(GLuint index, GLuint divisor)
 {
@@ -8667,7 +8673,7 @@ save_VertexAttribDivisor(GLuint index, GLuint divisor)
       n[2].ui = divisor;
    }
    if (ctx->ExecuteFlag) {
-      CALL_VertexAttribDivisor(ctx->Exec, (index, divisor));
+      CALL_VertexAttribDivisor(ctx->Dispatch.Exec, (index, divisor));
    }
 }
 
@@ -8680,7 +8686,7 @@ save_TextureBarrierNV(void)
    ASSERT_OUTSIDE_SAVE_BEGIN_END_AND_FLUSH(ctx);
    alloc_instruction(ctx, OPCODE_TEXTURE_BARRIER_NV, 0);
    if (ctx->ExecuteFlag) {
-      CALL_TextureBarrierNV(ctx->Exec, ());
+      CALL_TextureBarrierNV(ctx->Dispatch.Exec, ());
    }
 }
 
@@ -8698,7 +8704,7 @@ save_BindSampler(GLuint unit, GLuint sampler)
       n[2].ui = sampler;
    }
    if (ctx->ExecuteFlag) {
-      CALL_BindSampler(ctx->Exec, (unit, sampler));
+      CALL_BindSampler(ctx->Dispatch.Exec, (unit, sampler));
    }
 }
 
@@ -8723,7 +8729,7 @@ save_SamplerParameteriv(GLuint sampler, GLenum pname, const GLint *params)
       }
    }
    if (ctx->ExecuteFlag) {
-      CALL_SamplerParameteriv(ctx->Exec, (sampler, pname, params));
+      CALL_SamplerParameteriv(ctx->Dispatch.Exec, (sampler, pname, params));
    }
 }
 
@@ -8757,7 +8763,7 @@ save_SamplerParameterfv(GLuint sampler, GLenum pname, const GLfloat *params)
       }
    }
    if (ctx->ExecuteFlag) {
-      CALL_SamplerParameterfv(ctx->Exec, (sampler, pname, params));
+      CALL_SamplerParameterfv(ctx->Dispatch.Exec, (sampler, pname, params));
    }
 }
 
@@ -8791,7 +8797,7 @@ save_SamplerParameterIiv(GLuint sampler, GLenum pname, const GLint *params)
       }
    }
    if (ctx->ExecuteFlag) {
-      CALL_SamplerParameterIiv(ctx->Exec, (sampler, pname, params));
+      CALL_SamplerParameterIiv(ctx->Dispatch.Exec, (sampler, pname, params));
    }
 }
 
@@ -8816,7 +8822,7 @@ save_SamplerParameterIuiv(GLuint sampler, GLenum pname, const GLuint *params)
       }
    }
    if (ctx->ExecuteFlag) {
-      CALL_SamplerParameterIuiv(ctx->Exec, (sampler, pname, params));
+      CALL_SamplerParameterIuiv(ctx->Dispatch.Exec, (sampler, pname, params));
    }
 }
 
@@ -8836,7 +8842,7 @@ save_WaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout)
       save_pointer(&n[4], sync);
    }
    if (ctx->ExecuteFlag) {
-      CALL_WaitSync(ctx->Exec, (sync, flags, timeout));
+      CALL_WaitSync(ctx->Dispatch.Exec, (sync, flags, timeout));
    }
 }
 
@@ -8854,7 +8860,7 @@ save_BeginConditionalRender(GLuint queryId, GLenum mode)
       n[2].e = mode;
    }
    if (ctx->ExecuteFlag) {
-      CALL_BeginConditionalRender(ctx->Exec, (queryId, mode));
+      CALL_BeginConditionalRender(ctx->Dispatch.Exec, (queryId, mode));
    }
 }
 
@@ -8865,7 +8871,7 @@ save_EndConditionalRender(void)
    ASSERT_OUTSIDE_SAVE_BEGIN_END_AND_FLUSH(ctx);
    alloc_instruction(ctx, OPCODE_END_CONDITIONAL_RENDER, 0);
    if (ctx->ExecuteFlag) {
-      CALL_EndConditionalRender(ctx->Exec, ());
+      CALL_EndConditionalRender(ctx->Dispatch.Exec, ());
    }
 }
 
@@ -8882,7 +8888,7 @@ save_UniformBlockBinding(GLuint prog, GLuint index, GLuint binding)
       n[3].ui = binding;
    }
    if (ctx->ExecuteFlag) {
-      CALL_UniformBlockBinding(ctx->Exec, (prog, index, binding));
+      CALL_UniformBlockBinding(ctx->Dispatch.Exec, (prog, index, binding));
    }
 }
 
@@ -8904,7 +8910,7 @@ save_UniformSubroutinesuiv(GLenum shadertype, GLsizei count,
       save_pointer(&n[3], indices_copy);
    }
    if (ctx->ExecuteFlag) {
-      CALL_UniformSubroutinesuiv(ctx->Exec, (shadertype, count, indices));
+      CALL_UniformSubroutinesuiv(ctx->Dispatch.Exec, (shadertype, count, indices));
    }
 }
 
@@ -8926,7 +8932,7 @@ save_WindowRectanglesEXT(GLenum mode, GLsizei count, const GLint *box)
       save_pointer(&n[3], box_copy);
    }
    if (ctx->ExecuteFlag) {
-      CALL_WindowRectanglesEXT(ctx->Exec, (mode, count, box));
+      CALL_WindowRectanglesEXT(ctx->Dispatch.Exec, (mode, count, box));
    }
 }
 
@@ -8944,7 +8950,7 @@ save_SubpixelPrecisionBiasNV(GLuint xbits, GLuint ybits)
       n[2].ui = ybits;
    }
    if (ctx->ExecuteFlag) {
-      CALL_SubpixelPrecisionBiasNV(ctx->Exec, (xbits, ybits));
+      CALL_SubpixelPrecisionBiasNV(ctx->Dispatch.Exec, (xbits, ybits));
    }
 }
 
@@ -8961,7 +8967,7 @@ save_ConservativeRasterParameterfNV(GLenum pname, GLfloat param)
       n[2].f = param;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ConservativeRasterParameterfNV(ctx->Exec, (pname, param));
+      CALL_ConservativeRasterParameterfNV(ctx->Dispatch.Exec, (pname, param));
    }
 }
 
@@ -8978,7 +8984,7 @@ save_ConservativeRasterParameteriNV(GLenum pname, GLint param)
       n[2].i = param;
    }
    if (ctx->ExecuteFlag) {
-      CALL_ConservativeRasterParameteriNV(ctx->Exec, (pname, param));
+      CALL_ConservativeRasterParameteriNV(ctx->Dispatch.Exec, (pname, param));
    }
 }
 
@@ -8998,7 +9004,7 @@ save_MatrixLoadfEXT(GLenum matrixMode, const GLfloat *m)
       }
    }
    if (ctx->ExecuteFlag) {
-      CALL_MatrixLoadfEXT(ctx->Exec, (matrixMode, m));
+      CALL_MatrixLoadfEXT(ctx->Dispatch.Exec, (matrixMode, m));
    }
 }
 
@@ -9026,7 +9032,7 @@ save_MatrixMultfEXT(GLenum matrixMode, const GLfloat * m)
       }
    }
    if (ctx->ExecuteFlag) {
-      CALL_MatrixMultfEXT(ctx->Exec, (matrixMode, m));
+      CALL_MatrixMultfEXT(ctx->Dispatch.Exec, (matrixMode, m));
    }
 }
 
@@ -9055,7 +9061,7 @@ save_MatrixRotatefEXT(GLenum matrixMode, GLfloat angle, GLfloat x, GLfloat y, GL
       n[5].f = z;
    }
    if (ctx->ExecuteFlag) {
-      CALL_MatrixRotatefEXT(ctx->Exec, (matrixMode, angle, x, y, z));
+      CALL_MatrixRotatefEXT(ctx->Dispatch.Exec, (matrixMode, angle, x, y, z));
    }
 }
 
@@ -9079,7 +9085,7 @@ save_MatrixScalefEXT(GLenum matrixMode, GLfloat x, GLfloat y, GLfloat z)
       n[4].f = z;
    }
    if (ctx->ExecuteFlag) {
-      CALL_MatrixScalefEXT(ctx->Exec, (matrixMode, x, y, z));
+      CALL_MatrixScalefEXT(ctx->Dispatch.Exec, (matrixMode, x, y, z));
    }
 }
 
@@ -9103,7 +9109,7 @@ save_MatrixTranslatefEXT(GLenum matrixMode, GLfloat x, GLfloat y, GLfloat z)
       n[4].f = z;
    }
    if (ctx->ExecuteFlag) {
-      CALL_MatrixTranslatefEXT(ctx->Exec, (matrixMode, x, y, z));
+      CALL_MatrixTranslatefEXT(ctx->Dispatch.Exec, (matrixMode, x, y, z));
    }
 }
 
@@ -9124,7 +9130,7 @@ save_MatrixLoadIdentityEXT(GLenum matrixMode)
       n[1].e = matrixMode;
    }
    if (ctx->ExecuteFlag) {
-      CALL_MatrixLoadIdentityEXT(ctx->Exec, (matrixMode));
+      CALL_MatrixLoadIdentityEXT(ctx->Dispatch.Exec, (matrixMode));
    }
 }
 
@@ -9146,7 +9152,7 @@ save_MatrixOrthoEXT(GLenum matrixMode, GLdouble left, GLdouble right,
       n[7].f = (GLfloat) farval;
    }
    if (ctx->ExecuteFlag) {
-      CALL_MatrixOrthoEXT(ctx->Exec, (matrixMode, left, right, bottom, top, nearval, farval));
+      CALL_MatrixOrthoEXT(ctx->Dispatch.Exec, (matrixMode, left, right, bottom, top, nearval, farval));
    }
 }
 
@@ -9169,7 +9175,7 @@ save_MatrixFrustumEXT(GLenum matrixMode, GLdouble left, GLdouble right,
       n[7].f = (GLfloat) farval;
    }
    if (ctx->ExecuteFlag) {
-      CALL_MatrixFrustumEXT(ctx->Exec, (matrixMode, left, right, bottom, top, nearval, farval));
+      CALL_MatrixFrustumEXT(ctx->Dispatch.Exec, (matrixMode, left, right, bottom, top, nearval, farval));
    }
 }
 
@@ -9184,7 +9190,7 @@ save_MatrixPushEXT(GLenum matrixMode)
       n[1].e = matrixMode;
    }
    if (ctx->ExecuteFlag) {
-      CALL_MatrixPushEXT(ctx->Exec, (matrixMode));
+      CALL_MatrixPushEXT(ctx->Dispatch.Exec, (matrixMode));
    }
 }
 
@@ -9199,7 +9205,7 @@ save_MatrixPopEXT(GLenum matrixMode)
       n[1].e = matrixMode;
    }
    if (ctx->ExecuteFlag) {
-      CALL_MatrixPopEXT(ctx->Exec, (matrixMode));
+      CALL_MatrixPopEXT(ctx->Dispatch.Exec, (matrixMode));
    }
 }
 
@@ -9253,7 +9259,7 @@ save_TextureParameterfvEXT(GLuint texture, GLenum target, GLenum pname,
       n[7].f = params[3];
    }
    if (ctx->ExecuteFlag) {
-      CALL_TextureParameterfvEXT(ctx->Exec, (texture, target, pname, params));
+      CALL_TextureParameterfvEXT(ctx->Dispatch.Exec, (texture, target, pname, params));
    }
 }
 
@@ -9284,7 +9290,7 @@ save_TextureParameterivEXT(GLuint texture, GLenum target, GLenum pname, const GL
       n[7].i = params[3];
    }
    if (ctx->ExecuteFlag) {
-      CALL_TextureParameterivEXT(ctx->Exec, (texture, target, pname, params));
+      CALL_TextureParameterivEXT(ctx->Dispatch.Exec, (texture, target, pname, params));
    }
 }
 
@@ -9314,7 +9320,7 @@ save_TextureParameterIivEXT(GLuint texture, GLenum target, GLenum pname, const G
       n[7].i = params[3];
    }
    if (ctx->ExecuteFlag) {
-      CALL_TextureParameterIivEXT(ctx->Exec, (texture, target, pname, params));
+      CALL_TextureParameterIivEXT(ctx->Dispatch.Exec, (texture, target, pname, params));
    }
 }
 
@@ -9335,7 +9341,7 @@ save_TextureParameterIuivEXT(GLuint texture, GLenum target, GLenum pname, const 
       n[7].ui = params[3];
    }
    if (ctx->ExecuteFlag) {
-      CALL_TextureParameterIuivEXT(ctx->Exec, (texture, target, pname, params));
+      CALL_TextureParameterIuivEXT(ctx->Dispatch.Exec, (texture, target, pname, params));
    }
 }
 
@@ -9349,7 +9355,7 @@ save_TextureImage1DEXT(GLuint texture, GLenum target,
    GET_CURRENT_CONTEXT(ctx);
    if (target == GL_PROXY_TEXTURE_1D) {
       /* don't compile, execute immediately */
-      CALL_TextureImage1DEXT(ctx->Exec, (texture, target, level, components, width,
+      CALL_TextureImage1DEXT(ctx->Dispatch.Exec, (texture, target, level, components, width,
                                          border, format, type, pixels));
    }
    else {
@@ -9370,7 +9376,7 @@ save_TextureImage1DEXT(GLuint texture, GLenum target,
                                    pixels, &ctx->Unpack));
       }
       if (ctx->ExecuteFlag) {
-         CALL_TextureImage1DEXT(ctx->Exec, (texture, target, level, components, width,
+         CALL_TextureImage1DEXT(ctx->Dispatch.Exec, (texture, target, level, components, width,
                                             border, format, type, pixels));
       }
    }
@@ -9386,7 +9392,7 @@ save_TextureImage2DEXT(GLuint texture, GLenum target,
    GET_CURRENT_CONTEXT(ctx);
    if (target == GL_PROXY_TEXTURE_2D) {
       /* don't compile, execute immediately */
-      CALL_TextureImage2DEXT(ctx->Exec, (texture, target, level, components, width,
+      CALL_TextureImage2DEXT(ctx->Dispatch.Exec, (texture, target, level, components, width,
                                          height, border, format, type, pixels));
    }
    else {
@@ -9408,7 +9414,7 @@ save_TextureImage2DEXT(GLuint texture, GLenum target,
                                    pixels, &ctx->Unpack));
       }
       if (ctx->ExecuteFlag) {
-         CALL_TextureImage2DEXT(ctx->Exec, (texture, target, level, components, width,
+         CALL_TextureImage2DEXT(ctx->Dispatch.Exec, (texture, target, level, components, width,
                                             height, border, format, type, pixels));
       }
    }
@@ -9425,7 +9431,7 @@ save_TextureImage3DEXT(GLuint texture, GLenum target,
    GET_CURRENT_CONTEXT(ctx);
    if (target == GL_PROXY_TEXTURE_3D) {
       /* don't compile, execute immediately */
-      CALL_TextureImage3DEXT(ctx->Exec, (texture, target, level, internalFormat, width,
+      CALL_TextureImage3DEXT(ctx->Dispatch.Exec, (texture, target, level, internalFormat, width,
                                          height, depth, border, format, type,
                                          pixels));
    }
@@ -9449,7 +9455,7 @@ save_TextureImage3DEXT(GLuint texture, GLenum target,
                                    pixels, &ctx->Unpack));
       }
       if (ctx->ExecuteFlag) {
-         CALL_TextureImage3DEXT(ctx->Exec, (texture, target, level, internalFormat,
+         CALL_TextureImage3DEXT(ctx->Dispatch.Exec, (texture, target, level, internalFormat,
                                             width, height, depth, border, format,
                                             type, pixels));
       }
@@ -9481,7 +9487,7 @@ save_TextureSubImage1DEXT(GLuint texture, GLenum target, GLint level, GLint xoff
                                 pixels, &ctx->Unpack));
    }
    if (ctx->ExecuteFlag) {
-      CALL_TextureSubImage1DEXT(ctx->Exec, (texture, target, level, xoffset, width,
+      CALL_TextureSubImage1DEXT(ctx->Dispatch.Exec, (texture, target, level, xoffset, width,
                                             format, type, pixels));
    }
 }
@@ -9514,7 +9520,7 @@ save_TextureSubImage2DEXT(GLuint texture, GLenum target, GLint level,
                                 pixels, &ctx->Unpack));
    }
    if (ctx->ExecuteFlag) {
-      CALL_TextureSubImage2DEXT(ctx->Exec, (texture, target, level, xoffset, yoffset,
+      CALL_TextureSubImage2DEXT(ctx->Dispatch.Exec, (texture, target, level, xoffset, yoffset,
                                             width, height, format, type, pixels));
    }
 }
@@ -9549,7 +9555,7 @@ save_TextureSubImage3DEXT(GLuint texture, GLenum target, GLint level,
                                 pixels, &ctx->Unpack));
    }
    if (ctx->ExecuteFlag) {
-      CALL_TextureSubImage3DEXT(ctx->Exec, (texture, target, level,
+      CALL_TextureSubImage3DEXT(ctx->Dispatch.Exec, (texture, target, level,
                                             xoffset, yoffset, zoffset,
                                             width, height, depth, format, type,
                                             pixels));
@@ -9576,7 +9582,7 @@ save_CopyTextureImage1DEXT(GLuint texture, GLenum target, GLint level,
       n[8].i = border;
    }
    if (ctx->ExecuteFlag) {
-      CALL_CopyTextureImage1DEXT(ctx->Exec, (texture, target, level,
+      CALL_CopyTextureImage1DEXT(ctx->Dispatch.Exec, (texture, target, level,
                                              internalformat, x, y,
                                              width, border));
    }
@@ -9604,7 +9610,7 @@ save_CopyTextureImage2DEXT(GLuint texture, GLenum target, GLint level,
       n[9].i = border;
    }
    if (ctx->ExecuteFlag) {
-      CALL_CopyTextureImage2DEXT(ctx->Exec, (texture, target, level,
+      CALL_CopyTextureImage2DEXT(ctx->Dispatch.Exec, (texture, target, level,
                                              internalformat, x, y,
                                              width, height, border));
    }
@@ -9628,7 +9634,7 @@ save_CopyTextureSubImage1DEXT(GLuint texture, GLenum target, GLint level,
       n[7].i = width;
    }
    if (ctx->ExecuteFlag) {
-      CALL_CopyTextureSubImage1DEXT(ctx->Exec,
+      CALL_CopyTextureSubImage1DEXT(ctx->Dispatch.Exec,
                              (texture, target, level, xoffset, x, y, width));
    }
 }
@@ -9654,7 +9660,7 @@ save_CopyTextureSubImage2DEXT(GLuint texture, GLenum target, GLint level,
       n[9].i = height;
    }
    if (ctx->ExecuteFlag) {
-      CALL_CopyTextureSubImage2DEXT(ctx->Exec, (texture, target, level,
+      CALL_CopyTextureSubImage2DEXT(ctx->Dispatch.Exec, (texture, target, level,
                                                 xoffset, yoffset,
                                                 x, y, width, height));
    }
@@ -9683,7 +9689,7 @@ save_CopyTextureSubImage3DEXT(GLuint texture, GLenum target, GLint level,
       n[10].i = height;
    }
    if (ctx->ExecuteFlag) {
-      CALL_CopyTextureSubImage3DEXT(ctx->Exec, (texture, target, level,
+      CALL_CopyTextureSubImage3DEXT(ctx->Dispatch.Exec, (texture, target, level,
                                                 xoffset, yoffset, zoffset,
                                                 x, y, width, height));
    }
@@ -9703,7 +9709,7 @@ save_BindMultiTextureEXT(GLenum texunit, GLenum target, GLuint texture)
       n[3].ui = texture;
    }
    if (ctx->ExecuteFlag) {
-      CALL_BindMultiTextureEXT(ctx->Exec, (texunit, target, texture));
+      CALL_BindMultiTextureEXT(ctx->Dispatch.Exec, (texunit, target, texture));
    }
 }
 
@@ -9726,7 +9732,7 @@ save_MultiTexParameterfvEXT(GLenum texunit, GLenum target, GLenum pname,
       n[7].f = params[3];
    }
    if (ctx->ExecuteFlag) {
-      CALL_MultiTexParameterfvEXT(ctx->Exec, (texunit, target, pname, params));
+      CALL_MultiTexParameterfvEXT(ctx->Dispatch.Exec, (texunit, target, pname, params));
    }
 }
 
@@ -9757,7 +9763,7 @@ save_MultiTexParameterivEXT(GLenum texunit, GLenum target, GLenum pname, const G
       n[7].i = params[3];
    }
    if (ctx->ExecuteFlag) {
-      CALL_MultiTexParameterivEXT(ctx->Exec, (texunit, target, pname, params));
+      CALL_MultiTexParameterivEXT(ctx->Dispatch.Exec, (texunit, target, pname, params));
    }
 }
 
@@ -9778,7 +9784,7 @@ save_MultiTexParameterIivEXT(GLenum texunit, GLenum target, GLenum pname, const 
       n[7].i = params[3];
    }
    if (ctx->ExecuteFlag) {
-      CALL_MultiTexParameterIivEXT(ctx->Exec, (texunit, target, pname, params));
+      CALL_MultiTexParameterIivEXT(ctx->Dispatch.Exec, (texunit, target, pname, params));
    }
 }
 
@@ -9799,7 +9805,7 @@ save_MultiTexParameterIuivEXT(GLenum texunit, GLenum target, GLenum pname, const
       n[7].ui = params[3];
    }
    if (ctx->ExecuteFlag) {
-      CALL_MultiTexParameterIuivEXT(ctx->Exec, (texunit, target, pname, params));
+      CALL_MultiTexParameterIuivEXT(ctx->Dispatch.Exec, (texunit, target, pname, params));
    }
 }
 
@@ -9822,7 +9828,7 @@ save_MultiTexImage1DEXT(GLenum texunit, GLenum target,
    GET_CURRENT_CONTEXT(ctx);
    if (target == GL_PROXY_TEXTURE_1D) {
       /* don't compile, execute immediately */
-      CALL_MultiTexImage1DEXT(ctx->Exec, (texunit, target, level, components, width,
+      CALL_MultiTexImage1DEXT(ctx->Dispatch.Exec, (texunit, target, level, components, width,
                                          border, format, type, pixels));
    }
    else {
@@ -9843,7 +9849,7 @@ save_MultiTexImage1DEXT(GLenum texunit, GLenum target,
                                    pixels, &ctx->Unpack));
       }
       if (ctx->ExecuteFlag) {
-         CALL_MultiTexImage1DEXT(ctx->Exec, (texunit, target, level, components, width,
+         CALL_MultiTexImage1DEXT(ctx->Dispatch.Exec, (texunit, target, level, components, width,
                                             border, format, type, pixels));
       }
    }
@@ -9859,7 +9865,7 @@ save_MultiTexImage2DEXT(GLenum texunit, GLenum target,
    GET_CURRENT_CONTEXT(ctx);
    if (target == GL_PROXY_TEXTURE_2D) {
       /* don't compile, execute immediately */
-      CALL_MultiTexImage2DEXT(ctx->Exec, (texunit, target, level, components, width,
+      CALL_MultiTexImage2DEXT(ctx->Dispatch.Exec, (texunit, target, level, components, width,
                                          height, border, format, type, pixels));
    }
    else {
@@ -9881,7 +9887,7 @@ save_MultiTexImage2DEXT(GLenum texunit, GLenum target,
                                    pixels, &ctx->Unpack));
       }
       if (ctx->ExecuteFlag) {
-         CALL_MultiTexImage2DEXT(ctx->Exec, (texunit, target, level, components, width,
+         CALL_MultiTexImage2DEXT(ctx->Dispatch.Exec, (texunit, target, level, components, width,
                                             height, border, format, type, pixels));
       }
    }
@@ -9898,7 +9904,7 @@ save_MultiTexImage3DEXT(GLenum texunit, GLenum target,
    GET_CURRENT_CONTEXT(ctx);
    if (target == GL_PROXY_TEXTURE_3D) {
       /* don't compile, execute immediately */
-      CALL_MultiTexImage3DEXT(ctx->Exec, (texunit, target, level, internalFormat, width,
+      CALL_MultiTexImage3DEXT(ctx->Dispatch.Exec, (texunit, target, level, internalFormat, width,
                                          height, depth, border, format, type,
                                          pixels));
    }
@@ -9922,7 +9928,7 @@ save_MultiTexImage3DEXT(GLenum texunit, GLenum target,
                                    pixels, &ctx->Unpack));
       }
       if (ctx->ExecuteFlag) {
-         CALL_MultiTexImage3DEXT(ctx->Exec, (texunit, target, level, internalFormat,
+         CALL_MultiTexImage3DEXT(ctx->Dispatch.Exec, (texunit, target, level, internalFormat,
                                             width, height, depth, border, format,
                                             type, pixels));
       }
@@ -9954,7 +9960,7 @@ save_MultiTexSubImage1DEXT(GLenum texunit, GLenum target, GLint level, GLint xof
                                 pixels, &ctx->Unpack));
    }
    if (ctx->ExecuteFlag) {
-      CALL_MultiTexSubImage1DEXT(ctx->Exec, (texunit, target, level, xoffset, width,
+      CALL_MultiTexSubImage1DEXT(ctx->Dispatch.Exec, (texunit, target, level, xoffset, width,
                                             format, type, pixels));
    }
 }
@@ -9987,7 +9993,7 @@ save_MultiTexSubImage2DEXT(GLenum texunit, GLenum target, GLint level,
                                 pixels, &ctx->Unpack));
    }
    if (ctx->ExecuteFlag) {
-      CALL_MultiTexSubImage2DEXT(ctx->Exec, (texunit, target, level, xoffset, yoffset,
+      CALL_MultiTexSubImage2DEXT(ctx->Dispatch.Exec, (texunit, target, level, xoffset, yoffset,
                                             width, height, format, type, pixels));
    }
 }
@@ -10022,7 +10028,7 @@ save_MultiTexSubImage3DEXT(GLenum texunit, GLenum target, GLint level,
                                 pixels, &ctx->Unpack));
    }
    if (ctx->ExecuteFlag) {
-      CALL_MultiTexSubImage3DEXT(ctx->Exec, (texunit, target, level,
+      CALL_MultiTexSubImage3DEXT(ctx->Dispatch.Exec, (texunit, target, level,
                                             xoffset, yoffset, zoffset,
                                             width, height, depth, format, type,
                                             pixels));
@@ -10050,7 +10056,7 @@ save_CopyMultiTexImage1DEXT(GLenum texunit, GLenum target, GLint level,
       n[8].i = border;
    }
    if (ctx->ExecuteFlag) {
-      CALL_CopyMultiTexImage1DEXT(ctx->Exec, (texunit, target, level,
+      CALL_CopyMultiTexImage1DEXT(ctx->Dispatch.Exec, (texunit, target, level,
                                              internalformat, x, y,
                                              width, border));
    }
@@ -10079,7 +10085,7 @@ save_CopyMultiTexImage2DEXT(GLenum texunit, GLenum target, GLint level,
       n[9].i = border;
    }
    if (ctx->ExecuteFlag) {
-      CALL_CopyMultiTexImage2DEXT(ctx->Exec, (texunit, target, level,
+      CALL_CopyMultiTexImage2DEXT(ctx->Dispatch.Exec, (texunit, target, level,
                                              internalformat, x, y,
                                              width, height, border));
    }
@@ -10104,7 +10110,7 @@ save_CopyMultiTexSubImage1DEXT(GLenum texunit, GLenum target, GLint level,
       n[7].i = width;
    }
    if (ctx->ExecuteFlag) {
-      CALL_CopyMultiTexSubImage1DEXT(ctx->Exec,
+      CALL_CopyMultiTexSubImage1DEXT(ctx->Dispatch.Exec,
                              (texunit, target, level, xoffset, x, y, width));
    }
 }
@@ -10131,7 +10137,7 @@ save_CopyMultiTexSubImage2DEXT(GLenum texunit, GLenum target, GLint level,
       n[9].i = height;
    }
    if (ctx->ExecuteFlag) {
-      CALL_CopyMultiTexSubImage2DEXT(ctx->Exec, (texunit, target, level,
+      CALL_CopyMultiTexSubImage2DEXT(ctx->Dispatch.Exec, (texunit, target, level,
                                                 xoffset, yoffset,
                                                 x, y, width, height));
    }
@@ -10160,7 +10166,7 @@ save_CopyMultiTexSubImage3DEXT(GLenum texunit, GLenum target, GLint level,
       n[10].i = height;
    }
    if (ctx->ExecuteFlag) {
-      CALL_CopyMultiTexSubImage3DEXT(ctx->Exec, (texunit, target, level,
+      CALL_CopyMultiTexSubImage3DEXT(ctx->Dispatch.Exec, (texunit, target, level,
                                                 xoffset, yoffset, zoffset,
                                                 x, y, width, height));
    }
@@ -10190,7 +10196,7 @@ save_MultiTexEnvfvEXT(GLenum texunit, GLenum target, GLenum pname, const GLfloat
       }
    }
    if (ctx->ExecuteFlag) {
-      CALL_MultiTexEnvfvEXT(ctx->Exec, (texunit, target, pname, params));
+      CALL_MultiTexEnvfvEXT(ctx->Dispatch.Exec, (texunit, target, pname, params));
    }
 }
 
@@ -10242,7 +10248,7 @@ save_CompressedTextureImage1DEXT(GLuint texture, GLenum target, GLint level,
    GET_CURRENT_CONTEXT(ctx);
    if (target == GL_PROXY_TEXTURE_1D) {
       /* don't compile, execute immediately */
-      CALL_CompressedTextureImage1DEXT(ctx->Exec, (texture, target, level,
+      CALL_CompressedTextureImage1DEXT(ctx->Dispatch.Exec, (texture, target, level,
                                                    internalFormat, width,
                                                    border, imageSize,
                                                    data));
@@ -10265,7 +10271,7 @@ save_CompressedTextureImage1DEXT(GLuint texture, GLenum target, GLint level,
                       copy_data(data, imageSize, "glCompressedTextureImage1DEXT"));
       }
       if (ctx->ExecuteFlag) {
-         CALL_CompressedTextureImage1DEXT(ctx->Exec,
+         CALL_CompressedTextureImage1DEXT(ctx->Dispatch.Exec,
                                           (texture, target, level, internalFormat,
                                            width, border, imageSize, data));
       }
@@ -10282,7 +10288,7 @@ save_CompressedTextureImage2DEXT(GLuint texture, GLenum target, GLint level,
    GET_CURRENT_CONTEXT(ctx);
    if (target == GL_PROXY_TEXTURE_2D) {
       /* don't compile, execute immediately */
-      CALL_CompressedTextureImage2DEXT(ctx->Exec, (texture, target, level,
+      CALL_CompressedTextureImage2DEXT(ctx->Dispatch.Exec, (texture, target, level,
                                                    internalFormat, width, height,
                                                    border, imageSize, data));
    }
@@ -10305,7 +10311,7 @@ save_CompressedTextureImage2DEXT(GLuint texture, GLenum target, GLint level,
                       copy_data(data, imageSize, "glCompressedTextureImage2DEXT"));
       }
       if (ctx->ExecuteFlag) {
-         CALL_CompressedTextureImage2DEXT(ctx->Exec,
+         CALL_CompressedTextureImage2DEXT(ctx->Dispatch.Exec,
                                           (texture, target, level, internalFormat,
                                            width, height, border, imageSize, data));
       }
@@ -10322,7 +10328,7 @@ save_CompressedTextureImage3DEXT(GLuint texture, GLenum target, GLint level,
    GET_CURRENT_CONTEXT(ctx);
    if (target == GL_PROXY_TEXTURE_3D) {
       /* don't compile, execute immediately */
-      CALL_CompressedTextureImage3DEXT(ctx->Exec, (texture, target, level,
+      CALL_CompressedTextureImage3DEXT(ctx->Dispatch.Exec, (texture, target, level,
                                                    internalFormat, width,
                                                    height, depth, border,
                                                    imageSize, data));
@@ -10347,7 +10353,7 @@ save_CompressedTextureImage3DEXT(GLuint texture, GLenum target, GLint level,
                       copy_data(data, imageSize, "glCompressedTextureImage3DEXT"));
       }
       if (ctx->ExecuteFlag) {
-         CALL_CompressedTextureImage3DEXT(ctx->Exec,
+         CALL_CompressedTextureImage3DEXT(ctx->Dispatch.Exec,
                                           (texture, target, level, internalFormat,
                                            width, height, depth, border, imageSize,
                                            data));
@@ -10379,7 +10385,7 @@ save_CompressedTextureSubImage1DEXT(GLuint texture, GLenum target, GLint level, 
                    copy_data(data, imageSize, "glCompressedTextureSubImage1DEXT"));
    }
    if (ctx->ExecuteFlag) {
-      CALL_CompressedTextureSubImage1DEXT(ctx->Exec, (texture, target, level, xoffset,
+      CALL_CompressedTextureSubImage1DEXT(ctx->Dispatch.Exec, (texture, target, level, xoffset,
                                                       width, format, imageSize, data));
    }
 }
@@ -10411,7 +10417,7 @@ save_CompressedTextureSubImage2DEXT(GLuint texture, GLenum target, GLint level, 
                    copy_data(data, imageSize, "glCompressedTextureSubImage2DEXT"));
    }
    if (ctx->ExecuteFlag) {
-      CALL_CompressedTextureSubImage2DEXT(ctx->Exec,
+      CALL_CompressedTextureSubImage2DEXT(ctx->Dispatch.Exec,
                                           (texture, target, level, xoffset, yoffset,
                                            width, height, format, imageSize, data));
    }
@@ -10446,7 +10452,7 @@ save_CompressedTextureSubImage3DEXT(GLuint texture, GLenum target, GLint level, 
                    copy_data(data, imageSize, "glCompressedTextureSubImage3DEXT"));
    }
    if (ctx->ExecuteFlag) {
-      CALL_CompressedTextureSubImage3DEXT(ctx->Exec,
+      CALL_CompressedTextureSubImage3DEXT(ctx->Dispatch.Exec,
                                           (texture, target, level, xoffset, yoffset,
                                            zoffset, width, height, depth, format,
                                            imageSize, data));
@@ -10463,7 +10469,7 @@ save_CompressedMultiTexImage1DEXT(GLenum texunit, GLenum target, GLint level,
    GET_CURRENT_CONTEXT(ctx);
    if (target == GL_PROXY_TEXTURE_1D) {
       /* don't compile, execute immediately */
-      CALL_CompressedMultiTexImage1DEXT(ctx->Exec, (texunit, target, level,
+      CALL_CompressedMultiTexImage1DEXT(ctx->Dispatch.Exec, (texunit, target, level,
                                                    internalFormat, width,
                                                    border, imageSize,
                                                    data));
@@ -10486,7 +10492,7 @@ save_CompressedMultiTexImage1DEXT(GLenum texunit, GLenum target, GLint level,
                       copy_data(data, imageSize, "glCompressedMultiTexImage1DEXT"));
       }
       if (ctx->ExecuteFlag) {
-         CALL_CompressedMultiTexImage1DEXT(ctx->Exec,
+         CALL_CompressedMultiTexImage1DEXT(ctx->Dispatch.Exec,
                                            (texunit, target, level, internalFormat,
                                             width, border, imageSize, data));
       }
@@ -10503,7 +10509,7 @@ save_CompressedMultiTexImage2DEXT(GLenum texunit, GLenum target, GLint level,
    GET_CURRENT_CONTEXT(ctx);
    if (target == GL_PROXY_TEXTURE_2D) {
       /* don't compile, execute immediately */
-      CALL_CompressedMultiTexImage2DEXT(ctx->Exec, (texunit, target, level,
+      CALL_CompressedMultiTexImage2DEXT(ctx->Dispatch.Exec, (texunit, target, level,
                                                    internalFormat, width, height,
                                                    border, imageSize, data));
    }
@@ -10526,7 +10532,7 @@ save_CompressedMultiTexImage2DEXT(GLenum texunit, GLenum target, GLint level,
                       copy_data(data, imageSize, "glCompressedMultiTexImage2DEXT"));
       }
       if (ctx->ExecuteFlag) {
-         CALL_CompressedMultiTexImage2DEXT(ctx->Exec,
+         CALL_CompressedMultiTexImage2DEXT(ctx->Dispatch.Exec,
                                            (texunit, target, level, internalFormat,
                                             width, height, border, imageSize, data));
       }
@@ -10543,7 +10549,7 @@ save_CompressedMultiTexImage3DEXT(GLenum texunit, GLenum target, GLint level,
    GET_CURRENT_CONTEXT(ctx);
    if (target == GL_PROXY_TEXTURE_3D) {
       /* don't compile, execute immediately */
-      CALL_CompressedMultiTexImage3DEXT(ctx->Exec, (texunit, target, level,
+      CALL_CompressedMultiTexImage3DEXT(ctx->Dispatch.Exec, (texunit, target, level,
                                                    internalFormat, width,
                                                    height, depth, border,
                                                    imageSize, data));
@@ -10568,7 +10574,7 @@ save_CompressedMultiTexImage3DEXT(GLenum texunit, GLenum target, GLint level,
                       copy_data(data, imageSize, "glCompressedMultiTexImage3DEXT"));
       }
       if (ctx->ExecuteFlag) {
-         CALL_CompressedMultiTexImage3DEXT(ctx->Exec,
+         CALL_CompressedMultiTexImage3DEXT(ctx->Dispatch.Exec,
                                            (texunit, target, level, internalFormat,
                                             width, height, depth, border, imageSize,
                                             data));
@@ -10600,7 +10606,7 @@ save_CompressedMultiTexSubImage1DEXT(GLenum texunit, GLenum target, GLint level,
                    copy_data(data, imageSize, "glCompressedMultiTexSubImage1DEXT"));
    }
    if (ctx->ExecuteFlag) {
-      CALL_CompressedMultiTexSubImage1DEXT(ctx->Exec, (texunit, target, level, xoffset,
+      CALL_CompressedMultiTexSubImage1DEXT(ctx->Dispatch.Exec, (texunit, target, level, xoffset,
                                                        width, format, imageSize, data));
    }
 }
@@ -10632,7 +10638,7 @@ save_CompressedMultiTexSubImage2DEXT(GLenum texunit, GLenum target, GLint level,
                    copy_data(data, imageSize, "glCompressedMultiTexSubImage2DEXT"));
    }
    if (ctx->ExecuteFlag) {
-      CALL_CompressedMultiTexSubImage2DEXT(ctx->Exec,
+      CALL_CompressedMultiTexSubImage2DEXT(ctx->Dispatch.Exec,
                                            (texunit, target, level, xoffset, yoffset,
                                             width, height, format, imageSize, data));
    }
@@ -10667,7 +10673,7 @@ save_CompressedMultiTexSubImage3DEXT(GLenum texunit, GLenum target, GLint level,
                    copy_data(data, imageSize, "glCompressedMultiTexSubImage3DEXT"));
    }
    if (ctx->ExecuteFlag) {
-      CALL_CompressedMultiTexSubImage3DEXT(ctx->Exec,
+      CALL_CompressedMultiTexSubImage3DEXT(ctx->Dispatch.Exec,
                                            (texunit, target, level, xoffset, yoffset,
                                             zoffset, width, height, depth, format,
                                             imageSize, data));
@@ -10699,7 +10705,7 @@ save_NamedProgramStringEXT(GLuint program, GLenum target, GLenum format, GLsizei
       save_pointer(&n[5], programCopy);
    }
    if (ctx->ExecuteFlag) {
-      CALL_NamedProgramStringEXT(ctx->Exec, (program, target, format, len, string));
+      CALL_NamedProgramStringEXT(ctx->Dispatch.Exec, (program, target, format, len, string));
    }
 }
 
@@ -10722,7 +10728,7 @@ save_NamedProgramLocalParameter4fEXT(GLuint program, GLenum target, GLuint index
       n[7].f = w;
    }
    if (ctx->ExecuteFlag) {
-      CALL_NamedProgramLocalParameter4fEXT(ctx->Exec, (program, target, index, x, y, z, w));
+      CALL_NamedProgramLocalParameter4fEXT(ctx->Dispatch.Exec, (program, target, index, x, y, z, w));
    }
 }
 
@@ -10774,7 +10780,7 @@ save_PrimitiveBoundingBox(float minX, float minY, float minZ, float minW,
       n[8].f = maxW;
    }
    if (ctx->ExecuteFlag) {
-      CALL_PrimitiveBoundingBox(ctx->Exec, (minX, minY, minZ, minW,
+      CALL_PrimitiveBoundingBox(ctx->Dispatch.Exec, (minX, minY, minZ, minW,
                                             maxX, maxY, maxZ, maxW));
    }
 }
@@ -10864,13 +10870,13 @@ execute_list(struct gl_context *ctx, GLuint list)
             _mesa_error(ctx, n[1].e, "%s", (const char *) get_pointer(&n[2]));
             break;
          case OPCODE_ACCUM:
-            CALL_Accum(ctx->Exec, (n[1].e, n[2].f));
+            CALL_Accum(ctx->Dispatch.Exec, (n[1].e, n[2].f));
             break;
          case OPCODE_ALPHA_FUNC:
-            CALL_AlphaFunc(ctx->Exec, (n[1].e, n[2].f));
+            CALL_AlphaFunc(ctx->Dispatch.Exec, (n[1].e, n[2].f));
             break;
          case OPCODE_BIND_TEXTURE:
-            CALL_BindTexture(ctx->Exec, (n[1].e, n[2].ui));
+            CALL_BindTexture(ctx->Dispatch.Exec, (n[1].e, n[2].ui));
             break;
          case OPCODE_BITMAP:
             if (_mesa_inside_begin_end(ctx)) {
@@ -10882,35 +10888,35 @@ execute_list(struct gl_context *ctx, GLuint list)
             }
             break;
          case OPCODE_BLEND_COLOR:
-            CALL_BlendColor(ctx->Exec, (n[1].f, n[2].f, n[3].f, n[4].f));
+            CALL_BlendColor(ctx->Dispatch.Exec, (n[1].f, n[2].f, n[3].f, n[4].f));
             break;
          case OPCODE_BLEND_EQUATION:
-            CALL_BlendEquation(ctx->Exec, (n[1].e));
+            CALL_BlendEquation(ctx->Dispatch.Exec, (n[1].e));
             break;
          case OPCODE_BLEND_EQUATION_SEPARATE:
-            CALL_BlendEquationSeparate(ctx->Exec, (n[1].e, n[2].e));
+            CALL_BlendEquationSeparate(ctx->Dispatch.Exec, (n[1].e, n[2].e));
             break;
          case OPCODE_BLEND_FUNC_SEPARATE:
-            CALL_BlendFuncSeparate(ctx->Exec,
+            CALL_BlendFuncSeparate(ctx->Dispatch.Exec,
                                       (n[1].e, n[2].e, n[3].e, n[4].e));
             break;
 
          case OPCODE_BLEND_FUNC_I:
             /* GL_ARB_draw_buffers_blend */
-            CALL_BlendFunciARB(ctx->Exec, (n[1].ui, n[2].e, n[3].e));
+            CALL_BlendFunciARB(ctx->Dispatch.Exec, (n[1].ui, n[2].e, n[3].e));
             break;
          case OPCODE_BLEND_FUNC_SEPARATE_I:
             /* GL_ARB_draw_buffers_blend */
-            CALL_BlendFuncSeparateiARB(ctx->Exec, (n[1].ui, n[2].e, n[3].e,
+            CALL_BlendFuncSeparateiARB(ctx->Dispatch.Exec, (n[1].ui, n[2].e, n[3].e,
                                                    n[4].e, n[5].e));
             break;
          case OPCODE_BLEND_EQUATION_I:
             /* GL_ARB_draw_buffers_blend */
-            CALL_BlendEquationiARB(ctx->Exec, (n[1].ui, n[2].e));
+            CALL_BlendEquationiARB(ctx->Dispatch.Exec, (n[1].ui, n[2].e));
             break;
          case OPCODE_BLEND_EQUATION_SEPARATE_I:
             /* GL_ARB_draw_buffers_blend */
-            CALL_BlendEquationSeparateiARB(ctx->Exec,
+            CALL_BlendEquationSeparateiARB(ctx->Dispatch.Exec,
                                            (n[1].ui, n[2].e, n[3].e));
             break;
 
@@ -10925,14 +10931,14 @@ execute_list(struct gl_context *ctx, GLuint list)
          case OPCODE_CALL_LISTS:
             if (ctx->ListState.CallDepth < MAX_LIST_NESTING) {
                ctx->ListState.CallDepth++;
-               _mesa_HashUnlockMutex(ctx->Shared->DisplayList);
-               CALL_CallLists(ctx->Exec, (n[1].i, n[2].e, get_pointer(&n[3])));
-               _mesa_HashLockMutex(ctx->Shared->DisplayList);
+               _mesa_HashUnlockMutex(&ctx->Shared->DisplayList);
+               CALL_CallLists(ctx->Dispatch.Exec, (n[1].i, n[2].e, get_pointer(&n[3])));
+               _mesa_HashLockMutex(&ctx->Shared->DisplayList);
                ctx->ListState.CallDepth--;
             }
             break;
          case OPCODE_CLEAR:
-            CALL_Clear(ctx->Exec, (n[1].bf));
+            CALL_Clear(ctx->Dispatch.Exec, (n[1].bf));
             break;
          case OPCODE_CLEAR_BUFFER_IV:
             {
@@ -10941,7 +10947,7 @@ execute_list(struct gl_context *ctx, GLuint list)
                value[1] = n[4].i;
                value[2] = n[5].i;
                value[3] = n[6].i;
-               CALL_ClearBufferiv(ctx->Exec, (n[1].e, n[2].i, value));
+               CALL_ClearBufferiv(ctx->Dispatch.Exec, (n[1].e, n[2].i, value));
             }
             break;
          case OPCODE_CLEAR_BUFFER_UIV:
@@ -10951,7 +10957,7 @@ execute_list(struct gl_context *ctx, GLuint list)
                value[1] = n[4].ui;
                value[2] = n[5].ui;
                value[3] = n[6].ui;
-               CALL_ClearBufferuiv(ctx->Exec, (n[1].e, n[2].i, value));
+               CALL_ClearBufferuiv(ctx->Dispatch.Exec, (n[1].e, n[2].i, value));
             }
             break;
          case OPCODE_CLEAR_BUFFER_FV:
@@ -10961,26 +10967,26 @@ execute_list(struct gl_context *ctx, GLuint list)
                value[1] = n[4].f;
                value[2] = n[5].f;
                value[3] = n[6].f;
-               CALL_ClearBufferfv(ctx->Exec, (n[1].e, n[2].i, value));
+               CALL_ClearBufferfv(ctx->Dispatch.Exec, (n[1].e, n[2].i, value));
             }
             break;
          case OPCODE_CLEAR_BUFFER_FI:
-            CALL_ClearBufferfi(ctx->Exec, (n[1].e, n[2].i, n[3].f, n[4].i));
+            CALL_ClearBufferfi(ctx->Dispatch.Exec, (n[1].e, n[2].i, n[3].f, n[4].i));
             break;
          case OPCODE_CLEAR_COLOR:
-            CALL_ClearColor(ctx->Exec, (n[1].f, n[2].f, n[3].f, n[4].f));
+            CALL_ClearColor(ctx->Dispatch.Exec, (n[1].f, n[2].f, n[3].f, n[4].f));
             break;
          case OPCODE_CLEAR_ACCUM:
-            CALL_ClearAccum(ctx->Exec, (n[1].f, n[2].f, n[3].f, n[4].f));
+            CALL_ClearAccum(ctx->Dispatch.Exec, (n[1].f, n[2].f, n[3].f, n[4].f));
             break;
          case OPCODE_CLEAR_DEPTH:
-            CALL_ClearDepth(ctx->Exec, ((GLclampd) n[1].f));
+            CALL_ClearDepth(ctx->Dispatch.Exec, ((GLclampd) n[1].f));
             break;
          case OPCODE_CLEAR_INDEX:
-            CALL_ClearIndex(ctx->Exec, ((GLfloat) n[1].ui));
+            CALL_ClearIndex(ctx->Dispatch.Exec, ((GLfloat) n[1].ui));
             break;
          case OPCODE_CLEAR_STENCIL:
-            CALL_ClearStencil(ctx->Exec, (n[1].i));
+            CALL_ClearStencil(ctx->Dispatch.Exec, (n[1].i));
             break;
          case OPCODE_CLIP_PLANE:
             {
@@ -10989,88 +10995,88 @@ execute_list(struct gl_context *ctx, GLuint list)
                eq[1] = n[3].f;
                eq[2] = n[4].f;
                eq[3] = n[5].f;
-               CALL_ClipPlane(ctx->Exec, (n[1].e, eq));
+               CALL_ClipPlane(ctx->Dispatch.Exec, (n[1].e, eq));
             }
             break;
          case OPCODE_COLOR_MASK:
-            CALL_ColorMask(ctx->Exec, (n[1].b, n[2].b, n[3].b, n[4].b));
+            CALL_ColorMask(ctx->Dispatch.Exec, (n[1].b, n[2].b, n[3].b, n[4].b));
             break;
          case OPCODE_COLOR_MASK_INDEXED:
-            CALL_ColorMaski(ctx->Exec, (n[1].ui, n[2].b, n[3].b,
+            CALL_ColorMaski(ctx->Dispatch.Exec, (n[1].ui, n[2].b, n[3].b,
                                                  n[4].b, n[5].b));
             break;
          case OPCODE_COLOR_MATERIAL:
-            CALL_ColorMaterial(ctx->Exec, (n[1].e, n[2].e));
+            CALL_ColorMaterial(ctx->Dispatch.Exec, (n[1].e, n[2].e));
             break;
          case OPCODE_COPY_PIXELS:
-            CALL_CopyPixels(ctx->Exec, (n[1].i, n[2].i,
+            CALL_CopyPixels(ctx->Dispatch.Exec, (n[1].i, n[2].i,
                                         (GLsizei) n[3].i, (GLsizei) n[4].i,
                                         n[5].e));
             break;
          case OPCODE_COPY_TEX_IMAGE1D:
-            CALL_CopyTexImage1D(ctx->Exec, (n[1].e, n[2].i, n[3].e, n[4].i,
+            CALL_CopyTexImage1D(ctx->Dispatch.Exec, (n[1].e, n[2].i, n[3].e, n[4].i,
                                             n[5].i, n[6].i, n[7].i));
             break;
          case OPCODE_COPY_TEX_IMAGE2D:
-            CALL_CopyTexImage2D(ctx->Exec, (n[1].e, n[2].i, n[3].e, n[4].i,
+            CALL_CopyTexImage2D(ctx->Dispatch.Exec, (n[1].e, n[2].i, n[3].e, n[4].i,
                                             n[5].i, n[6].i, n[7].i, n[8].i));
             break;
          case OPCODE_COPY_TEX_SUB_IMAGE1D:
-            CALL_CopyTexSubImage1D(ctx->Exec, (n[1].e, n[2].i, n[3].i,
+            CALL_CopyTexSubImage1D(ctx->Dispatch.Exec, (n[1].e, n[2].i, n[3].i,
                                                n[4].i, n[5].i, n[6].i));
             break;
          case OPCODE_COPY_TEX_SUB_IMAGE2D:
-            CALL_CopyTexSubImage2D(ctx->Exec, (n[1].e, n[2].i, n[3].i,
+            CALL_CopyTexSubImage2D(ctx->Dispatch.Exec, (n[1].e, n[2].i, n[3].i,
                                                n[4].i, n[5].i, n[6].i, n[7].i,
                                                n[8].i));
             break;
          case OPCODE_COPY_TEX_SUB_IMAGE3D:
-            CALL_CopyTexSubImage3D(ctx->Exec, (n[1].e, n[2].i, n[3].i,
+            CALL_CopyTexSubImage3D(ctx->Dispatch.Exec, (n[1].e, n[2].i, n[3].i,
                                                n[4].i, n[5].i, n[6].i, n[7].i,
                                                n[8].i, n[9].i));
             break;
          case OPCODE_CULL_FACE:
-            CALL_CullFace(ctx->Exec, (n[1].e));
+            CALL_CullFace(ctx->Dispatch.Exec, (n[1].e));
             break;
          case OPCODE_DEPTH_FUNC:
-            CALL_DepthFunc(ctx->Exec, (n[1].e));
+            CALL_DepthFunc(ctx->Dispatch.Exec, (n[1].e));
             break;
          case OPCODE_DEPTH_MASK:
-            CALL_DepthMask(ctx->Exec, (n[1].b));
+            CALL_DepthMask(ctx->Dispatch.Exec, (n[1].b));
             break;
          case OPCODE_DEPTH_RANGE:
-            CALL_DepthRange(ctx->Exec,
+            CALL_DepthRange(ctx->Dispatch.Exec,
                             ((GLclampd) n[1].f, (GLclampd) n[2].f));
             break;
          case OPCODE_DISABLE:
-            CALL_Disable(ctx->Exec, (n[1].e));
+            CALL_Disable(ctx->Dispatch.Exec, (n[1].e));
             break;
          case OPCODE_DISABLE_INDEXED:
-            CALL_Disablei(ctx->Exec, (n[1].ui, n[2].e));
+            CALL_Disablei(ctx->Dispatch.Exec, (n[1].ui, n[2].e));
             break;
          case OPCODE_DRAW_BUFFER:
-            CALL_DrawBuffer(ctx->Exec, (n[1].e));
+            CALL_DrawBuffer(ctx->Dispatch.Exec, (n[1].e));
             break;
          case OPCODE_DRAW_PIXELS:
             {
                const struct gl_pixelstore_attrib save = ctx->Unpack;
                ctx->Unpack = ctx->DefaultPacking;
-               CALL_DrawPixels(ctx->Exec, (n[1].i, n[2].i, n[3].e, n[4].e,
+               CALL_DrawPixels(ctx->Dispatch.Exec, (n[1].i, n[2].i, n[3].e, n[4].e,
                                            get_pointer(&n[5])));
                ctx->Unpack = save;      /* restore */
             }
             break;
          case OPCODE_ENABLE:
-            CALL_Enable(ctx->Exec, (n[1].e));
+            CALL_Enable(ctx->Dispatch.Exec, (n[1].e));
             break;
          case OPCODE_ENABLE_INDEXED:
-            CALL_Enablei(ctx->Exec, (n[1].ui, n[2].e));
+            CALL_Enablei(ctx->Dispatch.Exec, (n[1].ui, n[2].e));
             break;
          case OPCODE_EVALMESH1:
-            CALL_EvalMesh1(ctx->Exec, (n[1].e, n[2].i, n[3].i));
+            CALL_EvalMesh1(ctx->Dispatch.Exec, (n[1].e, n[2].i, n[3].i));
             break;
          case OPCODE_EVALMESH2:
-            CALL_EvalMesh2(ctx->Exec,
+            CALL_EvalMesh2(ctx->Dispatch.Exec,
                            (n[1].e, n[2].i, n[3].i, n[4].i, n[5].i));
             break;
          case OPCODE_FOG:
@@ -11080,24 +11086,24 @@ execute_list(struct gl_context *ctx, GLuint list)
                p[1] = n[3].f;
                p[2] = n[4].f;
                p[3] = n[5].f;
-               CALL_Fogfv(ctx->Exec, (n[1].e, p));
+               CALL_Fogfv(ctx->Dispatch.Exec, (n[1].e, p));
             }
             break;
          case OPCODE_FRONT_FACE:
-            CALL_FrontFace(ctx->Exec, (n[1].e));
+            CALL_FrontFace(ctx->Dispatch.Exec, (n[1].e));
             break;
          case OPCODE_FRUSTUM:
-            CALL_Frustum(ctx->Exec,
+            CALL_Frustum(ctx->Dispatch.Exec,
                          (n[1].f, n[2].f, n[3].f, n[4].f, n[5].f, n[6].f));
             break;
          case OPCODE_HINT:
-            CALL_Hint(ctx->Exec, (n[1].e, n[2].e));
+            CALL_Hint(ctx->Dispatch.Exec, (n[1].e, n[2].e));
             break;
          case OPCODE_INDEX_MASK:
-            CALL_IndexMask(ctx->Exec, (n[1].ui));
+            CALL_IndexMask(ctx->Dispatch.Exec, (n[1].ui));
             break;
          case OPCODE_INIT_NAMES:
-            CALL_InitNames(ctx->Exec, ());
+            CALL_InitNames(ctx->Dispatch.Exec, ());
             break;
          case OPCODE_LIGHT:
             {
@@ -11106,7 +11112,7 @@ execute_list(struct gl_context *ctx, GLuint list)
                p[1] = n[4].f;
                p[2] = n[5].f;
                p[3] = n[6].f;
-               CALL_Lightfv(ctx->Exec, (n[1].e, n[2].e, p));
+               CALL_Lightfv(ctx->Dispatch.Exec, (n[1].e, n[2].e, p));
             }
             break;
          case OPCODE_LIGHT_MODEL:
@@ -11116,30 +11122,30 @@ execute_list(struct gl_context *ctx, GLuint list)
                p[1] = n[3].f;
                p[2] = n[4].f;
                p[3] = n[5].f;
-               CALL_LightModelfv(ctx->Exec, (n[1].e, p));
+               CALL_LightModelfv(ctx->Dispatch.Exec, (n[1].e, p));
             }
             break;
          case OPCODE_LINE_STIPPLE:
-            CALL_LineStipple(ctx->Exec, (n[1].i, n[2].us));
+            CALL_LineStipple(ctx->Dispatch.Exec, (n[1].i, n[2].us));
             break;
          case OPCODE_LINE_WIDTH:
-            CALL_LineWidth(ctx->Exec, (n[1].f));
+            CALL_LineWidth(ctx->Dispatch.Exec, (n[1].f));
             break;
          case OPCODE_LIST_BASE:
-            CALL_ListBase(ctx->Exec, (n[1].ui));
+            CALL_ListBase(ctx->Dispatch.Exec, (n[1].ui));
             break;
          case OPCODE_LOAD_IDENTITY:
-            CALL_LoadIdentity(ctx->Exec, ());
+            CALL_LoadIdentity(ctx->Dispatch.Exec, ());
             break;
          case OPCODE_LOAD_MATRIX:
             STATIC_ASSERT(sizeof(Node) == sizeof(GLfloat));
-            CALL_LoadMatrixf(ctx->Exec, (&n[1].f));
+            CALL_LoadMatrixf(ctx->Dispatch.Exec, (&n[1].f));
             break;
          case OPCODE_LOAD_NAME:
-            CALL_LoadName(ctx->Exec, (n[1].ui));
+            CALL_LoadName(ctx->Dispatch.Exec, (n[1].ui));
             break;
          case OPCODE_LOGIC_OP:
-            CALL_LogicOp(ctx->Exec, (n[1].e));
+            CALL_LogicOp(ctx->Dispatch.Exec, (n[1].e));
             break;
          case OPCODE_MAP1:
             {
@@ -11148,7 +11154,7 @@ execute_list(struct gl_context *ctx, GLuint list)
                GLint uorder = n[5].i;
                GLfloat u1 = n[2].f;
                GLfloat u2 = n[3].f;
-               CALL_Map1f(ctx->Exec, (target, u1, u2, ustride, uorder,
+               CALL_Map1f(ctx->Dispatch.Exec, (target, u1, u2, ustride, uorder,
                                       (GLfloat *) get_pointer(&n[6])));
             }
             break;
@@ -11163,40 +11169,40 @@ execute_list(struct gl_context *ctx, GLuint list)
                GLint vstride = n[7].i;
                GLint uorder = n[8].i;
                GLint vorder = n[9].i;
-               CALL_Map2f(ctx->Exec, (target, u1, u2, ustride, uorder,
+               CALL_Map2f(ctx->Dispatch.Exec, (target, u1, u2, ustride, uorder,
                                       v1, v2, vstride, vorder,
                                       (GLfloat *) get_pointer(&n[10])));
             }
             break;
          case OPCODE_MAPGRID1:
-            CALL_MapGrid1f(ctx->Exec, (n[1].i, n[2].f, n[3].f));
+            CALL_MapGrid1f(ctx->Dispatch.Exec, (n[1].i, n[2].f, n[3].f));
             break;
          case OPCODE_MAPGRID2:
-            CALL_MapGrid2f(ctx->Exec,
+            CALL_MapGrid2f(ctx->Dispatch.Exec,
                            (n[1].i, n[2].f, n[3].f, n[4].i, n[5].f, n[6].f));
             break;
          case OPCODE_MATRIX_MODE:
-            CALL_MatrixMode(ctx->Exec, (n[1].e));
+            CALL_MatrixMode(ctx->Dispatch.Exec, (n[1].e));
             break;
          case OPCODE_MULT_MATRIX:
-            CALL_MultMatrixf(ctx->Exec, (&n[1].f));
+            CALL_MultMatrixf(ctx->Dispatch.Exec, (&n[1].f));
             break;
          case OPCODE_ORTHO:
-            CALL_Ortho(ctx->Exec,
+            CALL_Ortho(ctx->Dispatch.Exec,
                        (n[1].f, n[2].f, n[3].f, n[4].f, n[5].f, n[6].f));
             break;
          case OPCODE_PASSTHROUGH:
-            CALL_PassThrough(ctx->Exec, (n[1].f));
+            CALL_PassThrough(ctx->Dispatch.Exec, (n[1].f));
             break;
          case OPCODE_PATCH_PARAMETER_I:
-            CALL_PatchParameteri(ctx->Exec, (n[1].e, n[2].i));
+            CALL_PatchParameteri(ctx->Dispatch.Exec, (n[1].e, n[2].i));
             break;
          case OPCODE_PATCH_PARAMETER_FV_INNER:
             {
                GLfloat params[2];
                params[0] = n[2].f;
                params[1] = n[3].f;
-               CALL_PatchParameterfv(ctx->Exec, (n[1].e, params));
+               CALL_PatchParameterfv(ctx->Dispatch.Exec, (n[1].e, params));
             }
             break;
          case OPCODE_PATCH_PARAMETER_FV_OUTER:
@@ -11206,21 +11212,21 @@ execute_list(struct gl_context *ctx, GLuint list)
                params[1] = n[3].f;
                params[2] = n[4].f;
                params[3] = n[5].f;
-               CALL_PatchParameterfv(ctx->Exec, (n[1].e, params));
+               CALL_PatchParameterfv(ctx->Dispatch.Exec, (n[1].e, params));
             }
             break;
          case OPCODE_PIXEL_MAP:
-            CALL_PixelMapfv(ctx->Exec,
+            CALL_PixelMapfv(ctx->Dispatch.Exec,
                             (n[1].e, n[2].i, get_pointer(&n[3])));
             break;
          case OPCODE_PIXEL_TRANSFER:
-            CALL_PixelTransferf(ctx->Exec, (n[1].e, n[2].f));
+            CALL_PixelTransferf(ctx->Dispatch.Exec, (n[1].e, n[2].f));
             break;
          case OPCODE_PIXEL_ZOOM:
-            CALL_PixelZoom(ctx->Exec, (n[1].f, n[2].f));
+            CALL_PixelZoom(ctx->Dispatch.Exec, (n[1].f, n[2].f));
             break;
          case OPCODE_POINT_SIZE:
-            CALL_PointSize(ctx->Exec, (n[1].f));
+            CALL_PointSize(ctx->Dispatch.Exec, (n[1].f));
             break;
          case OPCODE_POINT_PARAMETERS:
             {
@@ -11228,86 +11234,86 @@ execute_list(struct gl_context *ctx, GLuint list)
                params[0] = n[2].f;
                params[1] = n[3].f;
                params[2] = n[4].f;
-               CALL_PointParameterfv(ctx->Exec, (n[1].e, params));
+               CALL_PointParameterfv(ctx->Dispatch.Exec, (n[1].e, params));
             }
             break;
          case OPCODE_POLYGON_MODE:
-            CALL_PolygonMode(ctx->Exec, (n[1].e, n[2].e));
+            CALL_PolygonMode(ctx->Dispatch.Exec, (n[1].e, n[2].e));
             break;
          case OPCODE_POLYGON_STIPPLE:
             {
                const struct gl_pixelstore_attrib save = ctx->Unpack;
                ctx->Unpack = ctx->DefaultPacking;
-               CALL_PolygonStipple(ctx->Exec, (get_pointer(&n[1])));
+               CALL_PolygonStipple(ctx->Dispatch.Exec, (get_pointer(&n[1])));
                ctx->Unpack = save;      /* restore */
             }
             break;
          case OPCODE_POLYGON_OFFSET:
-            CALL_PolygonOffset(ctx->Exec, (n[1].f, n[2].f));
+            CALL_PolygonOffset(ctx->Dispatch.Exec, (n[1].f, n[2].f));
             break;
          case OPCODE_POLYGON_OFFSET_CLAMP:
-            CALL_PolygonOffsetClampEXT(ctx->Exec, (n[1].f, n[2].f, n[3].f));
+            CALL_PolygonOffsetClampEXT(ctx->Dispatch.Exec, (n[1].f, n[2].f, n[3].f));
             break;
          case OPCODE_POP_ATTRIB:
-            CALL_PopAttrib(ctx->Exec, ());
+            CALL_PopAttrib(ctx->Dispatch.Exec, ());
             break;
          case OPCODE_POP_MATRIX:
-            CALL_PopMatrix(ctx->Exec, ());
+            CALL_PopMatrix(ctx->Dispatch.Exec, ());
             break;
          case OPCODE_POP_NAME:
-            CALL_PopName(ctx->Exec, ());
+            CALL_PopName(ctx->Dispatch.Exec, ());
             break;
          case OPCODE_PRIORITIZE_TEXTURE:
-            CALL_PrioritizeTextures(ctx->Exec, (1, &n[1].ui, &n[2].f));
+            CALL_PrioritizeTextures(ctx->Dispatch.Exec, (1, &n[1].ui, &n[2].f));
             break;
          case OPCODE_PUSH_ATTRIB:
-            CALL_PushAttrib(ctx->Exec, (n[1].bf));
+            CALL_PushAttrib(ctx->Dispatch.Exec, (n[1].bf));
             break;
          case OPCODE_PUSH_MATRIX:
-            CALL_PushMatrix(ctx->Exec, ());
+            CALL_PushMatrix(ctx->Dispatch.Exec, ());
             break;
          case OPCODE_PUSH_NAME:
-            CALL_PushName(ctx->Exec, (n[1].ui));
+            CALL_PushName(ctx->Dispatch.Exec, (n[1].ui));
             break;
          case OPCODE_RASTER_POS:
-            CALL_RasterPos4f(ctx->Exec, (n[1].f, n[2].f, n[3].f, n[4].f));
+            CALL_RasterPos4f(ctx->Dispatch.Exec, (n[1].f, n[2].f, n[3].f, n[4].f));
             break;
          case OPCODE_READ_BUFFER:
-            CALL_ReadBuffer(ctx->Exec, (n[1].e));
+            CALL_ReadBuffer(ctx->Dispatch.Exec, (n[1].e));
             break;
          case OPCODE_ROTATE:
-            CALL_Rotatef(ctx->Exec, (n[1].f, n[2].f, n[3].f, n[4].f));
+            CALL_Rotatef(ctx->Dispatch.Exec, (n[1].f, n[2].f, n[3].f, n[4].f));
             break;
          case OPCODE_SCALE:
-            CALL_Scalef(ctx->Exec, (n[1].f, n[2].f, n[3].f));
+            CALL_Scalef(ctx->Dispatch.Exec, (n[1].f, n[2].f, n[3].f));
             break;
          case OPCODE_SCISSOR:
-            CALL_Scissor(ctx->Exec, (n[1].i, n[2].i, n[3].i, n[4].i));
+            CALL_Scissor(ctx->Dispatch.Exec, (n[1].i, n[2].i, n[3].i, n[4].i));
             break;
          case OPCODE_SHADE_MODEL:
-            CALL_ShadeModel(ctx->Exec, (n[1].e));
+            CALL_ShadeModel(ctx->Dispatch.Exec, (n[1].e));
             break;
          case OPCODE_PROVOKING_VERTEX:
-            CALL_ProvokingVertex(ctx->Exec, (n[1].e));
+            CALL_ProvokingVertex(ctx->Dispatch.Exec, (n[1].e));
             break;
          case OPCODE_STENCIL_FUNC:
-            CALL_StencilFunc(ctx->Exec, (n[1].e, n[2].i, n[3].ui));
+            CALL_StencilFunc(ctx->Dispatch.Exec, (n[1].e, n[2].i, n[3].ui));
             break;
          case OPCODE_STENCIL_MASK:
-            CALL_StencilMask(ctx->Exec, (n[1].ui));
+            CALL_StencilMask(ctx->Dispatch.Exec, (n[1].ui));
             break;
          case OPCODE_STENCIL_OP:
-            CALL_StencilOp(ctx->Exec, (n[1].e, n[2].e, n[3].e));
+            CALL_StencilOp(ctx->Dispatch.Exec, (n[1].e, n[2].e, n[3].e));
             break;
          case OPCODE_STENCIL_FUNC_SEPARATE:
-            CALL_StencilFuncSeparate(ctx->Exec,
+            CALL_StencilFuncSeparate(ctx->Dispatch.Exec,
                                      (n[1].e, n[2].e, n[3].i, n[4].ui));
             break;
          case OPCODE_STENCIL_MASK_SEPARATE:
-            CALL_StencilMaskSeparate(ctx->Exec, (n[1].e, n[2].ui));
+            CALL_StencilMaskSeparate(ctx->Dispatch.Exec, (n[1].e, n[2].ui));
             break;
          case OPCODE_STENCIL_OP_SEPARATE:
-            CALL_StencilOpSeparate(ctx->Exec,
+            CALL_StencilOpSeparate(ctx->Dispatch.Exec,
                                    (n[1].e, n[2].e, n[3].e, n[4].e));
             break;
          case OPCODE_TEXENV:
@@ -11317,7 +11323,7 @@ execute_list(struct gl_context *ctx, GLuint list)
                params[1] = n[4].f;
                params[2] = n[5].f;
                params[3] = n[6].f;
-               CALL_TexEnvfv(ctx->Exec, (n[1].e, n[2].e, params));
+               CALL_TexEnvfv(ctx->Dispatch.Exec, (n[1].e, n[2].e, params));
             }
             break;
          case OPCODE_TEXGEN:
@@ -11327,7 +11333,7 @@ execute_list(struct gl_context *ctx, GLuint list)
                params[1] = n[4].f;
                params[2] = n[5].f;
                params[3] = n[6].f;
-               CALL_TexGenfv(ctx->Exec, (n[1].e, n[2].e, params));
+               CALL_TexGenfv(ctx->Dispatch.Exec, (n[1].e, n[2].e, params));
             }
             break;
          case OPCODE_TEXPARAMETER:
@@ -11337,14 +11343,14 @@ execute_list(struct gl_context *ctx, GLuint list)
                params[1] = n[4].f;
                params[2] = n[5].f;
                params[3] = n[6].f;
-               CALL_TexParameterfv(ctx->Exec, (n[1].e, n[2].e, params));
+               CALL_TexParameterfv(ctx->Dispatch.Exec, (n[1].e, n[2].e, params));
             }
             break;
          case OPCODE_TEX_IMAGE1D:
             {
                const struct gl_pixelstore_attrib save = ctx->Unpack;
                ctx->Unpack = ctx->DefaultPacking;
-               CALL_TexImage1D(ctx->Exec, (n[1].e,      /* target */
+               CALL_TexImage1D(ctx->Dispatch.Exec, (n[1].e,      /* target */
                                            n[2].i,      /* level */
                                            n[3].i,      /* components */
                                            n[4].i,      /* width */
@@ -11359,7 +11365,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             {
                const struct gl_pixelstore_attrib save = ctx->Unpack;
                ctx->Unpack = ctx->DefaultPacking;
-               CALL_TexImage2D(ctx->Exec, (n[1].e,      /* target */
+               CALL_TexImage2D(ctx->Dispatch.Exec, (n[1].e,      /* target */
                                            n[2].i,      /* level */
                                            n[3].i,      /* components */
                                            n[4].i,      /* width */
@@ -11375,7 +11381,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             {
                const struct gl_pixelstore_attrib save = ctx->Unpack;
                ctx->Unpack = ctx->DefaultPacking;
-               CALL_TexImage3D(ctx->Exec, (n[1].e,      /* target */
+               CALL_TexImage3D(ctx->Dispatch.Exec, (n[1].e,      /* target */
                                            n[2].i,      /* level */
                                            n[3].i,      /* components */
                                            n[4].i,      /* width */
@@ -11392,7 +11398,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             {
                const struct gl_pixelstore_attrib save = ctx->Unpack;
                ctx->Unpack = ctx->DefaultPacking;
-               CALL_TexSubImage1D(ctx->Exec, (n[1].e, n[2].i, n[3].i,
+               CALL_TexSubImage1D(ctx->Dispatch.Exec, (n[1].e, n[2].i, n[3].i,
                                               n[4].i, n[5].e,
                                               n[6].e, get_pointer(&n[7])));
                ctx->Unpack = save;      /* restore */
@@ -11402,7 +11408,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             {
                const struct gl_pixelstore_attrib save = ctx->Unpack;
                ctx->Unpack = ctx->DefaultPacking;
-               CALL_TexSubImage2D(ctx->Exec, (n[1].e, n[2].i, n[3].i,
+               CALL_TexSubImage2D(ctx->Dispatch.Exec, (n[1].e, n[2].i, n[3].i,
                                               n[4].i, n[5].e,
                                               n[6].i, n[7].e, n[8].e,
                                               get_pointer(&n[9])));
@@ -11413,7 +11419,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             {
                const struct gl_pixelstore_attrib save = ctx->Unpack;
                ctx->Unpack = ctx->DefaultPacking;
-               CALL_TexSubImage3D(ctx->Exec, (n[1].e, n[2].i, n[3].i,
+               CALL_TexSubImage3D(ctx->Dispatch.Exec, (n[1].e, n[2].i, n[3].i,
                                               n[4].i, n[5].i, n[6].i, n[7].i,
                                               n[8].i, n[9].e, n[10].e,
                                               get_pointer(&n[11])));
@@ -11421,21 +11427,21 @@ execute_list(struct gl_context *ctx, GLuint list)
             }
             break;
          case OPCODE_TRANSLATE:
-            CALL_Translatef(ctx->Exec, (n[1].f, n[2].f, n[3].f));
+            CALL_Translatef(ctx->Dispatch.Exec, (n[1].f, n[2].f, n[3].f));
             break;
          case OPCODE_VIEWPORT:
-            CALL_Viewport(ctx->Exec, (n[1].i, n[2].i,
+            CALL_Viewport(ctx->Dispatch.Exec, (n[1].i, n[2].i,
                                       (GLsizei) n[3].i, (GLsizei) n[4].i));
             break;
          case OPCODE_WINDOW_POS:
-            CALL_WindowPos4fMESA(ctx->Exec, (n[1].f, n[2].f, n[3].f, n[4].f));
+            CALL_WindowPos4fMESA(ctx->Dispatch.Exec, (n[1].f, n[2].f, n[3].f, n[4].f));
             break;
          case OPCODE_VIEWPORT_ARRAY_V:
-            CALL_ViewportArrayv(ctx->Exec, (n[1].ui, n[2].si,
+            CALL_ViewportArrayv(ctx->Dispatch.Exec, (n[1].ui, n[2].si,
                                             get_pointer(&n[3])));
             break;
          case OPCODE_VIEWPORT_INDEXED_F:
-            CALL_ViewportIndexedf(ctx->Exec, (n[1].ui, n[2].f, n[3].f, n[4].f,
+            CALL_ViewportIndexedf(ctx->Dispatch.Exec, (n[1].ui, n[2].f, n[3].f, n[4].f,
                                               n[5].f));
             break;
          case OPCODE_VIEWPORT_INDEXED_FV: {
@@ -11444,15 +11450,15 @@ execute_list(struct gl_context *ctx, GLuint list)
             v[1] = n[3].f;
             v[2] = n[4].f;
             v[3] = n[5].f;
-            CALL_ViewportIndexedfv(ctx->Exec, (n[1].ui, v));
+            CALL_ViewportIndexedfv(ctx->Dispatch.Exec, (n[1].ui, v));
             break;
          }
          case OPCODE_SCISSOR_ARRAY_V:
-            CALL_ScissorArrayv(ctx->Exec, (n[1].ui, n[2].si,
+            CALL_ScissorArrayv(ctx->Dispatch.Exec, (n[1].ui, n[2].si,
                                            get_pointer(&n[3])));
             break;
          case OPCODE_SCISSOR_INDEXED:
-            CALL_ScissorIndexed(ctx->Exec, (n[1].ui, n[2].i, n[3].i, n[4].si,
+            CALL_ScissorIndexed(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].i, n[4].si,
                                             n[5].si));
             break;
          case OPCODE_SCISSOR_INDEXED_V: {
@@ -11461,98 +11467,98 @@ execute_list(struct gl_context *ctx, GLuint list)
             v[1] = n[3].i;
             v[2] = n[4].si;
             v[3] = n[5].si;
-            CALL_ScissorIndexedv(ctx->Exec, (n[1].ui, v));
+            CALL_ScissorIndexedv(ctx->Dispatch.Exec, (n[1].ui, v));
             break;
          }
          case OPCODE_DEPTH_ARRAY_V:
-            CALL_DepthRangeArrayv(ctx->Exec, (n[1].ui, n[2].si,
+            CALL_DepthRangeArrayv(ctx->Dispatch.Exec, (n[1].ui, n[2].si,
                                               get_pointer(&n[3])));
             break;
          case OPCODE_DEPTH_INDEXED:
-            CALL_DepthRangeIndexed(ctx->Exec, (n[1].ui, n[2].f, n[3].f));
+            CALL_DepthRangeIndexed(ctx->Dispatch.Exec, (n[1].ui, n[2].f, n[3].f));
             break;
          case OPCODE_ACTIVE_TEXTURE:   /* GL_ARB_multitexture */
-            CALL_ActiveTexture(ctx->Exec, (n[1].e));
+            CALL_ActiveTexture(ctx->Dispatch.Exec, (n[1].e));
             break;
          case OPCODE_COMPRESSED_TEX_IMAGE_1D:  /* GL_ARB_texture_compression */
-            CALL_CompressedTexImage1D(ctx->Exec, (n[1].e, n[2].i, n[3].e,
+            CALL_CompressedTexImage1D(ctx->Dispatch.Exec, (n[1].e, n[2].i, n[3].e,
                                                   n[4].i, n[5].i, n[6].i,
                                                   get_pointer(&n[7])));
             break;
          case OPCODE_COMPRESSED_TEX_IMAGE_2D:  /* GL_ARB_texture_compression */
-            CALL_CompressedTexImage2D(ctx->Exec, (n[1].e, n[2].i, n[3].e,
+            CALL_CompressedTexImage2D(ctx->Dispatch.Exec, (n[1].e, n[2].i, n[3].e,
                                                   n[4].i, n[5].i, n[6].i,
                                                   n[7].i, get_pointer(&n[8])));
             break;
          case OPCODE_COMPRESSED_TEX_IMAGE_3D:  /* GL_ARB_texture_compression */
-            CALL_CompressedTexImage3D(ctx->Exec, (n[1].e, n[2].i, n[3].e,
+            CALL_CompressedTexImage3D(ctx->Dispatch.Exec, (n[1].e, n[2].i, n[3].e,
                                                   n[4].i, n[5].i, n[6].i,
                                                   n[7].i, n[8].i,
                                                   get_pointer(&n[9])));
             break;
          case OPCODE_COMPRESSED_TEX_SUB_IMAGE_1D:      /* GL_ARB_texture_compress */
-            CALL_CompressedTexSubImage1D(ctx->Exec,
+            CALL_CompressedTexSubImage1D(ctx->Dispatch.Exec,
                                             (n[1].e, n[2].i, n[3].i, n[4].i,
                                              n[5].e, n[6].i,
                                              get_pointer(&n[7])));
             break;
          case OPCODE_COMPRESSED_TEX_SUB_IMAGE_2D:      /* GL_ARB_texture_compress */
-            CALL_CompressedTexSubImage2D(ctx->Exec,
+            CALL_CompressedTexSubImage2D(ctx->Dispatch.Exec,
                                             (n[1].e, n[2].i, n[3].i, n[4].i,
                                              n[5].i, n[6].i, n[7].e, n[8].i,
                                              get_pointer(&n[9])));
             break;
          case OPCODE_COMPRESSED_TEX_SUB_IMAGE_3D:      /* GL_ARB_texture_compress */
-            CALL_CompressedTexSubImage3D(ctx->Exec,
+            CALL_CompressedTexSubImage3D(ctx->Dispatch.Exec,
                                             (n[1].e, n[2].i, n[3].i, n[4].i,
                                              n[5].i, n[6].i, n[7].i, n[8].i,
                                              n[9].e, n[10].i,
                                              get_pointer(&n[11])));
             break;
          case OPCODE_SAMPLE_COVERAGE:  /* GL_ARB_multisample */
-            CALL_SampleCoverage(ctx->Exec, (n[1].f, n[2].b));
+            CALL_SampleCoverage(ctx->Dispatch.Exec, (n[1].f, n[2].b));
             break;
          case OPCODE_WINDOW_POS_ARB:   /* GL_ARB_window_pos */
-            CALL_WindowPos3f(ctx->Exec, (n[1].f, n[2].f, n[3].f));
+            CALL_WindowPos3f(ctx->Dispatch.Exec, (n[1].f, n[2].f, n[3].f));
             break;
          case OPCODE_BIND_PROGRAM_ARB:  /* GL_ARB_vertex_program */
-            CALL_BindProgramARB(ctx->Exec, (n[1].e, n[2].ui));
+            CALL_BindProgramARB(ctx->Dispatch.Exec, (n[1].e, n[2].ui));
             break;
          case OPCODE_PROGRAM_LOCAL_PARAMETER_ARB:
-            CALL_ProgramLocalParameter4fARB(ctx->Exec,
+            CALL_ProgramLocalParameter4fARB(ctx->Dispatch.Exec,
                                             (n[1].e, n[2].ui, n[3].f, n[4].f,
                                              n[5].f, n[6].f));
             break;
          case OPCODE_ACTIVE_STENCIL_FACE_EXT:
-            CALL_ActiveStencilFaceEXT(ctx->Exec, (n[1].e));
+            CALL_ActiveStencilFaceEXT(ctx->Dispatch.Exec, (n[1].e));
             break;
          case OPCODE_DEPTH_BOUNDS_EXT:
-            CALL_DepthBoundsEXT(ctx->Exec, (n[1].f, n[2].f));
+            CALL_DepthBoundsEXT(ctx->Dispatch.Exec, (n[1].f, n[2].f));
             break;
          case OPCODE_PROGRAM_STRING_ARB:
-            CALL_ProgramStringARB(ctx->Exec,
+            CALL_ProgramStringARB(ctx->Dispatch.Exec,
                                   (n[1].e, n[2].e, n[3].i,
                                    get_pointer(&n[4])));
             break;
          case OPCODE_PROGRAM_ENV_PARAMETER_ARB:
-            CALL_ProgramEnvParameter4fARB(ctx->Exec, (n[1].e, n[2].ui, n[3].f,
+            CALL_ProgramEnvParameter4fARB(ctx->Dispatch.Exec, (n[1].e, n[2].ui, n[3].f,
                                                       n[4].f, n[5].f,
                                                       n[6].f));
             break;
          case OPCODE_BEGIN_QUERY_ARB:
-            CALL_BeginQuery(ctx->Exec, (n[1].e, n[2].ui));
+            CALL_BeginQuery(ctx->Dispatch.Exec, (n[1].e, n[2].ui));
             break;
          case OPCODE_END_QUERY_ARB:
-            CALL_EndQuery(ctx->Exec, (n[1].e));
+            CALL_EndQuery(ctx->Dispatch.Exec, (n[1].e));
             break;
          case OPCODE_QUERY_COUNTER:
-            CALL_QueryCounter(ctx->Exec, (n[1].ui, n[2].e));
+            CALL_QueryCounter(ctx->Dispatch.Exec, (n[1].ui, n[2].e));
             break;
          case OPCODE_BEGIN_QUERY_INDEXED:
-            CALL_BeginQueryIndexed(ctx->Exec, (n[1].e, n[2].ui, n[3].ui));
+            CALL_BeginQueryIndexed(ctx->Dispatch.Exec, (n[1].e, n[2].ui, n[3].ui));
             break;
          case OPCODE_END_QUERY_INDEXED:
-            CALL_EndQueryIndexed(ctx->Exec, (n[1].e, n[2].ui));
+            CALL_EndQueryIndexed(ctx->Dispatch.Exec, (n[1].e, n[2].ui));
             break;
          case OPCODE_DRAW_BUFFERS_ARB:
             {
@@ -11560,45 +11566,45 @@ execute_list(struct gl_context *ctx, GLuint list)
                GLint i, count = MIN2(n[1].i, MAX_DRAW_BUFFERS);
                for (i = 0; i < count; i++)
                   buffers[i] = n[2 + i].e;
-               CALL_DrawBuffers(ctx->Exec, (n[1].i, buffers));
+               CALL_DrawBuffers(ctx->Dispatch.Exec, (n[1].i, buffers));
             }
             break;
          case OPCODE_BLIT_FRAMEBUFFER:
-            CALL_BlitFramebuffer(ctx->Exec, (n[1].i, n[2].i, n[3].i, n[4].i,
+            CALL_BlitFramebuffer(ctx->Dispatch.Exec, (n[1].i, n[2].i, n[3].i, n[4].i,
                                                 n[5].i, n[6].i, n[7].i, n[8].i,
                                                 n[9].i, n[10].e));
             break;
          case OPCODE_PRIMITIVE_RESTART_NV:
-            CALL_PrimitiveRestartNV(ctx->Exec, ());
+            CALL_PrimitiveRestartNV(ctx->Dispatch.Exec, ());
             break;
 
          case OPCODE_USE_PROGRAM:
-            CALL_UseProgram(ctx->Exec, (n[1].ui));
+            CALL_UseProgram(ctx->Dispatch.Exec, (n[1].ui));
             break;
          case OPCODE_UNIFORM_1F:
-            CALL_Uniform1f(ctx->Exec, (n[1].i, n[2].f));
+            CALL_Uniform1f(ctx->Dispatch.Exec, (n[1].i, n[2].f));
             break;
          case OPCODE_UNIFORM_2F:
-            CALL_Uniform2f(ctx->Exec, (n[1].i, n[2].f, n[3].f));
+            CALL_Uniform2f(ctx->Dispatch.Exec, (n[1].i, n[2].f, n[3].f));
             break;
          case OPCODE_UNIFORM_3F:
-            CALL_Uniform3f(ctx->Exec, (n[1].i, n[2].f, n[3].f, n[4].f));
+            CALL_Uniform3f(ctx->Dispatch.Exec, (n[1].i, n[2].f, n[3].f, n[4].f));
             break;
          case OPCODE_UNIFORM_4F:
-            CALL_Uniform4f(ctx->Exec,
+            CALL_Uniform4f(ctx->Dispatch.Exec,
                               (n[1].i, n[2].f, n[3].f, n[4].f, n[5].f));
             break;
          case OPCODE_UNIFORM_1FV:
-            CALL_Uniform1fv(ctx->Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
+            CALL_Uniform1fv(ctx->Dispatch.Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
             break;
          case OPCODE_UNIFORM_2FV:
-            CALL_Uniform2fv(ctx->Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
+            CALL_Uniform2fv(ctx->Dispatch.Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
             break;
          case OPCODE_UNIFORM_3FV:
-            CALL_Uniform3fv(ctx->Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
+            CALL_Uniform3fv(ctx->Dispatch.Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
             break;
          case OPCODE_UNIFORM_4FV:
-            CALL_Uniform4fv(ctx->Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
+            CALL_Uniform4fv(ctx->Dispatch.Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
             break;
          case OPCODE_UNIFORM_1D: {
             union float64_pair x;
@@ -11606,7 +11612,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             x.uint32[0] = n[2].ui;
             x.uint32[1] = n[3].ui;
 
-            CALL_Uniform1d(ctx->Exec, (n[1].i, x.d));
+            CALL_Uniform1d(ctx->Dispatch.Exec, (n[1].i, x.d));
             break;
          }
          case OPCODE_UNIFORM_2D: {
@@ -11618,7 +11624,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             y.uint32[0] = n[4].ui;
             y.uint32[1] = n[5].ui;
 
-            CALL_Uniform2d(ctx->Exec, (n[1].i, x.d, y.d));
+            CALL_Uniform2d(ctx->Dispatch.Exec, (n[1].i, x.d, y.d));
             break;
          }
          case OPCODE_UNIFORM_3D: {
@@ -11633,7 +11639,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             z.uint32[0] = n[6].ui;
             z.uint32[1] = n[7].ui;
 
-            CALL_Uniform3d(ctx->Exec, (n[1].i, x.d, y.d, z.d));
+            CALL_Uniform3d(ctx->Dispatch.Exec, (n[1].i, x.d, y.d, z.d));
             break;
          }
          case OPCODE_UNIFORM_4D: {
@@ -11651,141 +11657,141 @@ execute_list(struct gl_context *ctx, GLuint list)
             w.uint32[0] = n[8].ui;
             w.uint32[1] = n[9].ui;
 
-            CALL_Uniform4d(ctx->Exec, (n[1].i, x.d, y.d, z.d, w.d));
+            CALL_Uniform4d(ctx->Dispatch.Exec, (n[1].i, x.d, y.d, z.d, w.d));
             break;
          }
          case OPCODE_UNIFORM_1DV:
-            CALL_Uniform1dv(ctx->Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
+            CALL_Uniform1dv(ctx->Dispatch.Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
             break;
          case OPCODE_UNIFORM_2DV:
-            CALL_Uniform2dv(ctx->Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
+            CALL_Uniform2dv(ctx->Dispatch.Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
             break;
          case OPCODE_UNIFORM_3DV:
-            CALL_Uniform3dv(ctx->Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
+            CALL_Uniform3dv(ctx->Dispatch.Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
             break;
          case OPCODE_UNIFORM_4DV:
-            CALL_Uniform4dv(ctx->Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
+            CALL_Uniform4dv(ctx->Dispatch.Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
             break;
          case OPCODE_UNIFORM_1I:
-            CALL_Uniform1i(ctx->Exec, (n[1].i, n[2].i));
+            CALL_Uniform1i(ctx->Dispatch.Exec, (n[1].i, n[2].i));
             break;
          case OPCODE_UNIFORM_2I:
-            CALL_Uniform2i(ctx->Exec, (n[1].i, n[2].i, n[3].i));
+            CALL_Uniform2i(ctx->Dispatch.Exec, (n[1].i, n[2].i, n[3].i));
             break;
          case OPCODE_UNIFORM_3I:
-            CALL_Uniform3i(ctx->Exec, (n[1].i, n[2].i, n[3].i, n[4].i));
+            CALL_Uniform3i(ctx->Dispatch.Exec, (n[1].i, n[2].i, n[3].i, n[4].i));
             break;
          case OPCODE_UNIFORM_4I:
-            CALL_Uniform4i(ctx->Exec,
+            CALL_Uniform4i(ctx->Dispatch.Exec,
                               (n[1].i, n[2].i, n[3].i, n[4].i, n[5].i));
             break;
          case OPCODE_UNIFORM_1IV:
-            CALL_Uniform1iv(ctx->Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
+            CALL_Uniform1iv(ctx->Dispatch.Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
             break;
          case OPCODE_UNIFORM_2IV:
-            CALL_Uniform2iv(ctx->Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
+            CALL_Uniform2iv(ctx->Dispatch.Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
             break;
          case OPCODE_UNIFORM_3IV:
-            CALL_Uniform3iv(ctx->Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
+            CALL_Uniform3iv(ctx->Dispatch.Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
             break;
          case OPCODE_UNIFORM_4IV:
-            CALL_Uniform4iv(ctx->Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
+            CALL_Uniform4iv(ctx->Dispatch.Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
             break;
          case OPCODE_UNIFORM_1UI:
-            CALL_Uniform1ui(ctx->Exec, (n[1].i, n[2].i));
+            CALL_Uniform1ui(ctx->Dispatch.Exec, (n[1].i, n[2].i));
             break;
          case OPCODE_UNIFORM_2UI:
-            CALL_Uniform2ui(ctx->Exec, (n[1].i, n[2].i, n[3].i));
+            CALL_Uniform2ui(ctx->Dispatch.Exec, (n[1].i, n[2].i, n[3].i));
             break;
          case OPCODE_UNIFORM_3UI:
-            CALL_Uniform3ui(ctx->Exec, (n[1].i, n[2].i, n[3].i, n[4].i));
+            CALL_Uniform3ui(ctx->Dispatch.Exec, (n[1].i, n[2].i, n[3].i, n[4].i));
             break;
          case OPCODE_UNIFORM_4UI:
-            CALL_Uniform4ui(ctx->Exec,
+            CALL_Uniform4ui(ctx->Dispatch.Exec,
                             (n[1].i, n[2].i, n[3].i, n[4].i, n[5].i));
             break;
          case OPCODE_UNIFORM_1UIV:
-            CALL_Uniform1uiv(ctx->Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
+            CALL_Uniform1uiv(ctx->Dispatch.Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
             break;
          case OPCODE_UNIFORM_2UIV:
-            CALL_Uniform2uiv(ctx->Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
+            CALL_Uniform2uiv(ctx->Dispatch.Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
             break;
          case OPCODE_UNIFORM_3UIV:
-            CALL_Uniform3uiv(ctx->Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
+            CALL_Uniform3uiv(ctx->Dispatch.Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
             break;
          case OPCODE_UNIFORM_4UIV:
-            CALL_Uniform4uiv(ctx->Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
+            CALL_Uniform4uiv(ctx->Dispatch.Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
             break;
          case OPCODE_UNIFORM_MATRIX22:
-            CALL_UniformMatrix2fv(ctx->Exec,
+            CALL_UniformMatrix2fv(ctx->Dispatch.Exec,
                                   (n[1].i, n[2].i, n[3].b, get_pointer(&n[4])));
             break;
          case OPCODE_UNIFORM_MATRIX33:
-            CALL_UniformMatrix3fv(ctx->Exec,
+            CALL_UniformMatrix3fv(ctx->Dispatch.Exec,
                                   (n[1].i, n[2].i, n[3].b, get_pointer(&n[4])));
             break;
          case OPCODE_UNIFORM_MATRIX44:
-            CALL_UniformMatrix4fv(ctx->Exec,
+            CALL_UniformMatrix4fv(ctx->Dispatch.Exec,
                                   (n[1].i, n[2].i, n[3].b, get_pointer(&n[4])));
             break;
          case OPCODE_UNIFORM_MATRIX23:
-            CALL_UniformMatrix2x3fv(ctx->Exec,
+            CALL_UniformMatrix2x3fv(ctx->Dispatch.Exec,
                                     (n[1].i, n[2].i, n[3].b, get_pointer(&n[4])));
             break;
          case OPCODE_UNIFORM_MATRIX32:
-            CALL_UniformMatrix3x2fv(ctx->Exec,
+            CALL_UniformMatrix3x2fv(ctx->Dispatch.Exec,
                                     (n[1].i, n[2].i, n[3].b, get_pointer(&n[4])));
             break;
          case OPCODE_UNIFORM_MATRIX24:
-            CALL_UniformMatrix2x4fv(ctx->Exec,
+            CALL_UniformMatrix2x4fv(ctx->Dispatch.Exec,
                                     (n[1].i, n[2].i, n[3].b, get_pointer(&n[4])));
             break;
          case OPCODE_UNIFORM_MATRIX42:
-            CALL_UniformMatrix4x2fv(ctx->Exec,
+            CALL_UniformMatrix4x2fv(ctx->Dispatch.Exec,
                                     (n[1].i, n[2].i, n[3].b, get_pointer(&n[4])));
             break;
          case OPCODE_UNIFORM_MATRIX34:
-            CALL_UniformMatrix3x4fv(ctx->Exec,
+            CALL_UniformMatrix3x4fv(ctx->Dispatch.Exec,
                                     (n[1].i, n[2].i, n[3].b, get_pointer(&n[4])));
             break;
          case OPCODE_UNIFORM_MATRIX43:
-            CALL_UniformMatrix4x3fv(ctx->Exec,
+            CALL_UniformMatrix4x3fv(ctx->Dispatch.Exec,
                                     (n[1].i, n[2].i, n[3].b, get_pointer(&n[4])));
             break;
          case OPCODE_UNIFORM_MATRIX22D:
-            CALL_UniformMatrix2dv(ctx->Exec,
+            CALL_UniformMatrix2dv(ctx->Dispatch.Exec,
                                   (n[1].i, n[2].i, n[3].b, get_pointer(&n[4])));
             break;
          case OPCODE_UNIFORM_MATRIX33D:
-            CALL_UniformMatrix3dv(ctx->Exec,
+            CALL_UniformMatrix3dv(ctx->Dispatch.Exec,
                                   (n[1].i, n[2].i, n[3].b, get_pointer(&n[4])));
             break;
          case OPCODE_UNIFORM_MATRIX44D:
-            CALL_UniformMatrix4dv(ctx->Exec,
+            CALL_UniformMatrix4dv(ctx->Dispatch.Exec,
                                   (n[1].i, n[2].i, n[3].b, get_pointer(&n[4])));
             break;
          case OPCODE_UNIFORM_MATRIX23D:
-            CALL_UniformMatrix2x3dv(ctx->Exec,
+            CALL_UniformMatrix2x3dv(ctx->Dispatch.Exec,
                                     (n[1].i, n[2].i, n[3].b, get_pointer(&n[4])));
             break;
          case OPCODE_UNIFORM_MATRIX32D:
-            CALL_UniformMatrix3x2dv(ctx->Exec,
+            CALL_UniformMatrix3x2dv(ctx->Dispatch.Exec,
                                     (n[1].i, n[2].i, n[3].b, get_pointer(&n[4])));
             break;
          case OPCODE_UNIFORM_MATRIX24D:
-            CALL_UniformMatrix2x4dv(ctx->Exec,
+            CALL_UniformMatrix2x4dv(ctx->Dispatch.Exec,
                                     (n[1].i, n[2].i, n[3].b, get_pointer(&n[4])));
             break;
          case OPCODE_UNIFORM_MATRIX42D:
-            CALL_UniformMatrix4x2dv(ctx->Exec,
+            CALL_UniformMatrix4x2dv(ctx->Dispatch.Exec,
                                     (n[1].i, n[2].i, n[3].b, get_pointer(&n[4])));
             break;
          case OPCODE_UNIFORM_MATRIX34D:
-            CALL_UniformMatrix3x4dv(ctx->Exec,
+            CALL_UniformMatrix3x4dv(ctx->Dispatch.Exec,
                                     (n[1].i, n[2].i, n[3].b, get_pointer(&n[4])));
             break;
          case OPCODE_UNIFORM_MATRIX43D:
-            CALL_UniformMatrix4x3dv(ctx->Exec,
+            CALL_UniformMatrix4x3dv(ctx->Dispatch.Exec,
                                     (n[1].i, n[2].i, n[3].b, get_pointer(&n[4])));
             break;
 
@@ -11795,7 +11801,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             x.int32[0] = n[2].i;
             x.int32[1] = n[3].i;
 
-            CALL_Uniform1i64ARB(ctx->Exec, (n[1].i, x.int64));
+            CALL_Uniform1i64ARB(ctx->Dispatch.Exec, (n[1].i, x.int64));
             break;
          }
          case OPCODE_UNIFORM_2I64: {
@@ -11807,7 +11813,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             y.int32[0] = n[4].i;
             y.int32[1] = n[5].i;
 
-            CALL_Uniform2i64ARB(ctx->Exec, (n[1].i, x.int64, y.int64));
+            CALL_Uniform2i64ARB(ctx->Dispatch.Exec, (n[1].i, x.int64, y.int64));
             break;
          }
          case OPCODE_UNIFORM_3I64: {
@@ -11823,7 +11829,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             z.int32[1] = n[7].i;
 
 
-            CALL_Uniform3i64ARB(ctx->Exec, (n[1].i, x.int64, y.int64, z.int64));
+            CALL_Uniform3i64ARB(ctx->Dispatch.Exec, (n[1].i, x.int64, y.int64, z.int64));
             break;
          }
          case OPCODE_UNIFORM_4I64: {
@@ -11841,20 +11847,20 @@ execute_list(struct gl_context *ctx, GLuint list)
             w.int32[0] = n[8].i;
             w.int32[1] = n[9].i;
 
-            CALL_Uniform4i64ARB(ctx->Exec, (n[1].i, x.int64, y.int64, z.int64, w.int64));
+            CALL_Uniform4i64ARB(ctx->Dispatch.Exec, (n[1].i, x.int64, y.int64, z.int64, w.int64));
             break;
          }
          case OPCODE_UNIFORM_1I64V:
-            CALL_Uniform1i64vARB(ctx->Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
+            CALL_Uniform1i64vARB(ctx->Dispatch.Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
             break;
          case OPCODE_UNIFORM_2I64V:
-            CALL_Uniform2i64vARB(ctx->Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
+            CALL_Uniform2i64vARB(ctx->Dispatch.Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
             break;
          case OPCODE_UNIFORM_3I64V:
-            CALL_Uniform3i64vARB(ctx->Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
+            CALL_Uniform3i64vARB(ctx->Dispatch.Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
             break;
          case OPCODE_UNIFORM_4I64V:
-            CALL_Uniform4i64vARB(ctx->Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
+            CALL_Uniform4i64vARB(ctx->Dispatch.Exec, (n[1].i, n[2].i, get_pointer(&n[3])));
             break;
          case OPCODE_UNIFORM_1UI64: {
             union uint64_pair x;
@@ -11862,7 +11868,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             x.uint32[0] = n[2].ui;
             x.uint32[1] = n[3].ui;
 
-            CALL_Uniform1ui64ARB(ctx->Exec, (n[1].i, x.uint64));
+            CALL_Uniform1ui64ARB(ctx->Dispatch.Exec, (n[1].i, x.uint64));
             break;
          }
          case OPCODE_UNIFORM_2UI64: {
@@ -11874,7 +11880,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             y.uint32[0] = n[4].ui;
             y.uint32[1] = n[5].ui;
 
-            CALL_Uniform2ui64ARB(ctx->Exec, (n[1].i, x.uint64, y.uint64));
+            CALL_Uniform2ui64ARB(ctx->Dispatch.Exec, (n[1].i, x.uint64, y.uint64));
             break;
          }
          case OPCODE_UNIFORM_3UI64: {
@@ -11890,7 +11896,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             z.uint32[1] = n[7].ui;
 
 
-            CALL_Uniform3ui64ARB(ctx->Exec, (n[1].i, x.uint64, y.uint64,
+            CALL_Uniform3ui64ARB(ctx->Dispatch.Exec, (n[1].i, x.uint64, y.uint64,
                                  z.uint64));
             break;
          }
@@ -11909,24 +11915,24 @@ execute_list(struct gl_context *ctx, GLuint list)
             w.uint32[0] = n[8].ui;
             w.uint32[1] = n[9].ui;
 
-            CALL_Uniform4ui64ARB(ctx->Exec, (n[1].i, x.uint64, y.uint64,
+            CALL_Uniform4ui64ARB(ctx->Dispatch.Exec, (n[1].i, x.uint64, y.uint64,
                                  z.uint64, w.uint64));
             break;
          }
          case OPCODE_UNIFORM_1UI64V:
-            CALL_Uniform1ui64vARB(ctx->Exec, (n[1].i, n[2].i,
+            CALL_Uniform1ui64vARB(ctx->Dispatch.Exec, (n[1].i, n[2].i,
                                   get_pointer(&n[3])));
             break;
          case OPCODE_UNIFORM_2UI64V:
-            CALL_Uniform2ui64vARB(ctx->Exec, (n[1].i, n[2].i,
+            CALL_Uniform2ui64vARB(ctx->Dispatch.Exec, (n[1].i, n[2].i,
                                   get_pointer(&n[3])));
             break;
          case OPCODE_UNIFORM_3UI64V:
-            CALL_Uniform3ui64vARB(ctx->Exec, (n[1].i, n[2].i,
+            CALL_Uniform3ui64vARB(ctx->Dispatch.Exec, (n[1].i, n[2].i,
                                   get_pointer(&n[3])));
             break;
          case OPCODE_UNIFORM_4UI64V:
-            CALL_Uniform4ui64vARB(ctx->Exec, (n[1].i, n[2].i,
+            CALL_Uniform4ui64vARB(ctx->Dispatch.Exec, (n[1].i, n[2].i,
                                   get_pointer(&n[3])));
             break;
 
@@ -11936,7 +11942,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             x.int32[0] = n[3].i;
             x.int32[1] = n[4].i;
 
-            CALL_ProgramUniform1i64ARB(ctx->Exec, (n[1].ui, n[2].i, x.int64));
+            CALL_ProgramUniform1i64ARB(ctx->Dispatch.Exec, (n[1].ui, n[2].i, x.int64));
             break;
          }
          case OPCODE_PROGRAM_UNIFORM_2I64: {
@@ -11948,7 +11954,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             y.int32[0] = n[5].i;
             y.int32[1] = n[6].i;
 
-            CALL_ProgramUniform2i64ARB(ctx->Exec, (n[1].ui, n[2].i, x.int64,
+            CALL_ProgramUniform2i64ARB(ctx->Dispatch.Exec, (n[1].ui, n[2].i, x.int64,
                                        y.int64));
             break;
          }
@@ -11964,7 +11970,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             z.int32[0] = n[7].i;
             z.int32[1] = n[8].i;
 
-            CALL_ProgramUniform3i64ARB(ctx->Exec, (n[1].ui, n[2].i, x.int64,
+            CALL_ProgramUniform3i64ARB(ctx->Dispatch.Exec, (n[1].ui, n[2].i, x.int64,
                                        y.int64, z.int64));
             break;
          }
@@ -11983,24 +11989,24 @@ execute_list(struct gl_context *ctx, GLuint list)
             w.int32[0] = n[9].i;
             w.int32[1] = n[10].i;
 
-            CALL_ProgramUniform4i64ARB(ctx->Exec, (n[1].ui, n[2].i, x.int64,
+            CALL_ProgramUniform4i64ARB(ctx->Dispatch.Exec, (n[1].ui, n[2].i, x.int64,
                                        y.int64, z.int64, w.int64));
             break;
          }
          case OPCODE_PROGRAM_UNIFORM_1I64V:
-            CALL_ProgramUniform1i64vARB(ctx->Exec, (n[1].ui, n[2].i, n[3].i,
+            CALL_ProgramUniform1i64vARB(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].i,
                                         get_pointer(&n[4])));
             break;
          case OPCODE_PROGRAM_UNIFORM_2I64V:
-            CALL_ProgramUniform2i64vARB(ctx->Exec, (n[1].ui, n[2].i, n[3].i,
+            CALL_ProgramUniform2i64vARB(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].i,
                                         get_pointer(&n[4])));
             break;
          case OPCODE_PROGRAM_UNIFORM_3I64V:
-            CALL_ProgramUniform3i64vARB(ctx->Exec, (n[1].ui, n[2].i, n[3].i,
+            CALL_ProgramUniform3i64vARB(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].i,
                                         get_pointer(&n[4])));
             break;
          case OPCODE_PROGRAM_UNIFORM_4I64V:
-            CALL_ProgramUniform4i64vARB(ctx->Exec, (n[1].ui, n[2].i, n[3].i,
+            CALL_ProgramUniform4i64vARB(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].i,
                                         get_pointer(&n[4])));
             break;
          case OPCODE_PROGRAM_UNIFORM_1UI64: {
@@ -12009,7 +12015,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             x.uint32[0] = n[3].ui;
             x.uint32[1] = n[4].ui;
 
-            CALL_ProgramUniform1i64ARB(ctx->Exec, (n[1].ui, n[2].i, x.uint64));
+            CALL_ProgramUniform1i64ARB(ctx->Dispatch.Exec, (n[1].ui, n[2].i, x.uint64));
             break;
          }
          case OPCODE_PROGRAM_UNIFORM_2UI64: {
@@ -12021,7 +12027,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             y.uint32[0] = n[5].ui;
             y.uint32[1] = n[6].ui;
 
-            CALL_ProgramUniform2ui64ARB(ctx->Exec, (n[1].ui, n[2].i, x.uint64,
+            CALL_ProgramUniform2ui64ARB(ctx->Dispatch.Exec, (n[1].ui, n[2].i, x.uint64,
                                         y.uint64));
             break;
          }
@@ -12037,7 +12043,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             z.uint32[0] = n[7].ui;
             z.uint32[1] = n[8].ui;
 
-            CALL_ProgramUniform3ui64ARB(ctx->Exec, (n[1].ui, n[2].i, x.uint64,
+            CALL_ProgramUniform3ui64ARB(ctx->Dispatch.Exec, (n[1].ui, n[2].i, x.uint64,
                                         y.uint64, z.uint64));
             break;
          }
@@ -12056,58 +12062,58 @@ execute_list(struct gl_context *ctx, GLuint list)
             w.uint32[0] = n[9].ui;
             w.uint32[1] = n[10].ui;
 
-            CALL_ProgramUniform4ui64ARB(ctx->Exec, (n[1].ui, n[2].i, x.uint64,
+            CALL_ProgramUniform4ui64ARB(ctx->Dispatch.Exec, (n[1].ui, n[2].i, x.uint64,
                                         y.uint64, z.uint64, w.uint64));
             break;
          }
          case OPCODE_PROGRAM_UNIFORM_1UI64V:
-            CALL_ProgramUniform1ui64vARB(ctx->Exec, (n[1].ui, n[2].i, n[3].i,
+            CALL_ProgramUniform1ui64vARB(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].i,
                                          get_pointer(&n[4])));
             break;
          case OPCODE_PROGRAM_UNIFORM_2UI64V:
-            CALL_ProgramUniform2ui64vARB(ctx->Exec, (n[1].ui, n[2].i, n[3].i,
+            CALL_ProgramUniform2ui64vARB(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].i,
                                          get_pointer(&n[4])));
             break;
          case OPCODE_PROGRAM_UNIFORM_3UI64V:
-            CALL_ProgramUniform3ui64vARB(ctx->Exec, (n[1].ui, n[2].i, n[3].i,
+            CALL_ProgramUniform3ui64vARB(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].i,
                                          get_pointer(&n[4])));
             break;
          case OPCODE_PROGRAM_UNIFORM_4UI64V:
-            CALL_ProgramUniform4ui64vARB(ctx->Exec, (n[1].ui, n[2].i, n[3].i,
+            CALL_ProgramUniform4ui64vARB(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].i,
                                          get_pointer(&n[4])));
             break;
 
          case OPCODE_USE_PROGRAM_STAGES:
-            CALL_UseProgramStages(ctx->Exec, (n[1].ui, n[2].ui, n[3].ui));
+            CALL_UseProgramStages(ctx->Dispatch.Exec, (n[1].ui, n[2].ui, n[3].ui));
             break;
          case OPCODE_PROGRAM_UNIFORM_1F:
-            CALL_ProgramUniform1f(ctx->Exec, (n[1].ui, n[2].i, n[3].f));
+            CALL_ProgramUniform1f(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].f));
             break;
          case OPCODE_PROGRAM_UNIFORM_2F:
-            CALL_ProgramUniform2f(ctx->Exec, (n[1].ui, n[2].i, n[3].f, n[4].f));
+            CALL_ProgramUniform2f(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].f, n[4].f));
             break;
          case OPCODE_PROGRAM_UNIFORM_3F:
-            CALL_ProgramUniform3f(ctx->Exec, (n[1].ui, n[2].i,
+            CALL_ProgramUniform3f(ctx->Dispatch.Exec, (n[1].ui, n[2].i,
                                               n[3].f, n[4].f, n[5].f));
             break;
          case OPCODE_PROGRAM_UNIFORM_4F:
-            CALL_ProgramUniform4f(ctx->Exec, (n[1].ui, n[2].i,
+            CALL_ProgramUniform4f(ctx->Dispatch.Exec, (n[1].ui, n[2].i,
                                               n[3].f, n[4].f, n[5].f, n[6].f));
             break;
          case OPCODE_PROGRAM_UNIFORM_1FV:
-            CALL_ProgramUniform1fv(ctx->Exec, (n[1].ui, n[2].i, n[3].i,
+            CALL_ProgramUniform1fv(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].i,
                                                get_pointer(&n[4])));
             break;
          case OPCODE_PROGRAM_UNIFORM_2FV:
-            CALL_ProgramUniform2fv(ctx->Exec, (n[1].ui, n[2].i, n[3].i,
+            CALL_ProgramUniform2fv(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].i,
                                                get_pointer(&n[4])));
             break;
          case OPCODE_PROGRAM_UNIFORM_3FV:
-            CALL_ProgramUniform3fv(ctx->Exec, (n[1].ui, n[2].i, n[3].i,
+            CALL_ProgramUniform3fv(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].i,
                                                get_pointer(&n[4])));
             break;
          case OPCODE_PROGRAM_UNIFORM_4FV:
-            CALL_ProgramUniform4fv(ctx->Exec, (n[1].ui, n[2].i, n[3].i,
+            CALL_ProgramUniform4fv(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].i,
                                                get_pointer(&n[4])));
             break;
          case OPCODE_PROGRAM_UNIFORM_1D: {
@@ -12116,7 +12122,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             x.uint32[0] = n[3].ui;
             x.uint32[1] = n[4].ui;
 
-            CALL_ProgramUniform1d(ctx->Exec, (n[1].ui, n[2].i, x.d));
+            CALL_ProgramUniform1d(ctx->Dispatch.Exec, (n[1].ui, n[2].i, x.d));
             break;
          }
          case OPCODE_PROGRAM_UNIFORM_2D: {
@@ -12128,7 +12134,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             y.uint32[0] = n[5].ui;
             y.uint32[1] = n[6].ui;
 
-            CALL_ProgramUniform2d(ctx->Exec, (n[1].ui, n[2].i, x.d, y.d));
+            CALL_ProgramUniform2d(ctx->Dispatch.Exec, (n[1].ui, n[2].i, x.d, y.d));
             break;
          }
          case OPCODE_PROGRAM_UNIFORM_3D: {
@@ -12143,7 +12149,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             z.uint32[0] = n[7].ui;
             z.uint32[1] = n[8].ui;
 
-            CALL_ProgramUniform3d(ctx->Exec, (n[1].ui, n[2].i,
+            CALL_ProgramUniform3d(ctx->Dispatch.Exec, (n[1].ui, n[2].i,
                                               x.d, y.d, z.d));
             break;
          }
@@ -12162,282 +12168,282 @@ execute_list(struct gl_context *ctx, GLuint list)
             w.uint32[0] = n[9].ui;
             w.uint32[1] = n[10].ui;
 
-            CALL_ProgramUniform4d(ctx->Exec, (n[1].ui, n[2].i,
+            CALL_ProgramUniform4d(ctx->Dispatch.Exec, (n[1].ui, n[2].i,
                                               x.d, y.d, z.d, w.d));
             break;
          }
          case OPCODE_PROGRAM_UNIFORM_1DV:
-            CALL_ProgramUniform1dv(ctx->Exec, (n[1].ui, n[2].i, n[3].i,
+            CALL_ProgramUniform1dv(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].i,
                                                get_pointer(&n[4])));
             break;
          case OPCODE_PROGRAM_UNIFORM_2DV:
-            CALL_ProgramUniform2dv(ctx->Exec, (n[1].ui, n[2].i, n[3].i,
+            CALL_ProgramUniform2dv(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].i,
                                                get_pointer(&n[4])));
             break;
          case OPCODE_PROGRAM_UNIFORM_3DV:
-            CALL_ProgramUniform3dv(ctx->Exec, (n[1].ui, n[2].i, n[3].i,
+            CALL_ProgramUniform3dv(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].i,
                                                get_pointer(&n[4])));
             break;
          case OPCODE_PROGRAM_UNIFORM_4DV:
-            CALL_ProgramUniform4dv(ctx->Exec, (n[1].ui, n[2].i, n[3].i,
+            CALL_ProgramUniform4dv(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].i,
                                                get_pointer(&n[4])));
             break;
          case OPCODE_PROGRAM_UNIFORM_1I:
-            CALL_ProgramUniform1i(ctx->Exec, (n[1].ui, n[2].i, n[3].i));
+            CALL_ProgramUniform1i(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].i));
             break;
          case OPCODE_PROGRAM_UNIFORM_2I:
-            CALL_ProgramUniform2i(ctx->Exec, (n[1].ui, n[2].i, n[3].i, n[4].i));
+            CALL_ProgramUniform2i(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].i, n[4].i));
             break;
          case OPCODE_PROGRAM_UNIFORM_3I:
-            CALL_ProgramUniform3i(ctx->Exec, (n[1].ui, n[2].i,
+            CALL_ProgramUniform3i(ctx->Dispatch.Exec, (n[1].ui, n[2].i,
                                               n[3].i, n[4].i, n[5].i));
             break;
          case OPCODE_PROGRAM_UNIFORM_4I:
-            CALL_ProgramUniform4i(ctx->Exec, (n[1].ui, n[2].i,
+            CALL_ProgramUniform4i(ctx->Dispatch.Exec, (n[1].ui, n[2].i,
                                               n[3].i, n[4].i, n[5].i, n[6].i));
             break;
          case OPCODE_PROGRAM_UNIFORM_1IV:
-            CALL_ProgramUniform1iv(ctx->Exec, (n[1].ui, n[2].i, n[3].i,
+            CALL_ProgramUniform1iv(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].i,
                                                get_pointer(&n[4])));
             break;
          case OPCODE_PROGRAM_UNIFORM_2IV:
-            CALL_ProgramUniform2iv(ctx->Exec, (n[1].ui, n[2].i, n[3].i,
+            CALL_ProgramUniform2iv(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].i,
                                                get_pointer(&n[4])));
             break;
          case OPCODE_PROGRAM_UNIFORM_3IV:
-            CALL_ProgramUniform3iv(ctx->Exec, (n[1].ui, n[2].i, n[3].i,
+            CALL_ProgramUniform3iv(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].i,
                                                get_pointer(&n[4])));
             break;
          case OPCODE_PROGRAM_UNIFORM_4IV:
-            CALL_ProgramUniform4iv(ctx->Exec, (n[1].ui, n[2].i, n[3].i,
+            CALL_ProgramUniform4iv(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].i,
                                                get_pointer(&n[4])));
             break;
          case OPCODE_PROGRAM_UNIFORM_1UI:
-            CALL_ProgramUniform1ui(ctx->Exec, (n[1].ui, n[2].i, n[3].ui));
+            CALL_ProgramUniform1ui(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].ui));
             break;
          case OPCODE_PROGRAM_UNIFORM_2UI:
-            CALL_ProgramUniform2ui(ctx->Exec, (n[1].ui, n[2].i,
+            CALL_ProgramUniform2ui(ctx->Dispatch.Exec, (n[1].ui, n[2].i,
                                                n[3].ui, n[4].ui));
             break;
          case OPCODE_PROGRAM_UNIFORM_3UI:
-            CALL_ProgramUniform3ui(ctx->Exec, (n[1].ui, n[2].i,
+            CALL_ProgramUniform3ui(ctx->Dispatch.Exec, (n[1].ui, n[2].i,
                                                n[3].ui, n[4].ui, n[5].ui));
             break;
          case OPCODE_PROGRAM_UNIFORM_4UI:
-            CALL_ProgramUniform4ui(ctx->Exec, (n[1].ui, n[2].i,
+            CALL_ProgramUniform4ui(ctx->Dispatch.Exec, (n[1].ui, n[2].i,
                                                n[3].ui,
                                                n[4].ui, n[5].ui, n[6].ui));
             break;
          case OPCODE_PROGRAM_UNIFORM_1UIV:
-            CALL_ProgramUniform1uiv(ctx->Exec, (n[1].ui, n[2].i, n[3].i,
+            CALL_ProgramUniform1uiv(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].i,
                                                 get_pointer(&n[4])));
             break;
          case OPCODE_PROGRAM_UNIFORM_2UIV:
-            CALL_ProgramUniform2uiv(ctx->Exec, (n[1].ui, n[2].i, n[3].i,
+            CALL_ProgramUniform2uiv(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].i,
                                                 get_pointer(&n[4])));
             break;
          case OPCODE_PROGRAM_UNIFORM_3UIV:
-            CALL_ProgramUniform3uiv(ctx->Exec, (n[1].ui, n[2].i, n[3].i,
+            CALL_ProgramUniform3uiv(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].i,
                                                 get_pointer(&n[4])));
             break;
          case OPCODE_PROGRAM_UNIFORM_4UIV:
-            CALL_ProgramUniform4uiv(ctx->Exec, (n[1].ui, n[2].i, n[3].i,
+            CALL_ProgramUniform4uiv(ctx->Dispatch.Exec, (n[1].ui, n[2].i, n[3].i,
                                                 get_pointer(&n[4])));
             break;
          case OPCODE_PROGRAM_UNIFORM_MATRIX22F:
-            CALL_ProgramUniformMatrix2fv(ctx->Exec,
+            CALL_ProgramUniformMatrix2fv(ctx->Dispatch.Exec,
                                          (n[1].ui, n[2].i, n[3].i, n[4].b,
                                           get_pointer(&n[5])));
             break;
          case OPCODE_PROGRAM_UNIFORM_MATRIX23F:
-            CALL_ProgramUniformMatrix2x3fv(ctx->Exec,
+            CALL_ProgramUniformMatrix2x3fv(ctx->Dispatch.Exec,
                                            (n[1].ui, n[2].i, n[3].i, n[4].b,
                                             get_pointer(&n[5])));
             break;
          case OPCODE_PROGRAM_UNIFORM_MATRIX24F:
-            CALL_ProgramUniformMatrix2x4fv(ctx->Exec,
+            CALL_ProgramUniformMatrix2x4fv(ctx->Dispatch.Exec,
                                            (n[1].ui, n[2].i, n[3].i, n[4].b,
                                             get_pointer(&n[5])));
             break;
          case OPCODE_PROGRAM_UNIFORM_MATRIX32F:
-            CALL_ProgramUniformMatrix3x2fv(ctx->Exec,
+            CALL_ProgramUniformMatrix3x2fv(ctx->Dispatch.Exec,
                                            (n[1].ui, n[2].i, n[3].i, n[4].b,
                                             get_pointer(&n[5])));
             break;
          case OPCODE_PROGRAM_UNIFORM_MATRIX33F:
-            CALL_ProgramUniformMatrix3fv(ctx->Exec,
+            CALL_ProgramUniformMatrix3fv(ctx->Dispatch.Exec,
                                          (n[1].ui, n[2].i, n[3].i, n[4].b,
                                           get_pointer(&n[5])));
             break;
          case OPCODE_PROGRAM_UNIFORM_MATRIX34F:
-            CALL_ProgramUniformMatrix3x4fv(ctx->Exec,
+            CALL_ProgramUniformMatrix3x4fv(ctx->Dispatch.Exec,
                                            (n[1].ui, n[2].i, n[3].i, n[4].b,
                                             get_pointer(&n[5])));
             break;
          case OPCODE_PROGRAM_UNIFORM_MATRIX42F:
-            CALL_ProgramUniformMatrix4x2fv(ctx->Exec,
+            CALL_ProgramUniformMatrix4x2fv(ctx->Dispatch.Exec,
                                            (n[1].ui, n[2].i, n[3].i, n[4].b,
                                             get_pointer(&n[5])));
             break;
          case OPCODE_PROGRAM_UNIFORM_MATRIX43F:
-            CALL_ProgramUniformMatrix4x3fv(ctx->Exec,
+            CALL_ProgramUniformMatrix4x3fv(ctx->Dispatch.Exec,
                                            (n[1].ui, n[2].i, n[3].i, n[4].b,
                                             get_pointer(&n[5])));
             break;
          case OPCODE_PROGRAM_UNIFORM_MATRIX44F:
-            CALL_ProgramUniformMatrix4fv(ctx->Exec,
+            CALL_ProgramUniformMatrix4fv(ctx->Dispatch.Exec,
                                          (n[1].ui, n[2].i, n[3].i, n[4].b,
                                           get_pointer(&n[5])));
             break;
          case OPCODE_PROGRAM_UNIFORM_MATRIX22D:
-            CALL_ProgramUniformMatrix2dv(ctx->Exec,
+            CALL_ProgramUniformMatrix2dv(ctx->Dispatch.Exec,
                                          (n[1].ui, n[2].i, n[3].i, n[4].b,
                                           get_pointer(&n[5])));
             break;
          case OPCODE_PROGRAM_UNIFORM_MATRIX23D:
-            CALL_ProgramUniformMatrix2x3dv(ctx->Exec,
+            CALL_ProgramUniformMatrix2x3dv(ctx->Dispatch.Exec,
                                            (n[1].ui, n[2].i, n[3].i, n[4].b,
                                             get_pointer(&n[5])));
             break;
          case OPCODE_PROGRAM_UNIFORM_MATRIX24D:
-            CALL_ProgramUniformMatrix2x4dv(ctx->Exec,
+            CALL_ProgramUniformMatrix2x4dv(ctx->Dispatch.Exec,
                                            (n[1].ui, n[2].i, n[3].i, n[4].b,
                                             get_pointer(&n[5])));
             break;
          case OPCODE_PROGRAM_UNIFORM_MATRIX32D:
-            CALL_ProgramUniformMatrix3x2dv(ctx->Exec,
+            CALL_ProgramUniformMatrix3x2dv(ctx->Dispatch.Exec,
                                            (n[1].ui, n[2].i, n[3].i, n[4].b,
                                             get_pointer(&n[5])));
             break;
          case OPCODE_PROGRAM_UNIFORM_MATRIX33D:
-            CALL_ProgramUniformMatrix3dv(ctx->Exec,
+            CALL_ProgramUniformMatrix3dv(ctx->Dispatch.Exec,
                                          (n[1].ui, n[2].i, n[3].i, n[4].b,
                                           get_pointer(&n[5])));
             break;
          case OPCODE_PROGRAM_UNIFORM_MATRIX34D:
-            CALL_ProgramUniformMatrix3x4dv(ctx->Exec,
+            CALL_ProgramUniformMatrix3x4dv(ctx->Dispatch.Exec,
                                            (n[1].ui, n[2].i, n[3].i, n[4].b,
                                             get_pointer(&n[5])));
             break;
          case OPCODE_PROGRAM_UNIFORM_MATRIX42D:
-            CALL_ProgramUniformMatrix4x2dv(ctx->Exec,
+            CALL_ProgramUniformMatrix4x2dv(ctx->Dispatch.Exec,
                                            (n[1].ui, n[2].i, n[3].i, n[4].b,
                                             get_pointer(&n[5])));
             break;
          case OPCODE_PROGRAM_UNIFORM_MATRIX43D:
-            CALL_ProgramUniformMatrix4x3dv(ctx->Exec,
+            CALL_ProgramUniformMatrix4x3dv(ctx->Dispatch.Exec,
                                            (n[1].ui, n[2].i, n[3].i, n[4].b,
                                             get_pointer(&n[5])));
             break;
          case OPCODE_PROGRAM_UNIFORM_MATRIX44D:
-            CALL_ProgramUniformMatrix4dv(ctx->Exec,
+            CALL_ProgramUniformMatrix4dv(ctx->Dispatch.Exec,
                                          (n[1].ui, n[2].i, n[3].i, n[4].b,
                                           get_pointer(&n[5])));
             break;
 
          case OPCODE_CLIP_CONTROL:
-            CALL_ClipControl(ctx->Exec, (n[1].e, n[2].e));
+            CALL_ClipControl(ctx->Dispatch.Exec, (n[1].e, n[2].e));
             break;
 
          case OPCODE_CLAMP_COLOR:
-            CALL_ClampColor(ctx->Exec, (n[1].e, n[2].e));
+            CALL_ClampColor(ctx->Dispatch.Exec, (n[1].e, n[2].e));
             break;
 
          case OPCODE_BIND_FRAGMENT_SHADER_ATI:
-            CALL_BindFragmentShaderATI(ctx->Exec, (n[1].i));
+            CALL_BindFragmentShaderATI(ctx->Dispatch.Exec, (n[1].i));
             break;
          case OPCODE_SET_FRAGMENT_SHADER_CONSTANTS_ATI:
-            CALL_SetFragmentShaderConstantATI(ctx->Exec, (n[1].ui, &n[2].f));
+            CALL_SetFragmentShaderConstantATI(ctx->Dispatch.Exec, (n[1].ui, &n[2].f));
             break;
          case OPCODE_ATTR_1F_NV:
-            CALL_VertexAttrib1fNV(ctx->Exec, (n[1].e, n[2].f));
+            CALL_VertexAttrib1fNV(ctx->Dispatch.Exec, (n[1].e, n[2].f));
             break;
          case OPCODE_ATTR_2F_NV:
-            CALL_VertexAttrib2fvNV(ctx->Exec, (n[1].e, &n[2].f));
+            CALL_VertexAttrib2fvNV(ctx->Dispatch.Exec, (n[1].e, &n[2].f));
             break;
          case OPCODE_ATTR_3F_NV:
-            CALL_VertexAttrib3fvNV(ctx->Exec, (n[1].e, &n[2].f));
+            CALL_VertexAttrib3fvNV(ctx->Dispatch.Exec, (n[1].e, &n[2].f));
             break;
          case OPCODE_ATTR_4F_NV:
-            CALL_VertexAttrib4fvNV(ctx->Exec, (n[1].e, &n[2].f));
+            CALL_VertexAttrib4fvNV(ctx->Dispatch.Exec, (n[1].e, &n[2].f));
             break;
          case OPCODE_ATTR_1F_ARB:
-            CALL_VertexAttrib1fARB(ctx->Exec, (n[1].e, n[2].f));
+            CALL_VertexAttrib1fARB(ctx->Dispatch.Exec, (n[1].e, n[2].f));
             break;
          case OPCODE_ATTR_2F_ARB:
-            CALL_VertexAttrib2fvARB(ctx->Exec, (n[1].e, &n[2].f));
+            CALL_VertexAttrib2fvARB(ctx->Dispatch.Exec, (n[1].e, &n[2].f));
             break;
          case OPCODE_ATTR_3F_ARB:
-            CALL_VertexAttrib3fvARB(ctx->Exec, (n[1].e, &n[2].f));
+            CALL_VertexAttrib3fvARB(ctx->Dispatch.Exec, (n[1].e, &n[2].f));
             break;
          case OPCODE_ATTR_4F_ARB:
-            CALL_VertexAttrib4fvARB(ctx->Exec, (n[1].e, &n[2].f));
+            CALL_VertexAttrib4fvARB(ctx->Dispatch.Exec, (n[1].e, &n[2].f));
             break;
          case OPCODE_ATTR_1I:
-            CALL_VertexAttribI1iEXT(ctx->Exec, (n[1].e, n[2].i));
+            CALL_VertexAttribI1iEXT(ctx->Dispatch.Exec, (n[1].e, n[2].i));
             break;
          case OPCODE_ATTR_2I:
-            CALL_VertexAttribI2ivEXT(ctx->Exec, (n[1].e, &n[2].i));
+            CALL_VertexAttribI2ivEXT(ctx->Dispatch.Exec, (n[1].e, &n[2].i));
             break;
          case OPCODE_ATTR_3I:
-            CALL_VertexAttribI3ivEXT(ctx->Exec, (n[1].e, &n[2].i));
+            CALL_VertexAttribI3ivEXT(ctx->Dispatch.Exec, (n[1].e, &n[2].i));
             break;
          case OPCODE_ATTR_4I:
-            CALL_VertexAttribI4ivEXT(ctx->Exec, (n[1].e, &n[2].i));
+            CALL_VertexAttribI4ivEXT(ctx->Dispatch.Exec, (n[1].e, &n[2].i));
             break;
          case OPCODE_ATTR_1D: {
             GLdouble *d = (GLdouble *) &n[2];
-            CALL_VertexAttribL1d(ctx->Exec, (n[1].ui, *d));
+            CALL_VertexAttribL1d(ctx->Dispatch.Exec, (n[1].ui, *d));
             break;
          }
          case OPCODE_ATTR_2D: {
             GLdouble *d = (GLdouble *) &n[2];
-            CALL_VertexAttribL2dv(ctx->Exec, (n[1].ui, d));
+            CALL_VertexAttribL2dv(ctx->Dispatch.Exec, (n[1].ui, d));
             break;
          }
          case OPCODE_ATTR_3D: {
             GLdouble *d = (GLdouble *) &n[2];
-            CALL_VertexAttribL3dv(ctx->Exec, (n[1].ui, d));
+            CALL_VertexAttribL3dv(ctx->Dispatch.Exec, (n[1].ui, d));
             break;
          }
          case OPCODE_ATTR_4D: {
             GLdouble *d = (GLdouble *) &n[2];
-            CALL_VertexAttribL4dv(ctx->Exec, (n[1].ui, d));
+            CALL_VertexAttribL4dv(ctx->Dispatch.Exec, (n[1].ui, d));
             break;
          }
          case OPCODE_ATTR_1UI64: {
             uint64_t *ui64 = (uint64_t *) &n[2];
-            CALL_VertexAttribL1ui64ARB(ctx->Exec, (n[1].ui, *ui64));
+            CALL_VertexAttribL1ui64ARB(ctx->Dispatch.Exec, (n[1].ui, *ui64));
             break;
          }
          case OPCODE_MATERIAL:
-            CALL_Materialfv(ctx->Exec, (n[1].e, n[2].e, &n[3].f));
+            CALL_Materialfv(ctx->Dispatch.Exec, (n[1].e, n[2].e, &n[3].f));
             break;
          case OPCODE_BEGIN:
-            CALL_Begin(ctx->Exec, (n[1].e));
+            CALL_Begin(ctx->Dispatch.Exec, (n[1].e));
             break;
          case OPCODE_END:
-            CALL_End(ctx->Exec, ());
+            CALL_End(ctx->Dispatch.Exec, ());
             break;
          case OPCODE_EVAL_C1:
-            CALL_EvalCoord1f(ctx->Exec, (n[1].f));
+            CALL_EvalCoord1f(ctx->Dispatch.Exec, (n[1].f));
             break;
          case OPCODE_EVAL_C2:
-            CALL_EvalCoord2f(ctx->Exec, (n[1].f, n[2].f));
+            CALL_EvalCoord2f(ctx->Dispatch.Exec, (n[1].f, n[2].f));
             break;
          case OPCODE_EVAL_P1:
-            CALL_EvalPoint1(ctx->Exec, (n[1].i));
+            CALL_EvalPoint1(ctx->Dispatch.Exec, (n[1].i));
             break;
          case OPCODE_EVAL_P2:
-            CALL_EvalPoint2(ctx->Exec, (n[1].i, n[2].i));
+            CALL_EvalPoint2(ctx->Dispatch.Exec, (n[1].i, n[2].i));
             break;
 
          /* GL_EXT_texture_integer */
          case OPCODE_CLEARCOLOR_I:
-            CALL_ClearColorIiEXT(ctx->Exec, (n[1].i, n[2].i, n[3].i, n[4].i));
+            CALL_ClearColorIiEXT(ctx->Dispatch.Exec, (n[1].i, n[2].i, n[3].i, n[4].i));
             break;
          case OPCODE_CLEARCOLOR_UI:
-            CALL_ClearColorIuiEXT(ctx->Exec,
+            CALL_ClearColorIuiEXT(ctx->Dispatch.Exec,
                                   (n[1].ui, n[2].ui, n[3].ui, n[4].ui));
             break;
          case OPCODE_TEXPARAMETER_I:
@@ -12447,7 +12453,7 @@ execute_list(struct gl_context *ctx, GLuint list)
                params[1] = n[4].i;
                params[2] = n[5].i;
                params[3] = n[6].i;
-               CALL_TexParameterIiv(ctx->Exec, (n[1].e, n[2].e, params));
+               CALL_TexParameterIiv(ctx->Dispatch.Exec, (n[1].e, n[2].e, params));
             }
             break;
          case OPCODE_TEXPARAMETER_UI:
@@ -12457,54 +12463,54 @@ execute_list(struct gl_context *ctx, GLuint list)
                params[1] = n[4].ui;
                params[2] = n[5].ui;
                params[3] = n[6].ui;
-               CALL_TexParameterIuiv(ctx->Exec, (n[1].e, n[2].e, params));
+               CALL_TexParameterIuiv(ctx->Dispatch.Exec, (n[1].e, n[2].e, params));
             }
             break;
 
          case OPCODE_VERTEX_ATTRIB_DIVISOR:
-            /* GL_ARB_instanced_arrays */
-            CALL_VertexAttribDivisor(ctx->Exec, (n[1].ui, n[2].ui));
+            /* GL_EXT/ARB_instanced_arrays */
+            CALL_VertexAttribDivisor(ctx->Dispatch.Exec, (n[1].ui, n[2].ui));
             break;
 
          case OPCODE_TEXTURE_BARRIER_NV:
-            CALL_TextureBarrierNV(ctx->Exec, ());
+            CALL_TextureBarrierNV(ctx->Dispatch.Exec, ());
             break;
 
          /* GL_EXT/ARB_transform_feedback */
          case OPCODE_BEGIN_TRANSFORM_FEEDBACK:
-            CALL_BeginTransformFeedback(ctx->Exec, (n[1].e));
+            CALL_BeginTransformFeedback(ctx->Dispatch.Exec, (n[1].e));
             break;
          case OPCODE_END_TRANSFORM_FEEDBACK:
-            CALL_EndTransformFeedback(ctx->Exec, ());
+            CALL_EndTransformFeedback(ctx->Dispatch.Exec, ());
             break;
          case OPCODE_BIND_TRANSFORM_FEEDBACK:
-            CALL_BindTransformFeedback(ctx->Exec, (n[1].e, n[2].ui));
+            CALL_BindTransformFeedback(ctx->Dispatch.Exec, (n[1].e, n[2].ui));
             break;
          case OPCODE_PAUSE_TRANSFORM_FEEDBACK:
-            CALL_PauseTransformFeedback(ctx->Exec, ());
+            CALL_PauseTransformFeedback(ctx->Dispatch.Exec, ());
             break;
          case OPCODE_RESUME_TRANSFORM_FEEDBACK:
-            CALL_ResumeTransformFeedback(ctx->Exec, ());
+            CALL_ResumeTransformFeedback(ctx->Dispatch.Exec, ());
             break;
          case OPCODE_DRAW_TRANSFORM_FEEDBACK:
-            CALL_DrawTransformFeedback(ctx->Exec, (n[1].e, n[2].ui));
+            CALL_DrawTransformFeedback(ctx->Dispatch.Exec, (n[1].e, n[2].ui));
             break;
          case OPCODE_DRAW_TRANSFORM_FEEDBACK_STREAM:
-            CALL_DrawTransformFeedbackStream(ctx->Exec,
+            CALL_DrawTransformFeedbackStream(ctx->Dispatch.Exec,
                                              (n[1].e, n[2].ui, n[3].ui));
             break;
          case OPCODE_DRAW_TRANSFORM_FEEDBACK_INSTANCED:
-            CALL_DrawTransformFeedbackInstanced(ctx->Exec,
+            CALL_DrawTransformFeedbackInstanced(ctx->Dispatch.Exec,
                                                 (n[1].e, n[2].ui, n[3].si));
             break;
          case OPCODE_DRAW_TRANSFORM_FEEDBACK_STREAM_INSTANCED:
-            CALL_DrawTransformFeedbackStreamInstanced(ctx->Exec,
+            CALL_DrawTransformFeedbackStreamInstanced(ctx->Dispatch.Exec,
                                        (n[1].e, n[2].ui, n[3].ui, n[4].si));
             break;
 
 
          case OPCODE_BIND_SAMPLER:
-            CALL_BindSampler(ctx->Exec, (n[1].ui, n[2].ui));
+            CALL_BindSampler(ctx->Dispatch.Exec, (n[1].ui, n[2].ui));
             break;
          case OPCODE_SAMPLER_PARAMETERIV:
             {
@@ -12513,7 +12519,7 @@ execute_list(struct gl_context *ctx, GLuint list)
                params[1] = n[4].i;
                params[2] = n[5].i;
                params[3] = n[6].i;
-               CALL_SamplerParameteriv(ctx->Exec, (n[1].ui, n[2].e, params));
+               CALL_SamplerParameteriv(ctx->Dispatch.Exec, (n[1].ui, n[2].e, params));
             }
             break;
          case OPCODE_SAMPLER_PARAMETERFV:
@@ -12523,7 +12529,7 @@ execute_list(struct gl_context *ctx, GLuint list)
                params[1] = n[4].f;
                params[2] = n[5].f;
                params[3] = n[6].f;
-               CALL_SamplerParameterfv(ctx->Exec, (n[1].ui, n[2].e, params));
+               CALL_SamplerParameterfv(ctx->Dispatch.Exec, (n[1].ui, n[2].e, params));
             }
             break;
          case OPCODE_SAMPLER_PARAMETERIIV:
@@ -12533,7 +12539,7 @@ execute_list(struct gl_context *ctx, GLuint list)
                params[1] = n[4].i;
                params[2] = n[5].i;
                params[3] = n[6].i;
-               CALL_SamplerParameterIiv(ctx->Exec, (n[1].ui, n[2].e, params));
+               CALL_SamplerParameterIiv(ctx->Dispatch.Exec, (n[1].ui, n[2].e, params));
             }
             break;
          case OPCODE_SAMPLER_PARAMETERUIV:
@@ -12543,13 +12549,13 @@ execute_list(struct gl_context *ctx, GLuint list)
                params[1] = n[4].ui;
                params[2] = n[5].ui;
                params[3] = n[6].ui;
-               CALL_SamplerParameterIuiv(ctx->Exec, (n[1].ui, n[2].e, params));
+               CALL_SamplerParameterIuiv(ctx->Dispatch.Exec, (n[1].ui, n[2].e, params));
             }
             break;
 
          /* ARB_compute_shader */
          case OPCODE_DISPATCH_COMPUTE:
-            CALL_DispatchCompute(ctx->Exec, (n[1].ui, n[2].ui, n[3].ui));
+            CALL_DispatchCompute(ctx->Dispatch.Exec, (n[1].ui, n[2].ui, n[3].ui));
             break;
 
          /* GL_ARB_sync */
@@ -12558,83 +12564,83 @@ execute_list(struct gl_context *ctx, GLuint list)
                union uint64_pair p;
                p.uint32[0] = n[2].ui;
                p.uint32[1] = n[3].ui;
-               CALL_WaitSync(ctx->Exec,
+               CALL_WaitSync(ctx->Dispatch.Exec,
                              (get_pointer(&n[4]), n[1].bf, p.uint64));
             }
             break;
 
          /* GL_NV_conditional_render */
          case OPCODE_BEGIN_CONDITIONAL_RENDER:
-            CALL_BeginConditionalRender(ctx->Exec, (n[1].i, n[2].e));
+            CALL_BeginConditionalRender(ctx->Dispatch.Exec, (n[1].i, n[2].e));
             break;
          case OPCODE_END_CONDITIONAL_RENDER:
-            CALL_EndConditionalRender(ctx->Exec, ());
+            CALL_EndConditionalRender(ctx->Dispatch.Exec, ());
             break;
 
          case OPCODE_UNIFORM_BLOCK_BINDING:
-            CALL_UniformBlockBinding(ctx->Exec, (n[1].ui, n[2].ui, n[3].ui));
+            CALL_UniformBlockBinding(ctx->Dispatch.Exec, (n[1].ui, n[2].ui, n[3].ui));
             break;
 
          case OPCODE_UNIFORM_SUBROUTINES:
-            CALL_UniformSubroutinesuiv(ctx->Exec, (n[1].e, n[2].si,
+            CALL_UniformSubroutinesuiv(ctx->Dispatch.Exec, (n[1].e, n[2].si,
                                                    get_pointer(&n[3])));
             break;
 
          /* GL_EXT_window_rectangles */
          case OPCODE_WINDOW_RECTANGLES:
             CALL_WindowRectanglesEXT(
-                  ctx->Exec, (n[1].e, n[2].si, get_pointer(&n[3])));
+                  ctx->Dispatch.Exec, (n[1].e, n[2].si, get_pointer(&n[3])));
             break;
 
          /* GL_NV_conservative_raster */
          case OPCODE_SUBPIXEL_PRECISION_BIAS:
-            CALL_SubpixelPrecisionBiasNV(ctx->Exec, (n[1].ui, n[2].ui));
+            CALL_SubpixelPrecisionBiasNV(ctx->Dispatch.Exec, (n[1].ui, n[2].ui));
             break;
 
          /* GL_NV_conservative_raster_dilate */
          case OPCODE_CONSERVATIVE_RASTER_PARAMETER_F:
-            CALL_ConservativeRasterParameterfNV(ctx->Exec, (n[1].e, n[2].f));
+            CALL_ConservativeRasterParameterfNV(ctx->Dispatch.Exec, (n[1].e, n[2].f));
             break;
 
          /* GL_NV_conservative_raster_pre_snap_triangles */
          case OPCODE_CONSERVATIVE_RASTER_PARAMETER_I:
-            CALL_ConservativeRasterParameteriNV(ctx->Exec, (n[1].e, n[2].i));
+            CALL_ConservativeRasterParameteriNV(ctx->Dispatch.Exec, (n[1].e, n[2].i));
             break;
 
          /* GL_EXT_direct_state_access */
          case OPCODE_MATRIX_LOAD:
-            CALL_MatrixLoadfEXT(ctx->Exec, (n[1].e, &n[2].f));
+            CALL_MatrixLoadfEXT(ctx->Dispatch.Exec, (n[1].e, &n[2].f));
             break;
          case OPCODE_MATRIX_MULT:
-            CALL_MatrixMultfEXT(ctx->Exec, (n[1].e, &n[2].f));
+            CALL_MatrixMultfEXT(ctx->Dispatch.Exec, (n[1].e, &n[2].f));
             break;
          case OPCODE_MATRIX_ROTATE:
-            CALL_MatrixRotatefEXT(ctx->Exec, (n[1].e, n[2].f, n[3].f, n[4].f, n[5].f));
+            CALL_MatrixRotatefEXT(ctx->Dispatch.Exec, (n[1].e, n[2].f, n[3].f, n[4].f, n[5].f));
             break;
          case OPCODE_MATRIX_SCALE:
-            CALL_MatrixScalefEXT(ctx->Exec, (n[1].e, n[2].f, n[3].f, n[4].f));
+            CALL_MatrixScalefEXT(ctx->Dispatch.Exec, (n[1].e, n[2].f, n[3].f, n[4].f));
             break;
          case OPCODE_MATRIX_TRANSLATE:
-            CALL_MatrixTranslatefEXT(ctx->Exec, (n[1].e, n[2].f, n[3].f, n[4].f));
+            CALL_MatrixTranslatefEXT(ctx->Dispatch.Exec, (n[1].e, n[2].f, n[3].f, n[4].f));
             break;
          case OPCODE_MATRIX_LOAD_IDENTITY:
-            CALL_MatrixLoadIdentityEXT(ctx->Exec, (n[1].e));
+            CALL_MatrixLoadIdentityEXT(ctx->Dispatch.Exec, (n[1].e));
             break;
          case OPCODE_MATRIX_ORTHO:
-            CALL_MatrixOrthoEXT(ctx->Exec, (n[1].e,
+            CALL_MatrixOrthoEXT(ctx->Dispatch.Exec, (n[1].e,
                                             n[2].f, n[3].f, n[4].f,
                                             n[5].f, n[6].f, n[7].f));
             break;
          case OPCODE_MATRIX_FRUSTUM:
-            CALL_MatrixFrustumEXT(ctx->Exec, (n[1].e,
+            CALL_MatrixFrustumEXT(ctx->Dispatch.Exec, (n[1].e,
                                               n[2].f, n[3].f, n[4].f,
                                               n[5].f, n[6].f, n[7].f));
             break;
          case OPCODE_MATRIX_PUSH:
-            CALL_MatrixPushEXT(ctx->Exec, (n[1].e));
+            CALL_MatrixPushEXT(ctx->Dispatch.Exec, (n[1].e));
             break;
          case OPCODE_MATRIX_POP:
-            CALL_MatrixPopEXT(ctx->Exec, (n[1].e));
+            CALL_MatrixPopEXT(ctx->Dispatch.Exec, (n[1].e));
             break;
          case OPCODE_TEXTUREPARAMETER_F:
             {
@@ -12643,7 +12649,7 @@ execute_list(struct gl_context *ctx, GLuint list)
                params[1] = n[5].f;
                params[2] = n[6].f;
                params[3] = n[7].f;
-               CALL_TextureParameterfvEXT(ctx->Exec, (n[1].ui, n[2].e, n[3].e, params));
+               CALL_TextureParameterfvEXT(ctx->Dispatch.Exec, (n[1].ui, n[2].e, n[3].e, params));
             }
             break;
          case OPCODE_TEXTUREPARAMETER_I:
@@ -12653,7 +12659,7 @@ execute_list(struct gl_context *ctx, GLuint list)
                params[1] = n[5].i;
                params[2] = n[6].i;
                params[3] = n[7].i;
-               CALL_TextureParameterivEXT(ctx->Exec, (n[1].ui, n[2].e, n[3].e, params));
+               CALL_TextureParameterivEXT(ctx->Dispatch.Exec, (n[1].ui, n[2].e, n[3].e, params));
             }
             break;
          case OPCODE_TEXTUREPARAMETER_II:
@@ -12663,7 +12669,7 @@ execute_list(struct gl_context *ctx, GLuint list)
                params[1] = n[5].i;
                params[2] = n[6].i;
                params[3] = n[7].i;
-               CALL_TextureParameterIivEXT(ctx->Exec, (n[1].ui, n[2].e, n[3].e, params));
+               CALL_TextureParameterIivEXT(ctx->Dispatch.Exec, (n[1].ui, n[2].e, n[3].e, params));
             }
             break;
          case OPCODE_TEXTUREPARAMETER_IUI:
@@ -12673,14 +12679,14 @@ execute_list(struct gl_context *ctx, GLuint list)
                params[1] = n[5].ui;
                params[2] = n[6].ui;
                params[3] = n[7].ui;
-               CALL_TextureParameterIuivEXT(ctx->Exec, (n[1].ui, n[2].e, n[3].e, params));
+               CALL_TextureParameterIuivEXT(ctx->Dispatch.Exec, (n[1].ui, n[2].e, n[3].e, params));
             }
             break;
          case OPCODE_TEXTURE_IMAGE1D:
             {
                const struct gl_pixelstore_attrib save = ctx->Unpack;
                ctx->Unpack = ctx->DefaultPacking;
-               CALL_TextureImage1DEXT(ctx->Exec, (n[1].ui, /* texture */
+               CALL_TextureImage1DEXT(ctx->Dispatch.Exec, (n[1].ui, /* texture */
                                                   n[2].e,  /* target */
                                                   n[3].i,  /* level */
                                                   n[4].i,  /* components */
@@ -12696,7 +12702,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             {
                const struct gl_pixelstore_attrib save = ctx->Unpack;
                ctx->Unpack = ctx->DefaultPacking;
-               CALL_TextureImage2DEXT(ctx->Exec, (n[1].ui, /* texture */
+               CALL_TextureImage2DEXT(ctx->Dispatch.Exec, (n[1].ui, /* texture */
                                                   n[2].e,  /* target */
                                                   n[3].i,  /* level */
                                                   n[4].i,  /* components */
@@ -12713,7 +12719,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             {
                const struct gl_pixelstore_attrib save = ctx->Unpack;
                ctx->Unpack = ctx->DefaultPacking;
-               CALL_TextureImage3DEXT(ctx->Exec, (n[1].ui, /* texture */
+               CALL_TextureImage3DEXT(ctx->Dispatch.Exec, (n[1].ui, /* texture */
                                                   n[2].e,  /* target */
                                                   n[3].i,  /* level */
                                                   n[4].i,  /* components */
@@ -12731,7 +12737,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             {
                const struct gl_pixelstore_attrib save = ctx->Unpack;
                ctx->Unpack = ctx->DefaultPacking;
-               CALL_TextureSubImage1DEXT(ctx->Exec, (n[1].ui, n[2].e, n[3].i,
+               CALL_TextureSubImage1DEXT(ctx->Dispatch.Exec, (n[1].ui, n[2].e, n[3].i,
                                                      n[4].i, n[5].i, n[6].e,
                                                      n[7].e, get_pointer(&n[8])));
                ctx->Unpack = save;      /* restore */
@@ -12741,7 +12747,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             {
                const struct gl_pixelstore_attrib save = ctx->Unpack;
                ctx->Unpack = ctx->DefaultPacking;
-               CALL_TextureSubImage2DEXT(ctx->Exec, (n[1].ui, n[2].e, n[3].i,
+               CALL_TextureSubImage2DEXT(ctx->Dispatch.Exec, (n[1].ui, n[2].e, n[3].i,
                                                      n[4].i, n[5].i, n[6].e,
                                                      n[7].i, n[8].e, n[9].e,
                                                      get_pointer(&n[10])));
@@ -12752,7 +12758,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             {
                const struct gl_pixelstore_attrib save = ctx->Unpack;
                ctx->Unpack = ctx->DefaultPacking;
-               CALL_TextureSubImage3DEXT(ctx->Exec, (n[1].ui, n[2].e, n[3].i,
+               CALL_TextureSubImage3DEXT(ctx->Dispatch.Exec, (n[1].ui, n[2].e, n[3].i,
                                                      n[4].i, n[5].i, n[6].i,
                                                      n[7].i, n[8].i, n[9].i,
                                                      n[10].e, n[11].e,
@@ -12761,33 +12767,33 @@ execute_list(struct gl_context *ctx, GLuint list)
             }
             break;
          case OPCODE_COPY_TEXTURE_IMAGE1D:
-            CALL_CopyTextureImage1DEXT(ctx->Exec, (n[1].ui, n[2].e, n[3].i,
+            CALL_CopyTextureImage1DEXT(ctx->Dispatch.Exec, (n[1].ui, n[2].e, n[3].i,
                                                    n[4].e, n[5].i, n[6].i,
                                                    n[7].i, n[8].i));
             break;
          case OPCODE_COPY_TEXTURE_IMAGE2D:
-            CALL_CopyTextureImage2DEXT(ctx->Exec, (n[1].ui, n[2].e, n[3].i,
+            CALL_CopyTextureImage2DEXT(ctx->Dispatch.Exec, (n[1].ui, n[2].e, n[3].i,
                                                    n[4].e, n[5].i, n[6].i,
                                                    n[7].i, n[8].i, n[9].i));
             break;
          case OPCODE_COPY_TEXTURE_SUB_IMAGE1D:
-            CALL_CopyTextureSubImage1DEXT(ctx->Exec, (n[1].ui, n[2].e, n[3].i,
+            CALL_CopyTextureSubImage1DEXT(ctx->Dispatch.Exec, (n[1].ui, n[2].e, n[3].i,
                                                       n[4].i, n[5].i, n[6].i,
                                                       n[7].i));
             break;
          case OPCODE_COPY_TEXTURE_SUB_IMAGE2D:
-            CALL_CopyTextureSubImage2DEXT(ctx->Exec, (n[1].ui, n[2].e, n[3].i,
+            CALL_CopyTextureSubImage2DEXT(ctx->Dispatch.Exec, (n[1].ui, n[2].e, n[3].i,
                                                       n[4].i, n[5].i, n[6].i,
                                                       n[7].i, n[8].i, n[9].i));
             break;
          case OPCODE_COPY_TEXTURE_SUB_IMAGE3D:
-            CALL_CopyTextureSubImage3DEXT(ctx->Exec, (n[1].ui, n[2].e, n[3].i,
+            CALL_CopyTextureSubImage3DEXT(ctx->Dispatch.Exec, (n[1].ui, n[2].e, n[3].i,
                                                       n[4].i, n[5].i, n[6].i,
                                                       n[7].i, n[8].i, n[9].i,
                                                       n[10].i));
             break;
          case OPCODE_BIND_MULTITEXTURE:
-            CALL_BindMultiTextureEXT(ctx->Exec, (n[1].e, n[2].e, n[3].ui));
+            CALL_BindMultiTextureEXT(ctx->Dispatch.Exec, (n[1].e, n[2].e, n[3].ui));
             break;
          case OPCODE_MULTITEXPARAMETER_F:
             {
@@ -12796,7 +12802,7 @@ execute_list(struct gl_context *ctx, GLuint list)
                params[1] = n[5].f;
                params[2] = n[6].f;
                params[3] = n[7].f;
-               CALL_MultiTexParameterfvEXT(ctx->Exec, (n[1].e, n[2].e, n[3].e, params));
+               CALL_MultiTexParameterfvEXT(ctx->Dispatch.Exec, (n[1].e, n[2].e, n[3].e, params));
             }
             break;
          case OPCODE_MULTITEXPARAMETER_I:
@@ -12806,7 +12812,7 @@ execute_list(struct gl_context *ctx, GLuint list)
                params[1] = n[5].i;
                params[2] = n[6].i;
                params[3] = n[7].i;
-               CALL_MultiTexParameterivEXT(ctx->Exec, (n[1].e, n[2].e, n[3].e, params));
+               CALL_MultiTexParameterivEXT(ctx->Dispatch.Exec, (n[1].e, n[2].e, n[3].e, params));
             }
             break;
          case OPCODE_MULTITEXPARAMETER_II:
@@ -12816,7 +12822,7 @@ execute_list(struct gl_context *ctx, GLuint list)
                params[1] = n[5].i;
                params[2] = n[6].i;
                params[3] = n[7].i;
-               CALL_MultiTexParameterIivEXT(ctx->Exec, (n[1].e, n[2].e, n[3].e, params));
+               CALL_MultiTexParameterIivEXT(ctx->Dispatch.Exec, (n[1].e, n[2].e, n[3].e, params));
             }
             break;
          case OPCODE_MULTITEXPARAMETER_IUI:
@@ -12826,14 +12832,14 @@ execute_list(struct gl_context *ctx, GLuint list)
                params[1] = n[5].ui;
                params[2] = n[6].ui;
                params[3] = n[7].ui;
-               CALL_MultiTexParameterIuivEXT(ctx->Exec, (n[1].e, n[2].e, n[3].e, params));
+               CALL_MultiTexParameterIuivEXT(ctx->Dispatch.Exec, (n[1].e, n[2].e, n[3].e, params));
             }
             break;
          case OPCODE_MULTITEX_IMAGE1D:
             {
                const struct gl_pixelstore_attrib save = ctx->Unpack;
                ctx->Unpack = ctx->DefaultPacking;
-               CALL_MultiTexImage1DEXT(ctx->Exec, (n[1].e, /* texture */
+               CALL_MultiTexImage1DEXT(ctx->Dispatch.Exec, (n[1].e, /* texture */
                                                   n[2].e,  /* target */
                                                   n[3].i,  /* level */
                                                   n[4].i,  /* components */
@@ -12849,7 +12855,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             {
                const struct gl_pixelstore_attrib save = ctx->Unpack;
                ctx->Unpack = ctx->DefaultPacking;
-               CALL_MultiTexImage2DEXT(ctx->Exec, (n[1].e, /* texture */
+               CALL_MultiTexImage2DEXT(ctx->Dispatch.Exec, (n[1].e, /* texture */
                                                   n[2].e,  /* target */
                                                   n[3].i,  /* level */
                                                   n[4].i,  /* components */
@@ -12866,7 +12872,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             {
                const struct gl_pixelstore_attrib save = ctx->Unpack;
                ctx->Unpack = ctx->DefaultPacking;
-               CALL_MultiTexImage3DEXT(ctx->Exec, (n[1].e, /* texture */
+               CALL_MultiTexImage3DEXT(ctx->Dispatch.Exec, (n[1].e, /* texture */
                                                   n[2].e,  /* target */
                                                   n[3].i,  /* level */
                                                   n[4].i,  /* components */
@@ -12884,7 +12890,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             {
                const struct gl_pixelstore_attrib save = ctx->Unpack;
                ctx->Unpack = ctx->DefaultPacking;
-               CALL_MultiTexSubImage1DEXT(ctx->Exec, (n[1].e, n[2].e, n[3].i,
+               CALL_MultiTexSubImage1DEXT(ctx->Dispatch.Exec, (n[1].e, n[2].e, n[3].i,
                                                      n[4].i, n[5].i, n[6].e,
                                                      n[7].e, get_pointer(&n[8])));
                ctx->Unpack = save;      /* restore */
@@ -12894,7 +12900,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             {
                const struct gl_pixelstore_attrib save = ctx->Unpack;
                ctx->Unpack = ctx->DefaultPacking;
-               CALL_MultiTexSubImage2DEXT(ctx->Exec, (n[1].e, n[2].e, n[3].i,
+               CALL_MultiTexSubImage2DEXT(ctx->Dispatch.Exec, (n[1].e, n[2].e, n[3].i,
                                                      n[4].i, n[5].i, n[6].e,
                                                      n[7].i, n[8].e, n[9].e,
                                                      get_pointer(&n[10])));
@@ -12905,7 +12911,7 @@ execute_list(struct gl_context *ctx, GLuint list)
             {
                const struct gl_pixelstore_attrib save = ctx->Unpack;
                ctx->Unpack = ctx->DefaultPacking;
-               CALL_MultiTexSubImage3DEXT(ctx->Exec, (n[1].e, n[2].e, n[3].i,
+               CALL_MultiTexSubImage3DEXT(ctx->Dispatch.Exec, (n[1].e, n[2].e, n[3].i,
                                                      n[4].i, n[5].i, n[6].i,
                                                      n[7].i, n[8].i, n[9].i,
                                                      n[10].e, n[11].e,
@@ -12914,27 +12920,27 @@ execute_list(struct gl_context *ctx, GLuint list)
             }
             break;
          case OPCODE_COPY_MULTITEX_IMAGE1D:
-            CALL_CopyMultiTexImage1DEXT(ctx->Exec, (n[1].e, n[2].e, n[3].i,
+            CALL_CopyMultiTexImage1DEXT(ctx->Dispatch.Exec, (n[1].e, n[2].e, n[3].i,
                                                    n[4].e, n[5].i, n[6].i,
                                                    n[7].i, n[8].i));
             break;
          case OPCODE_COPY_MULTITEX_IMAGE2D:
-            CALL_CopyMultiTexImage2DEXT(ctx->Exec, (n[1].e, n[2].e, n[3].i,
+            CALL_CopyMultiTexImage2DEXT(ctx->Dispatch.Exec, (n[1].e, n[2].e, n[3].i,
                                                    n[4].e, n[5].i, n[6].i,
                                                    n[7].i, n[8].i, n[9].i));
             break;
          case OPCODE_COPY_MULTITEX_SUB_IMAGE1D:
-            CALL_CopyMultiTexSubImage1DEXT(ctx->Exec, (n[1].e, n[2].e, n[3].i,
+            CALL_CopyMultiTexSubImage1DEXT(ctx->Dispatch.Exec, (n[1].e, n[2].e, n[3].i,
                                                       n[4].i, n[5].i, n[6].i,
                                                       n[7].i));
             break;
          case OPCODE_COPY_MULTITEX_SUB_IMAGE2D:
-            CALL_CopyMultiTexSubImage2DEXT(ctx->Exec, (n[1].e, n[2].e, n[3].i,
+            CALL_CopyMultiTexSubImage2DEXT(ctx->Dispatch.Exec, (n[1].e, n[2].e, n[3].i,
                                                       n[4].i, n[5].i, n[6].i,
                                                       n[7].i, n[8].i, n[9].i));
             break;
          case OPCODE_COPY_MULTITEX_SUB_IMAGE3D:
-            CALL_CopyMultiTexSubImage3DEXT(ctx->Exec, (n[1].e, n[2].e, n[3].i,
+            CALL_CopyMultiTexSubImage3DEXT(ctx->Dispatch.Exec, (n[1].e, n[2].e, n[3].i,
                                                       n[4].i, n[5].i, n[6].i,
                                                       n[7].i, n[8].i, n[9].i,
                                                       n[10].i));
@@ -12946,94 +12952,94 @@ execute_list(struct gl_context *ctx, GLuint list)
                params[1] = n[5].f;
                params[2] = n[6].f;
                params[3] = n[7].f;
-               CALL_MultiTexEnvfvEXT(ctx->Exec, (n[1].e, n[2].e, n[3].e, params));
+               CALL_MultiTexEnvfvEXT(ctx->Dispatch.Exec, (n[1].e, n[2].e, n[3].e, params));
             }
             break;
          case OPCODE_COMPRESSED_TEXTURE_IMAGE_1D:
-            CALL_CompressedTextureImage1DEXT(ctx->Exec, (n[1].ui, n[2].e, n[3].i,
+            CALL_CompressedTextureImage1DEXT(ctx->Dispatch.Exec, (n[1].ui, n[2].e, n[3].i,
                                                          n[4].e, n[5].i, n[6].i,
                                                          n[7].i, get_pointer(&n[8])));
             break;
          case OPCODE_COMPRESSED_TEXTURE_IMAGE_2D:
-            CALL_CompressedTextureImage2DEXT(ctx->Exec, (n[1].ui, n[2].e, n[3].i,
+            CALL_CompressedTextureImage2DEXT(ctx->Dispatch.Exec, (n[1].ui, n[2].e, n[3].i,
                                                          n[4].e, n[5].i, n[6].i,
                                                          n[7].i, n[8].i,
                                                          get_pointer(&n[9])));
             break;
          case OPCODE_COMPRESSED_TEXTURE_IMAGE_3D:
-            CALL_CompressedTextureImage3DEXT(ctx->Exec, (n[1].ui, n[2].e, n[3].i,
+            CALL_CompressedTextureImage3DEXT(ctx->Dispatch.Exec, (n[1].ui, n[2].e, n[3].i,
                                                          n[4].e, n[5].i, n[6].i,
                                                          n[7].i, n[8].i, n[9].i,
                                                          get_pointer(&n[10])));
             break;
          case OPCODE_COMPRESSED_TEXTURE_SUB_IMAGE_1D:
-            CALL_CompressedTextureSubImage1DEXT(ctx->Exec,
+            CALL_CompressedTextureSubImage1DEXT(ctx->Dispatch.Exec,
                                                 (n[1].ui, n[2].e, n[3].i, n[4].i,
                                                  n[5].i, n[6].e, n[7].i,
                                                  get_pointer(&n[8])));
             break;
          case OPCODE_COMPRESSED_TEXTURE_SUB_IMAGE_2D:
-            CALL_CompressedTextureSubImage2DEXT(ctx->Exec,
+            CALL_CompressedTextureSubImage2DEXT(ctx->Dispatch.Exec,
                                                 (n[1].ui, n[2].e, n[3].i, n[4].i,
                                                  n[5].i, n[6].i, n[7].i, n[8].e,
                                                  n[9].i, get_pointer(&n[10])));
             break;
          case OPCODE_COMPRESSED_TEXTURE_SUB_IMAGE_3D:
-            CALL_CompressedTextureSubImage3DEXT(ctx->Exec,
+            CALL_CompressedTextureSubImage3DEXT(ctx->Dispatch.Exec,
                                                 (n[1].ui, n[2].e, n[3].i, n[4].i,
                                                  n[5].i, n[6].i, n[7].i, n[8].i,
                                                  n[9].i, n[10].e, n[11].i,
                                                  get_pointer(&n[12])));
             break;
          case OPCODE_COMPRESSED_MULTITEX_IMAGE_1D:
-            CALL_CompressedMultiTexImage1DEXT(ctx->Exec, (n[1].e, n[2].e, n[3].i,
+            CALL_CompressedMultiTexImage1DEXT(ctx->Dispatch.Exec, (n[1].e, n[2].e, n[3].i,
                                                          n[4].e, n[5].i, n[6].i,
                                                          n[7].i, get_pointer(&n[8])));
             break;
          case OPCODE_COMPRESSED_MULTITEX_IMAGE_2D:
-            CALL_CompressedMultiTexImage2DEXT(ctx->Exec, (n[1].e, n[2].e, n[3].i,
+            CALL_CompressedMultiTexImage2DEXT(ctx->Dispatch.Exec, (n[1].e, n[2].e, n[3].i,
                                                          n[4].e, n[5].i, n[6].i,
                                                          n[7].i, n[8].i,
                                                          get_pointer(&n[9])));
             break;
          case OPCODE_COMPRESSED_MULTITEX_IMAGE_3D:
-            CALL_CompressedMultiTexImage3DEXT(ctx->Exec, (n[1].e, n[2].e, n[3].i,
+            CALL_CompressedMultiTexImage3DEXT(ctx->Dispatch.Exec, (n[1].e, n[2].e, n[3].i,
                                                          n[4].e, n[5].i, n[6].i,
                                                          n[7].i, n[8].i, n[9].i,
                                                          get_pointer(&n[10])));
             break;
          case OPCODE_COMPRESSED_MULTITEX_SUB_IMAGE_1D:
-            CALL_CompressedMultiTexSubImage1DEXT(ctx->Exec,
+            CALL_CompressedMultiTexSubImage1DEXT(ctx->Dispatch.Exec,
                                                 (n[1].e, n[2].e, n[3].i, n[4].i,
                                                  n[5].i, n[6].e, n[7].i,
                                                  get_pointer(&n[8])));
             break;
          case OPCODE_COMPRESSED_MULTITEX_SUB_IMAGE_2D:
-            CALL_CompressedMultiTexSubImage2DEXT(ctx->Exec,
+            CALL_CompressedMultiTexSubImage2DEXT(ctx->Dispatch.Exec,
                                                 (n[1].e, n[2].e, n[3].i, n[4].i,
                                                  n[5].i, n[6].i, n[7].i, n[8].e,
                                                  n[9].i, get_pointer(&n[10])));
             break;
          case OPCODE_COMPRESSED_MULTITEX_SUB_IMAGE_3D:
-            CALL_CompressedMultiTexSubImage3DEXT(ctx->Exec,
+            CALL_CompressedMultiTexSubImage3DEXT(ctx->Dispatch.Exec,
                                                 (n[1].e, n[2].e, n[3].i, n[4].i,
                                                  n[5].i, n[6].i, n[7].i, n[8].i,
                                                  n[9].i, n[10].e, n[11].i,
                                                  get_pointer(&n[12])));
             break;
          case OPCODE_NAMED_PROGRAM_STRING:
-            CALL_NamedProgramStringEXT(ctx->Exec,
+            CALL_NamedProgramStringEXT(ctx->Dispatch.Exec,
                                   (n[1].ui, n[2].e, n[3].e, n[4].i,
                                    get_pointer(&n[5])));
             break;
          case OPCODE_NAMED_PROGRAM_LOCAL_PARAMETER:
-            CALL_NamedProgramLocalParameter4fEXT(ctx->Exec,
+            CALL_NamedProgramLocalParameter4fEXT(ctx->Dispatch.Exec,
                                             (n[1].ui, n[2].e, n[3].ui, n[4].f,
                                              n[5].f, n[6].f, n[7].f));
             break;
 
          case OPCODE_PRIMITIVE_BOUNDING_BOX:
-            CALL_PrimitiveBoundingBox(ctx->Exec,
+            CALL_PrimitiveBoundingBox(ctx->Dispatch.Exec,
                                       (n[1].f, n[2].f, n[3].f, n[4].f,
                                        n[5].f, n[6].f, n[7].f, n[8].f));
             break;
@@ -13105,11 +13111,11 @@ _mesa_DeleteLists(GLuint list, GLsizei range)
       return;
    }
 
-   _mesa_HashLockMutex(ctx->Shared->DisplayList);
+   _mesa_HashLockMutex(&ctx->Shared->DisplayList);
    for (i = list; i < list + range; i++) {
       destroy_list(ctx, i);
    }
-   _mesa_HashUnlockMutex(ctx->Shared->DisplayList);
+   _mesa_HashUnlockMutex(&ctx->Shared->DisplayList);
 }
 
 
@@ -13136,19 +13142,19 @@ _mesa_GenLists(GLsizei range)
    /*
     * Make this an atomic operation
     */
-   _mesa_HashLockMutex(ctx->Shared->DisplayList);
+   _mesa_HashLockMutex(&ctx->Shared->DisplayList);
 
-   base = _mesa_HashFindFreeKeyBlock(ctx->Shared->DisplayList, range);
+   base = _mesa_HashFindFreeKeyBlock(&ctx->Shared->DisplayList, range);
    if (base) {
       /* reserve the list IDs by with empty/dummy lists */
       GLint i;
       for (i = 0; i < range; i++) {
-         _mesa_HashInsertLocked(ctx->Shared->DisplayList, base + i,
-                                make_list(base + i, 1), true);
+         _mesa_HashInsertLocked(&ctx->Shared->DisplayList, base + i,
+                                make_list(base + i, 1));
       }
    }
 
-   _mesa_HashUnlockMutex(ctx->Shared->DisplayList);
+   _mesa_HashUnlockMutex(&ctx->Shared->DisplayList);
 
    return base;
 }
@@ -13164,10 +13170,6 @@ _mesa_NewList(GLuint name, GLenum mode)
 
    FLUSH_CURRENT(ctx, 0);       /* must be called before assert */
    ASSERT_OUTSIDE_BEGIN_END(ctx);
-
-   if (MESA_VERBOSE & VERBOSE_API)
-      _mesa_debug(ctx, "glNewList %u %s\n", name,
-                  _mesa_enum_to_string(mode));
 
    if (name == 0) {
       _mesa_error(ctx, GL_INVALID_VALUE, "glNewList");
@@ -13197,13 +13199,14 @@ _mesa_NewList(GLuint name, GLenum mode)
    ctx->ListState.CurrentPos = 0;
    ctx->ListState.LastInstSize = 0;
    ctx->ListState.Current.UseLoopback = false;
+   ctx->ListState.Current.NeedsFlush = false;
 
    vbo_save_NewList(ctx, name, mode);
 
-   ctx->CurrentServerDispatch = ctx->Save;
-   _glapi_set_dispatch(ctx->CurrentServerDispatch);
+   ctx->Dispatch.Current = ctx->Dispatch.Save;
+   _mesa_set_dispatch(ctx, ctx->Dispatch.Current);
    if (!ctx->GLThread.enabled) {
-      ctx->CurrentClientDispatch = ctx->CurrentServerDispatch;
+      ctx->GLApi = ctx->Dispatch.Current;
    }
 }
 
@@ -13323,9 +13326,6 @@ _mesa_EndList(void)
    SAVE_FLUSH_VERTICES(ctx);
    FLUSH_VERTICES(ctx, 0, 0);
 
-   if (MESA_VERBOSE & VERBOSE_API)
-      _mesa_debug(ctx, "glEndList\n");
-
    if (ctx->ExecuteFlag && _mesa_inside_dlist_begin_end(ctx)) {
       _mesa_error(ctx, GL_INVALID_OPERATION,
                   "glEndList() called inside glBegin/End");
@@ -13344,7 +13344,17 @@ _mesa_EndList(void)
 
    (void) alloc_instruction(ctx, OPCODE_END_OF_LIST, 0);
 
-   _mesa_HashLockMutex(ctx->Shared->DisplayList);
+   /* Ending a display list that's part of a share group should make that new display list
+    * immediately visible to other contexts, per Q 16.110 from
+    * https://www.opengl.org/archives/resources/faq/technical/displaylist.htm
+    * If this displaylist includes enqueued uploads to a VRAM vertex buffer or a bitmap,
+    * flush those now to ensure that other contexts can see them.
+    */
+   if (ctx->ListState.Current.NeedsFlush &&
+       ctx->Shared->RefCount > 1)
+      _mesa_flush(ctx);
+
+   _mesa_HashLockMutex(&ctx->Shared->DisplayList);
 
    if (ctx->ListState.Current.UseLoopback)
       replace_op_vertex_list_recursively(ctx, ctx->ListState.CurrentList);
@@ -13396,14 +13406,14 @@ _mesa_EndList(void)
    destroy_list(ctx, ctx->ListState.CurrentList->Name);
 
    /* Install the new list */
-   _mesa_HashInsertLocked(ctx->Shared->DisplayList,
+   _mesa_HashInsertLocked(&ctx->Shared->DisplayList,
                           ctx->ListState.CurrentList->Name,
-                          ctx->ListState.CurrentList, true);
+                          ctx->ListState.CurrentList);
 
    if (MESA_VERBOSE & VERBOSE_DISPLAY_LIST)
-      mesa_print_display_list(ctx->ListState.CurrentList->Name);
+      print_list(ctx, ctx->ListState.CurrentList->Name, NULL);
 
-   _mesa_HashUnlockMutex(ctx->Shared->DisplayList);
+   _mesa_HashUnlockMutex(&ctx->Shared->DisplayList);
 
    ctx->ListState.CurrentList = NULL;
    ctx->ListState.CurrentBlock = NULL;
@@ -13412,10 +13422,10 @@ _mesa_EndList(void)
    ctx->ExecuteFlag = GL_TRUE;
    ctx->CompileFlag = GL_FALSE;
 
-   ctx->CurrentServerDispatch = ctx->Exec;
-   _glapi_set_dispatch(ctx->CurrentServerDispatch);
+   ctx->Dispatch.Current = ctx->Dispatch.Exec;
+   _mesa_set_dispatch(ctx, ctx->Dispatch.Current);
    if (!ctx->GLThread.enabled) {
-      ctx->CurrentClientDispatch = ctx->CurrentServerDispatch;
+      ctx->GLApi = ctx->Dispatch.Current;
    }
 }
 
@@ -13427,16 +13437,13 @@ _mesa_CallList(GLuint list)
    GET_CURRENT_CONTEXT(ctx);
    FLUSH_CURRENT(ctx, 0);
 
-   if (MESA_VERBOSE & VERBOSE_API)
-      _mesa_debug(ctx, "glCallList %d\n", list);
-
    if (list == 0) {
       _mesa_error(ctx, GL_INVALID_VALUE, "glCallList(list==0)");
       return;
    }
 
    if (0)
-      mesa_print_display_list( list );
+      print_list(ctx, list, NULL);
 
    /* Save the CompileFlag status, turn it off, execute the display list,
     * and restore the CompileFlag. This is needed for GL_COMPILE_AND_EXECUTE
@@ -13447,16 +13454,16 @@ _mesa_CallList(GLuint list)
       ctx->CompileFlag = GL_FALSE;
    }
 
-   _mesa_HashLockMutex(ctx->Shared->DisplayList);
+   _mesa_HashLockMutex(&ctx->Shared->DisplayList);
    execute_list(ctx, list);
-   _mesa_HashUnlockMutex(ctx->Shared->DisplayList);
+   _mesa_HashUnlockMutex(&ctx->Shared->DisplayList);
    ctx->CompileFlag = save_compile_flag;
 
    /* also restore API function pointers to point to "save" versions */
    if (save_compile_flag) {
-      ctx->CurrentServerDispatch = ctx->Save;
+      ctx->Dispatch.Current = ctx->Dispatch.Save;
       if (!ctx->GLThread.enabled) {
-         ctx->CurrentClientDispatch = ctx->CurrentServerDispatch;
+         ctx->GLApi = ctx->Dispatch.Current;
       }
    }
 }
@@ -13470,9 +13477,6 @@ _mesa_CallLists(GLsizei n, GLenum type, const GLvoid * lists)
 {
    GET_CURRENT_CONTEXT(ctx);
    GLboolean save_compile_flag;
-
-   if (MESA_VERBOSE & VERBOSE_API)
-      _mesa_debug(ctx, "glCallLists %d\n", n);
 
    if (type < GL_BYTE || type > GL_4_BYTES) {
       _mesa_error(ctx, GL_INVALID_ENUM, "glCallLists(type)");
@@ -13504,7 +13508,7 @@ _mesa_CallLists(GLsizei n, GLenum type, const GLvoid * lists)
 
    GLuint base = ctx->List.ListBase;
 
-   _mesa_HashLockMutex(ctx->Shared->DisplayList);
+   _mesa_HashLockMutex(&ctx->Shared->DisplayList);
 
    /* A loop inside a switch is faster than a switch inside a loop. */
    switch (type) {
@@ -13572,14 +13576,14 @@ _mesa_CallLists(GLsizei n, GLenum type, const GLvoid * lists)
       break;
    }
 
-   _mesa_HashUnlockMutex(ctx->Shared->DisplayList);
+   _mesa_HashUnlockMutex(&ctx->Shared->DisplayList);
    ctx->CompileFlag = save_compile_flag;
 
    /* also restore API function pointers to point to "save" versions */
    if (save_compile_flag) {
-      ctx->CurrentServerDispatch = ctx->Save;
+      ctx->Dispatch.Current = ctx->Dispatch.Save;
       if (!ctx->GLThread.enabled) {
-         ctx->CurrentClientDispatch = ctx->CurrentServerDispatch;
+         ctx->GLApi = ctx->Dispatch.Current;
       }
    }
 }
@@ -13604,14 +13608,15 @@ _mesa_ListBase(GLuint base)
 void
 _mesa_init_dispatch_save(const struct gl_context *ctx)
 {
-   struct _glapi_table *table = ctx->Save;
-   int numEntries = MAX2(_gloffset_COUNT, _glapi_get_dispatch_table_size());
+   struct _glapi_table *table = ctx->Dispatch.Save;
+   int numEntries = MAX2(_gloffset_COUNT, _mesa_glapi_get_dispatch_table_size());
 
    /* Initially populate the dispatch table with the contents of the
     * normal-execution dispatch table.  This lets us skip populating functions
     * that should be called directly instead of compiled into display lists.
     */
-   memcpy(table, ctx->OutsideBeginEnd, numEntries * sizeof(_glapi_proc));
+   memcpy(table, ctx->Dispatch.OutsideBeginEnd,
+          numEntries * sizeof(_glapi_proc));
 
 #include "api_save_init.h"
 }
@@ -14053,19 +14058,6 @@ _mesa_glthread_should_execute_list(struct gl_context *ctx,
 }
 
 
-/**
- * Clients may call this function to help debug display list problems.
- * This function is _ONLY_FOR_DEBUGGING_PURPOSES_.  It may be removed,
- * changed, or break in the future without notice.
- */
-void
-mesa_print_display_list(GLuint list)
-{
-   GET_CURRENT_CONTEXT(ctx);
-   print_list(ctx, list, NULL);
-}
-
-
 /**********************************************************************/
 /*****                      Initialization                        *****/
 /**********************************************************************/
@@ -14092,8 +14084,8 @@ _mesa_init_display_list(struct gl_context *ctx)
 void
 _mesa_init_dispatch_save_begin_end(struct gl_context *ctx)
 {
-   struct _glapi_table *tab = ctx->Save;
-   assert(ctx->API == API_OPENGL_COMPAT);
+   struct _glapi_table *tab = ctx->Dispatch.Save;
+   assert(_mesa_is_desktop_gl_compat(ctx));
 
 #define NAME_AE(x) _mesa_##x
 #define NAME_CALLLIST(x) save_##x

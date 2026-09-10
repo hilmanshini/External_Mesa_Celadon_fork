@@ -54,7 +54,7 @@ nv50_vertex_state_create(struct pipe_context *pipe,
     struct translate_key transkey;
     unsigned i;
 
-    so = MALLOC(sizeof(*so) +
+    so = CALLOC(1, sizeof(*so) +
                 num_elements * sizeof(struct nv50_vertex_element));
     if (!so)
         return NULL;
@@ -98,6 +98,9 @@ nv50_vertex_state_create(struct pipe_context *pipe,
                                i, util_format_name(ve->src_format));
         }
         so->element[i].state |= i;
+        so->strides[vbi] = ve->src_stride;
+        if (!ve->src_stride)
+            so->vbo_constant |= 1 << vbi;
 
         size = util_format_get_blocksize(fmt);
         if (so->vb_access_size[vbi] < (ve->src_offset + size))
@@ -191,14 +194,14 @@ nv50_user_vbuf_range(struct nv50_context *nv50, unsigned vbi,
    assert(vbi < PIPE_MAX_ATTRIBS);
    if (unlikely(nv50->vertex->instance_bufs & (1 << vbi))) {
       const uint32_t div = nv50->vertex->min_instance_div[vbi];
-      *base = nv50->instance_off * nv50->vtxbuf[vbi].stride;
-      *size = (nv50->instance_max / div) * nv50->vtxbuf[vbi].stride +
+      *base = nv50->instance_off * nv50->vertex->strides[vbi];
+      *size = (nv50->instance_max / div) * nv50->vertex->strides[vbi] +
          nv50->vertex->vb_access_size[vbi];
    } else {
       /* NOTE: if there are user buffers, we *must* have index bounds */
       assert(nv50->vb_elt_limit != ~0);
-      *base = nv50->vb_elt_first * nv50->vtxbuf[vbi].stride;
-      *size = nv50->vb_elt_limit * nv50->vtxbuf[vbi].stride +
+      *base = nv50->vb_elt_first * nv50->vertex->strides[vbi];
+      *size = nv50->vb_elt_limit * nv50->vertex->strides[vbi] +
          nv50->vertex->vb_access_size[vbi];
    }
 }
@@ -215,7 +218,7 @@ nv50_upload_user_buffers(struct nv50_context *nv50,
       const struct pipe_vertex_buffer *vb = &nv50->vtxbuf[b];
       uint32_t base, size;
 
-      if (!(nv50->vbo_user & (1 << b)) || !vb->stride)
+      if (!(nv50->vbo_user & (1 << b)) || !nv50->vertex->strides[b])
          continue;
       nv50_user_vbuf_range(nv50, b, &base, &size);
 
@@ -249,7 +252,7 @@ nv50_update_user_vbufs(struct nv50_context *nv50)
       if (!(nv50->vbo_user & (1 << b)))
          continue;
 
-      if (!vb->stride) {
+      if (!ve->src_stride) {
          nv50_emit_vtxattr(nv50, vb, ve, i);
          continue;
       }
@@ -291,7 +294,6 @@ nv50_vertex_arrays_validate(struct nv50_context *nv50)
    uint32_t limits[PIPE_MAX_ATTRIBS];
    struct nouveau_pushbuf *push = nv50->base.pushbuf;
    struct nv50_vertex_stateobj *vertex = nv50->vertex;
-   struct pipe_vertex_buffer *vb;
    struct nv50_vertex_element *ve;
    uint32_t mask;
    uint32_t refd = 0;
@@ -338,9 +340,8 @@ nv50_vertex_arrays_validate(struct nv50_context *nv50)
 
       assert(b < PIPE_MAX_ATTRIBS);
       ve = &vertex->element[i];
-      vb = &nv50->vtxbuf[b];
 
-      if (likely(vb->stride) || !(nv50->vbo_user & (1 << b)))
+      if (likely(vertex->strides[b]) || !(nv50->vbo_user & (1 << b)))
          PUSH_DATA(push, ve->state);
       else
          PUSH_DATA(push, ve->state | NV50_3D_VERTEX_ARRAY_ATTRIB_CONST);
@@ -365,6 +366,7 @@ nv50_vertex_arrays_validate(struct nv50_context *nv50)
    for (i = 0; i < vertex->num_elements; ++i) {
       uint64_t address, limit;
       const unsigned b = vertex->element[i].pipe.vertex_buffer_index;
+      struct pipe_vertex_buffer *vb;
 
       assert(b < PIPE_MAX_ATTRIBS);
       ve = &vertex->element[i];
@@ -396,13 +398,13 @@ nv50_vertex_arrays_validate(struct nv50_context *nv50)
 
       if (unlikely(ve->pipe.instance_divisor)) {
          BEGIN_NV04(push, NV50_3D(VERTEX_ARRAY_FETCH(i)), 4);
-         PUSH_DATA (push, NV50_3D_VERTEX_ARRAY_FETCH_ENABLE | vb->stride);
+         PUSH_DATA (push, NV50_3D_VERTEX_ARRAY_FETCH_ENABLE | vertex->strides[b]);
          PUSH_DATAh(push, address);
          PUSH_DATA (push, address);
          PUSH_DATA (push, ve->pipe.instance_divisor);
       } else {
          BEGIN_NV04(push, NV50_3D(VERTEX_ARRAY_FETCH(i)), 3);
-         PUSH_DATA (push, NV50_3D_VERTEX_ARRAY_FETCH_ENABLE | vb->stride);
+         PUSH_DATA (push, NV50_3D_VERTEX_ARRAY_FETCH_ENABLE | vertex->strides[b]);
          PUSH_DATAh(push, address);
          PUSH_DATA (push, address);
       }
@@ -418,7 +420,7 @@ nv50_vertex_arrays_validate(struct nv50_context *nv50)
 }
 
 #define NV50_PRIM_GL_CASE(n) \
-   case PIPE_PRIM_##n: return NV50_3D_VERTEX_BEGIN_GL_PRIMITIVE_##n
+   case MESA_PRIM_##n: return NV50_3D_VERTEX_BEGIN_GL_PRIMITIVE_##n
 
 static inline unsigned
 nv50_prim_gl(unsigned prim)
@@ -445,22 +447,22 @@ nv50_prim_gl(unsigned prim)
 }
 
 /* For pre-nva0 transform feedback. */
-static const uint8_t nv50_pipe_prim_to_prim_size[PIPE_PRIM_MAX + 1] =
+static const uint8_t nv50_pipe_prim_to_prim_size[MESA_PRIM_COUNT + 1] =
 {
-   [PIPE_PRIM_POINTS] = 1,
-   [PIPE_PRIM_LINES] = 2,
-   [PIPE_PRIM_LINE_LOOP] = 2,
-   [PIPE_PRIM_LINE_STRIP] = 2,
-   [PIPE_PRIM_TRIANGLES] = 3,
-   [PIPE_PRIM_TRIANGLE_STRIP] = 3,
-   [PIPE_PRIM_TRIANGLE_FAN] = 3,
-   [PIPE_PRIM_QUADS] = 3,
-   [PIPE_PRIM_QUAD_STRIP] = 3,
-   [PIPE_PRIM_POLYGON] = 3,
-   [PIPE_PRIM_LINES_ADJACENCY] = 2,
-   [PIPE_PRIM_LINE_STRIP_ADJACENCY] = 2,
-   [PIPE_PRIM_TRIANGLES_ADJACENCY] = 3,
-   [PIPE_PRIM_TRIANGLE_STRIP_ADJACENCY] = 3
+   [MESA_PRIM_POINTS] = 1,
+   [MESA_PRIM_LINES] = 2,
+   [MESA_PRIM_LINE_LOOP] = 2,
+   [MESA_PRIM_LINE_STRIP] = 2,
+   [MESA_PRIM_TRIANGLES] = 3,
+   [MESA_PRIM_TRIANGLE_STRIP] = 3,
+   [MESA_PRIM_TRIANGLE_FAN] = 3,
+   [MESA_PRIM_QUADS] = 3,
+   [MESA_PRIM_QUAD_STRIP] = 3,
+   [MESA_PRIM_POLYGON] = 3,
+   [MESA_PRIM_LINES_ADJACENCY] = 2,
+   [MESA_PRIM_LINE_STRIP_ADJACENCY] = 2,
+   [MESA_PRIM_TRIANGLES_ADJACENCY] = 3,
+   [MESA_PRIM_TRIANGLE_STRIP_ADJACENCY] = 3
 };
 
 static void
@@ -746,32 +748,24 @@ nva0_draw_stream_output(struct nv50_context *nv50,
    } while (--num_instances);
 }
 
-static void
+static bool
 nv50_draw_vbo_kick_notify(struct nouveau_context *context)
 {
    _nouveau_fence_update(context->screen, true);
+   return true;
 }
 
-void
-nv50_draw_vbo(struct pipe_context *pipe, const struct pipe_draw_info *info,
-              unsigned drawid_offset,
-              const struct pipe_draw_indirect_info *indirect,
-              const struct pipe_draw_start_count_bias *draws,
-              unsigned num_draws)
+static void
+nv50_draw_single_vbo(struct pipe_context *pipe, const struct pipe_draw_info *info,
+                     unsigned drawid_offset,
+                     const struct pipe_draw_indirect_info *indirect,
+                     const struct pipe_draw_start_count_bias *draws)
 {
-   if (num_draws > 1) {
-      util_draw_multi(pipe, info, drawid_offset, indirect, draws, num_draws);
-      return;
-   }
-
-   if (!indirect && (!draws[0].count || !info->instance_count))
-      return;
-
    /* We don't actually support indirect draws, so add a fallback for ES 3.1's
     * benefit.
     */
    if (indirect && indirect->buffer) {
-      util_draw_indirect(pipe, info, indirect);
+      util_draw_indirect(pipe, info, drawid_offset, indirect);
       return;
    }
 
@@ -780,39 +774,7 @@ nv50_draw_vbo(struct pipe_context *pipe, const struct pipe_draw_info *info,
    bool tex_dirty = false;
    int s;
 
-   if (info->index_size && !info->has_user_indices)
-      BCTX_REFN(nv50->bufctx_3d, 3D_INDEX, nv04_resource(info->index.resource), RD);
-
-   /* NOTE: caller must ensure that (min_index + index_bias) is >= 0 */
-   if (info->index_bounds_valid) {
-      nv50->vb_elt_first = info->min_index + (info->index_size ? draws->index_bias : 0);
-      nv50->vb_elt_limit = info->max_index - info->min_index;
-   } else {
-      nv50->vb_elt_first = 0;
-      nv50->vb_elt_limit = ~0;
-   }
-   nv50->instance_off = info->start_instance;
-   nv50->instance_max = info->instance_count - 1;
-
-   /* For picking only a few vertices from a large user buffer, push is better,
-    * if index count is larger and we expect repeated vertices, suggest upload.
-    */
-   nv50->vbo_push_hint = /* the 64 is heuristic */
-      !(info->index_size && ((nv50->vb_elt_limit + 64) < draws[0].count));
-
-   if (nv50->vbo_user && !(nv50->dirty_3d & (NV50_NEW_3D_ARRAYS | NV50_NEW_3D_VERTEX))) {
-      if (!!nv50->vbo_fifo != nv50->vbo_push_hint)
-         nv50->dirty_3d |= NV50_NEW_3D_ARRAYS;
-      else
-      if (!nv50->vbo_fifo)
-         nv50_update_user_vbufs(nv50);
-   }
-
-   if (unlikely(nv50->num_so_targets && !nv50->gmtyprog))
-      nv50->state.prim_size = nv50_pipe_prim_to_prim_size[info->mode];
-
-   simple_mtx_lock(&nv50->screen->state_lock);
-   nv50_state_validate_3d(nv50, ~0);
+   simple_mtx_assert_locked(&nv50->screen->state_lock);
 
    nv50->base.kick_notify = nv50_draw_vbo_kick_notify;
 
@@ -855,17 +817,17 @@ nv50_draw_vbo(struct pipe_context *pipe, const struct pipe_draw_info *info,
     * means counting vertices in a vertex shader when it has so outputs.
     */
    if (nv50->screen->base.class_3d < NVA0_3D_CLASS &&
-       nv50->vertprog->pipe.stream_output.num_outputs) {
+       nv50->vertprog->stream_output.num_outputs) {
       for (int i = 0; i < nv50->num_so_targets; i++) {
          nv50->so_used[i] += info->instance_count *
             u_stream_outputs_for_vertices(info->mode, draws[0].count) *
-            nv50->vertprog->pipe.stream_output.stride[i] * 4;
+            nv50->vertprog->stream_output.stride[i] * 4;
       }
    }
 
    if (nv50->vbo_fifo) {
       nv50_push_vbo(nv50, info, indirect, &draws[0]);
-      goto cleanup;
+      return;
    }
 
    if (nv50->state.instance_base != info->start_instance) {
@@ -919,8 +881,73 @@ nv50_draw_vbo(struct pipe_context *pipe, const struct pipe_draw_info *info,
                        info->mode, draws[0].start, draws[0].count,
                        info->instance_count);
    }
+}
 
-cleanup:
+/* Thin wrapper to avoid kicking every 3 ns during multidraw */
+
+void
+nv50_draw_vbo(struct pipe_context *pipe, const struct pipe_draw_info *info,
+              unsigned drawid_offset,
+              const struct pipe_draw_indirect_info *indirect,
+              const struct pipe_draw_start_count_bias *draws,
+              unsigned num_draws)
+{
+   struct nv50_context *nv50 = nv50_context(pipe);
+   struct nouveau_pushbuf *push = nv50->base.pushbuf;
+
+   /* The rest is copied straight from util_multi_draw
+    *
+    * XXX: Properly rewrite vbo handling in nvc0/nv50
+    *
+     */
+
+   unsigned drawid = drawid_offset;
+
+   /* dont wanna start trippin */
+   simple_mtx_lock(&nv50->screen->state_lock);
+
+   if (info->index_size && !info->has_user_indices)
+      BCTX_REFN(nv50->bufctx_3d, 3D_INDEX, nv04_resource(info->index.resource), RD);
+
+   /* NOTE: caller must ensure that (min_index + index_bias) is >= 0 */
+   if (info->index_bounds_valid) {
+      nv50->vb_elt_first = info->min_index + (info->index_size ? draws->index_bias : 0);
+      nv50->vb_elt_limit = info->max_index - info->min_index;
+   } else {
+      nv50->vb_elt_first = 0;
+      nv50->vb_elt_limit = ~0;
+   }
+   nv50->instance_off = info->start_instance;
+   nv50->instance_max = info->instance_count - 1;
+
+   /* For picking only a few vertices from a large user buffer, push is better,
+    * if index count is larger and we expect repeated vertices, suggest upload.
+    */
+   nv50->vbo_push_hint = /* the 64 is heuristic */
+      !(info->index_size && ((nv50->vb_elt_limit + 64) < draws[0].count));
+
+   if (nv50->dirty_3d & (NV50_NEW_3D_ARRAYS | NV50_NEW_3D_VERTEX))
+      nv50->vbo_constant = nv50->vertex->vbo_constant & nv50->vbo_user;
+   if (nv50->vbo_user && !(nv50->dirty_3d & (NV50_NEW_3D_ARRAYS | NV50_NEW_3D_VERTEX))) {
+      if (!!nv50->vbo_fifo != nv50->vbo_push_hint)
+         nv50->dirty_3d |= NV50_NEW_3D_ARRAYS;
+      else
+      if (!nv50->vbo_fifo)
+         nv50_update_user_vbufs(nv50);
+   }
+
+   if (unlikely(nv50->num_so_targets && !nv50->gmtyprog))
+      nv50->state.prim_size = nv50_pipe_prim_to_prim_size[info->mode];
+
+   nv50_state_validate_3d(nv50, ~0);
+
+   for (unsigned i = 0; i < num_draws; i++) {
+      if (indirect || (draws[i].count && info->instance_count))
+         nv50_draw_single_vbo(pipe, info, drawid, indirect, &draws[i]);
+      if (info->increment_draw_id)
+         drawid++;
+   }
+
    PUSH_KICK(push);
    simple_mtx_unlock(&nv50->screen->state_lock);
 

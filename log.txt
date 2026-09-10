@@ -1,0 +1,1101 @@
+work/mesa/mesa/mesa$ meson setup build-compiler \
+    -Dprefix=/tmp/mesa-compiler \
+    -Dbuildtype=release \
+    -Dstrip=true \
+    -Dplatforms= \
+    -Dgallium-drivers= \
+    -Dvulkan-drivers= \
+    -Dmesa-clc=enabled \
+    -Dinstall-mesa-clc=true
+meson install -C build-compiler
+export PATH=/tmp/mesa-compiler/bin:$PATH
+
+The Meson build system
+Version: 1.10.1
+Source dir: /media/hilman/work/mesa/mesa/mesa
+Build dir: /media/hilman/work/mesa/mesa/mesa/build-compiler
+Build type: native build
+Project name: mesa
+Project version: 26.3.0-devel
+C compiler for the host machine: cc (gcc 15.2.0 "cc (Ubuntu 15.2.0-16ubuntu1) 15.2.0")
+C linker for the host machine: cc ld.bfd 2.46
+C++ compiler for the host machine: c++ (gcc 15.2.0 "c++ (Ubuntu 15.2.0-16ubuntu1) 15.2.0")
+C++ linker for the host machine: c++ ld.bfd 2.46
+Host machine cpu family: x86_64
+Host machine cpu: x86_64
+Checking for size of "void*" : 8 
+Checking if "-mtls-dialect=gnu2" runs: YES
+Checking if "split TLSDESC" links: YES 
+Dependency libglvnd skipped: feature glvnd disabled
+Program glslangValidator found: YES (/usr/bin/glslangValidator)
+Found pkg-config: YES (/usr/bin/pkg-config) 2.5.1
+Found CMake: /usr/bin/cmake (4.2.3)
+Run-time dependency libdrm found: NO (tried pkgconfig and cmake)
+Dependency libva skipped: feature gallium-va disabled
+Program python3.16 found: NO
+Program python3.15 found: NO
+Program python3.14 found: YES 3.14.4 3.14.4 (/usr/bin/python3.14)
+Fetching value of define "ETIME" : 62 
+Compiler for C supports arguments -gsplit-dwarf: YES 
+Compiler for C supports link arguments -Wl,--gdb-index: NO 
+Checking for function "bswap32" : YES 
+Checking for function "bswap64" : YES 
+Checking for function "clz" : YES 
+Checking for function "clzll" : YES 
+Checking for function "ctz" : YES 
+Checking for function "expect" : YES 
+Checking for function "ffs" : YES 
+Checking for function "ffsll" : YES 
+Checking for function "popcount" : YES 
+Checking for function "popcountll" : YES 
+Checking for function "unreachable" : YES 
+Checking for function "types_compatible_p" : YES 
+Checking for function "__builtin_add_overflow" : YES 
+Checking for function "__builtin_add_overflow_p" : YES 
+Checking for function "__builtin_sub_overflow_p" : YES 
+Checking for function "__builtin_arm_get_fpscr" : NO 
+Checking for function "__builtin_arm_set_fpscr" : NO 
+Checking for function "__builtin_aarch64_get_fpcr" : NO 
+Checking for function "__builtin_aarch64_set_fpcr" : NO 
+Compiler for C supports function attribute const: YES 
+Compiler for C supports function attribute flatten: YES 
+Compiler for C supports function attribute malloc: YES 
+Compiler for C supports function attribute pure: YES 
+Compiler for C supports function attribute unused: YES 
+Compiler for C supports function attribute warn_unused_result: YES 
+Compiler for C supports function attribute weak: YES 
+Compiler for C supports function attribute format: YES 
+Compiler for C supports function attribute packed: YES 
+Compiler for C supports function attribute returns_nonnull: YES 
+Compiler for C supports function attribute alias: YES 
+Compiler for C supports function attribute noreturn: YES 
+Compiler for C supports function attribute optimize: YES 
+Compiler for C supports function attribute cold: YES 
+Compiler for C supports function attribute visibility:hidden: YES 
+Checking if "__uint128_t" compiles: YES 
+Checking for function "reallocarray" : YES 
+Checking for function "fmemopen" : YES 
+Checking if "gc-sections" links: YES 
+Compiler for C supports arguments -Werror=implicit-function-declaration: YES 
+Compiler for C supports arguments -Werror=missing-prototypes: YES 
+Compiler for C supports arguments -Werror=return-type: YES 
+Compiler for C supports arguments -Werror=empty-body: YES 
+Compiler for C supports arguments -Werror=incompatible-pointer-types: YES 
+Compiler for C supports arguments -Werror=int-conversion: YES 
+Compiler for C supports arguments -Wimplicit-fallthrough: YES 
+Compiler for C supports arguments -Wmisleading-indentation: YES 
+Compiler for C supports arguments -Wno-error=maybe-uninitialized: YES 
+Compiler for C supports arguments -Wno-missing-field-initializers: YES 
+Compiler for C supports arguments -Wno-format-truncation: YES 
+Compiler for C supports arguments -Wno-nonnull-compare: YES 
+Compiler for C supports arguments -fno-math-errno: YES 
+Compiler for C supports arguments -fno-trapping-math: YES 
+Compiler for C supports arguments -Qunused-arguments: NO 
+Compiler for C supports arguments -fno-common: YES 
+Compiler for C supports arguments -Wno-unknown-pragmas: YES 
+Compiler for C supports arguments -Wno-microsoft-enum-value: NO 
+Compiler for C supports arguments -Wno-unused-function: YES 
+Compiler for C supports arguments -Werror=format: YES 
+Compiler for C supports arguments -Wformat-security: YES 
+Compiler for C supports arguments -Werror=thread-safety: NO 
+Compiler for C supports arguments -ffunction-sections: YES 
+Compiler for C supports arguments -fdata-sections: YES 
+Compiler for C supports arguments -Wno-unused-variable: YES 
+Compiler for C supports arguments -Wno-unused-but-set-variable: YES 
+Compiler for C supports arguments /wd4189: NO 
+Compiler for C++ supports arguments -Werror=return-type: YES 
+Compiler for C++ supports arguments -Werror=empty-body: YES 
+Compiler for C++ supports arguments -Wmisleading-indentation: YES 
+Compiler for C++ supports arguments -Wno-error=maybe-uninitialized: YES 
+Compiler for C++ supports arguments -Wno-non-virtual-dtor: YES 
+Compiler for C++ supports arguments -Wno-missing-field-initializers: YES 
+Compiler for C++ supports arguments -Wno-format-truncation: YES 
+Compiler for C++ supports arguments -fno-math-errno: YES 
+Compiler for C++ supports arguments -fno-trapping-math: YES 
+Compiler for C++ supports arguments -Qunused-arguments: NO 
+Compiler for C++ supports arguments -flifetime-dse=1: YES 
+Compiler for C++ supports arguments -Wno-unknown-pragmas: YES 
+Compiler for C++ supports arguments -Wno-microsoft-enum-value: NO 
+Compiler for C++ supports arguments -Werror=format: YES 
+Compiler for C++ supports arguments -Wformat-security: YES 
+Compiler for C++ supports arguments -ffunction-sections: YES 
+Compiler for C++ supports arguments -fdata-sections: YES 
+Compiler for C++ supports arguments -Wno-unused-variable: YES 
+Compiler for C++ supports arguments -Wno-unused-but-set-variable: YES 
+Compiler for C++ supports arguments /wd4189: NO 
+Compiler for C supports arguments -Wno-override-init: YES 
+Compiler for C supports arguments -Wno-initializer-overrides: NO 
+Compiler for C supports arguments -Werror=pointer-arith: YES 
+Compiler for C supports arguments -Werror=vla: YES 
+Compiler for C supports arguments -Werror=gnu-empty-initializer: NO 
+Compiler for C supports arguments -Wgnu-pointer-arith: NO 
+Compiler for C++ supports arguments -Werror=pointer-arith: YES 
+Compiler for C++ supports arguments -Werror=vla: YES 
+Compiler for C++ supports arguments -Werror=gnu-empty-initializer: NO 
+Compiler for C++ supports arguments -Wgnu-pointer-arith: NO 
+Compiler for C supports arguments -Werror=date-time: YES 
+Compiler for C supports arguments -Werror=gnu-alignof-expression: NO 
+Compiler for C supports arguments -Werror=ignored-qualifiers: YES 
+Compiler for C supports arguments -Werror=implicit-fallthrough: YES 
+Compiler for C supports arguments -Werror=int-conversion: YES (cached)
+Compiler for C supports arguments -Werror=missing-prototypes: YES (cached)
+Compiler for C supports arguments -Werror=pragma-pack: NO 
+Compiler for C supports arguments -Werror=pragma-pack-suspicious-include: NO 
+Compiler for C supports arguments -Werror=sizeof-array-div: YES 
+Compiler for C supports arguments -Werror=string-plus-int: NO 
+Compiler for C supports arguments -Werror=unreachable-code-loop-increment: NO 
+Compiler for C++ supports arguments -D_LIBCPP_ENABLE_THREAD_SAFETY_ANNOTATIONS: YES 
+Compiler for C++ supports arguments -Werror=date-time: YES 
+Compiler for C++ supports arguments -Werror=gnu-alignof-expression: NO 
+Compiler for C++ supports arguments -Werror=ignored-qualifiers: YES 
+Compiler for C++ supports arguments -Werror=implicit-fallthrough: YES 
+Compiler for C++ supports arguments -Werror=pragma-pack: NO 
+Compiler for C++ supports arguments -Werror=pragma-pack-suspicious-include: NO 
+Compiler for C++ supports arguments -Werror=sizeof-array-div: YES 
+Compiler for C++ supports arguments -Werror=string-plus-int: NO 
+Compiler for C++ supports arguments -Werror=unreachable-code-loop-increment: NO 
+Compiler for C++ supports arguments -Werror=missing-declarations: YES 
+Checking for function "__builtin_ia32_clflushopt" : YES 
+Checking if "GCC atomic builtins" compiles: YES 
+Checking if "GCC atomic builtins required -latomic" links: YES 
+Checking if "GCC 64bit atomics" with dependency  links: YES 
+Library ws2_32 found: NO
+Header "sys/sysmacros.h" has symbol "major" : YES 
+Header "sys/sysmacros.h" has symbol "minor" : YES 
+Header "sys/sysmacros.h" has symbol "makedev" : YES 
+Header "sys/mkdev.h" has symbol "major" : NO 
+Check usable header "sched.h" : YES 
+Checking for function "sched_getaffinity" : YES 
+Check usable header "xlocale.h" : NO 
+Check usable header "linux/futex.h" : YES 
+Check usable header "endian.h" : YES 
+Check usable header "dlfcn.h" : YES 
+Check usable header "sys/shm.h" : YES 
+Check usable header "cet.h" : YES 
+Check usable header "pthread_np.h" : NO 
+Check usable header "poll.h" : YES 
+Check usable header "sys/inotify.h" : YES 
+Check usable header "linux/udmabuf.h" : YES 
+Checking for function "strtof" : YES 
+Checking for function "mkostemp" : YES 
+Checking for function "memfd_create" : YES 
+Checking for function "random_r" : YES 
+Checking for function "flock" : YES 
+Checking for function "strtok_r" : YES 
+Checking for function "getrandom" : YES 
+Checking for function "qsort_s" : NO 
+Checking for function "posix_fallocate" : YES 
+Checking for function "secure_getenv" : YES 
+Checking for function "sysconf" : YES 
+Checking if "GNU qsort_r" links: YES 
+Header "time.h" has symbol "struct timespec" : YES 
+Checking for function "thrd_create" : YES 
+Header "errno.h" has symbol "program_invocation_name" : YES 
+Header "math.h" has symbol "issignaling" : YES 
+Checking for function "posix_memalign" : YES 
+Checking whether type "struct dirent" has member "d_type" : YES 
+Checking if "strtod has locale support" links: YES 
+Checking if "Bsymbolic" links: YES 
+Checking if "version-script" links: YES 
+Checking if "dynamic-list" links: YES 
+Compiler for C supports link arguments -Wl,--build-id=sha1: YES 
+Checking for function "dlopen" : YES 
+Checking for function "dladdr" with dependency : YES 
+Checking for function "dl_iterate_phdr" : YES 
+Checking for function "clock_gettime" : YES 
+Run-time dependency zlib found: YES 1.3.1
+Run-time dependency libdisplay-info found: NO (tried pkgconfig and cmake)
+Run-time dependency libzstd found: NO (tried pkgconfig and cmake)
+Run-time dependency threads found: YES
+Checking for function "pthread_setaffinity_np" with dependency threads: YES 
+Run-time dependency expat found: YES 2.7.4
+Library m found: YES
+Run-time dependency libudev found: YES 259
+llvm-config found: YES (/usr/bin/llvm-config) 21.1.8
+Run-time dependency LLVM (modules: bitwriter, core, coverage, engine, executionengine, instcombine, irreader, libdriver, linker, lto, mcdisassembler, mcjit, native, option, scalaropts, target, transformutils, all-targets, coroutines, frontenddriver, frontendhlsl, lto, windowsdriver) found: YES 21.1.8
+Run-time dependency llvmspirvlib found: YES 21.1.0.0
+Run-time dependency spirv-tools found: YES 2026.1.1
+Library clang-cpp found: NO
+Library clangBasic found: YES
+Library clangAST found: YES
+Library clangCodeGen found: YES
+Library clangLex found: YES
+Library clangDriver found: YES
+Library clangFrontend found: YES
+Library clangFrontendTool found: YES
+Library clangHandleCXX found: YES
+Library clangHandleLLVM found: YES
+Library clangSerialization found: YES
+Library clangSema found: YES
+Library clangParse found: YES
+Library clangEdit found: YES
+Library clangAnalysis found: YES
+Library clangSupport found: YES
+Library clangASTMatchers found: YES
+Library clangAPINotes found: YES
+Run-time dependency lua54 found: NO (tried pkgconfig and cmake)
+Run-time dependency lua5.4 found: NO (tried pkgconfig and cmake)
+Run-time dependency lua-5.4 found: NO (tried pkgconfig and cmake)
+Run-time dependency lua53 found: NO (tried pkgconfig and cmake)
+Run-time dependency lua5.3 found: NO (tried pkgconfig and cmake)
+Run-time dependency lua-5.3 found: NO (tried pkgconfig and cmake)
+Run-time dependency lua found: NO (tried pkgconfig)
+Run-time dependency libelf found: NO (tried pkgconfig and cmake)
+Library elf found: NO
+Run-time dependency valgrind found: NO (tried pkgconfig)
+Program bison found: YES (/usr/bin/bison)
+Program bison found: YES 3.8.2 3.8.2 (/usr/bin/bison)
+Program flex found: YES (/usr/bin/flex)
+Program ln found: YES (/usr/bin/ln)
+Run-time dependency libunwind found: NO (tried pkgconfig and cmake)
+Run-time dependency OpenMP found: YES 4.5
+Library sensors found: NO
+Program nm found: YES (/usr/bin/nm)
+Program symbols-check.py found: YES (/usr/bin/python3 /media/hilman/work/mesa/mesa/mesa/bin/symbols-check.py)
+Program install_megadrivers.py found: YES (/usr/bin/python3 /media/hilman/work/mesa/mesa/mesa/bin/install_megadrivers.py)
+Checking for size of "void *" : 8 
+Compiler for C supports arguments -Wno-error: YES 
+Compiler for C supports arguments -Wno-misleading-indentation: YES 
+Checking whether type "spvtools::LinkerOptions" has member "SetAllowPtrTypeMismatch(true)" with dependency SPIRV-Tools: YES 
+Compiler for C supports link arguments -fPIC: YES 
+Program decode.py found: YES (/media/hilman/work/mesa/mesa/mesa/src/compiler/isaspec/decode.py)
+Program encode.py found: YES (/media/hilman/work/mesa/mesa/mesa/src/compiler/isaspec/encode.py)
+Program sphinx-build skipped: feature html-docs disabled
+Build targets in project: 38
+
+mesa 26.3.0-devel
+
+  Directories
+    prefix          : /tmp/mesa-compiler
+    libdir          : lib/x86_64-linux-gnu
+    includedir      : include
+
+  Common C and C++ arguments
+    c_cpp_args      : -mtls-dialect=gnu2
+
+  OpenGL
+    OpenGL          : NO
+    ES1             : NO
+    ES2             : NO
+    GLVND           : NO
+
+  DRI
+    Platform        : drm
+    Driver dir      : /tmp/mesa-compiler/lib/x86_64-linux-gnu/dri
+
+  GLX
+    Enabled         : NO
+    Provider        : None
+
+  EGL
+    Enabled         : NO
+
+  GBM
+    Enabled         : NO
+
+  Vulkan
+    Drivers         : NO
+
+  Video
+    Codecs          : all_free av1dec av1enc vp9dec mpeg12dec jpegdec
+    APIs            : NO
+    Encoding        : YES
+
+  LLVM
+    Required        : enabled
+    Version         : 21.1.8
+
+  Gallium
+    Enabled         : NO
+
+  Perfetto
+    Enabled         : NO
+
+  Teflon (TensorFlow Lite delegate)
+    Enabled         : NO
+
+  User defined options
+    buildtype       : release
+    gallium-drivers : 
+    install-mesa-clc: true
+    mesa-clc        : enabled
+    platforms       : 
+    prefix          : /tmp/mesa-compiler
+    strip           : true
+    vulkan-drivers  : 
+
+Found ninja-1.13.2 at /usr/bin/ninja
+ninja: Entering directory `/media/hilman/work/mesa/mesa/mesa/build-compiler'
+[374/391] Compiling C object src/compiler/clc/mesa_clc.p/mesa_clc.c.o
+../src/compiler/clc/mesa_clc.c: In function ‘main’:
+../src/compiler/clc/mesa_clc.c:133:7: warning: ignoring return value of ‘fread’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  133 |       fread(map, 1, len, fp);
+      |       ^~~~~~~~~~~~~~~~~~~~~~
+[377/391] Compiling C object src/compiler/spirv/vtn_bindgen2.p/vtn_bindgen2.c.o
+../src/compiler/spirv/vtn_bindgen2.c: In function ‘main’:
+../src/compiler/spirv/vtn_bindgen2.c:310:4: warning: ignoring return value of ‘fread’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  310 |    fread(map, 1, len, fin);
+      |    ^~~~~~~~~~~~~~~~~~~~~~~
+[391/391] Linking target src/compiler/clc/mesa_clc
+Installing src/compiler/spirv/vtn_bindgen2 to /tmp/mesa-compiler/bin
+Stripping target 'src/compiler/spirv/vtn_bindgen2'.
+Installing src/compiler/clc/mesa_clc to /tmp/mesa-compiler/bin
+Stripping target 'src/compiler/clc/mesa_clc'.
+Installing /media/hilman/work/mesa/mesa/mesa/src/util/00-mesa-defaults.conf to /tmp/mesa-compiler/share/drirc.d
+[ble: elapsed 58.738s (CPU 621.2%)] meson setup build-compiler \
+hilman@hilman-20vd:/work/mesa/mesa/mesa$ nano ~/.local/share/meson/cross/android-x86_64 
+hilman@hilman-20vd:/work/mesa/mesa/mesa$ meson setup build-android-x86_64 \
+    --cross-file android-x86_64 \
+    -Dplatforms=android \
+    -Dplatform-sdk-version=34 \
+    -Dandroid-stub=true \
+    -Dandroid-libbacktrace=disabled \
+    -Degl=disabled \
+    -Dgallium-drivers= \
+    -Dvulkan-drivers=freedreno \
+    -Dfreedreno-kmds=kgsl
+meson compile -C build-android-x86_64
+
+
+The Meson build system
+Version: 1.10.1
+Source dir: /media/hilman/work/mesa/mesa/mesa
+Build dir: /media/hilman/work/mesa/mesa/mesa/build-android-x86_64
+Build type: cross build
+Project name: mesa
+Project version: 26.3.0-devel
+C compiler for the host machine: /home/hilman/Android/Sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android34-clang (clang 17.0.2 "Android (10552028, +pgo, +bolt, +lto, -mlgo, based on r487747d) clang version 17.0.2 (https://android.googlesource.com/toolchain/llvm-project d9f89f4d16663d5012e5c09495f3b30ece3d2362)")
+C linker for the host machine: /home/hilman/Android/Sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android34-clang ld.lld 17.0.2
+C++ compiler for the host machine: /home/hilman/Android/Sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android34-clang++ -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables --start-no-unused-arguments -static-libstdc++ --end-no-unused-arguments (clang 17.0.2 "Android (10552028, +pgo, +bolt, +lto, -mlgo, based on r487747d) clang version 17.0.2 (https://android.googlesource.com/toolchain/llvm-project d9f89f4d16663d5012e5c09495f3b30ece3d2362)")
+C++ linker for the host machine: /home/hilman/Android/Sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android34-clang++ -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables --start-no-unused-arguments -static-libstdc++ --end-no-unused-arguments ld.lld 17.0.2
+C compiler for the build machine: cc (gcc 15.2.0 "cc (Ubuntu 15.2.0-16ubuntu1) 15.2.0")
+C linker for the build machine: cc ld.bfd 2.46
+C++ compiler for the build machine: c++ (gcc 15.2.0 "c++ (Ubuntu 15.2.0-16ubuntu1) 15.2.0")
+C++ linker for the build machine: c++ ld.bfd 2.46
+Build machine cpu family: x86_64
+Build machine cpu: x86_64
+Host machine cpu family: x86_64
+Host machine cpu: x86_64
+Target machine cpu family: x86_64
+Target machine cpu: x86_64
+Checking for size of "void*" : 8 
+meson.build:646: WARNING: cannot auto-detect -mtls-dialect when cross-compiling, using compiler default
+Dependency libglvnd skipped: feature glvnd disabled
+Program glslangValidator found: YES (/usr/bin/glslangValidator)
+Dependency libva skipped: feature gallium-va disabled
+Program python3.16 found: NO
+Program python3.15 found: NO
+Program python3.14 found: YES 3.14.4 3.14.4 (/usr/bin/python3.14)
+Fetching value of define "ETIME" : 62 
+Compiler for C supports arguments -gsplit-dwarf: YES 
+Compiler for C supports link arguments -Wl,--gdb-index: YES 
+Checking for function "bswap32" : YES 
+Checking for function "bswap64" : YES 
+Checking for function "clz" : YES 
+Checking for function "clzll" : YES 
+Checking for function "ctz" : YES 
+Checking for function "expect" : YES 
+Checking for function "ffs" : YES 
+Checking for function "ffsll" : YES 
+Checking for function "popcount" : YES 
+Checking for function "popcountll" : YES 
+Checking for function "unreachable" : YES 
+Checking for function "types_compatible_p" : YES 
+Checking for function "__builtin_add_overflow" : YES 
+Checking for function "__builtin_add_overflow_p" : NO 
+Checking for function "__builtin_sub_overflow_p" : NO 
+Checking for function "__builtin_arm_get_fpscr" : NO 
+Checking for function "__builtin_arm_set_fpscr" : NO 
+Checking for function "__builtin_aarch64_get_fpcr" : NO 
+Checking for function "__builtin_aarch64_set_fpcr" : NO 
+Compiler for C supports function attribute const: YES 
+Compiler for C supports function attribute flatten: YES 
+Compiler for C supports function attribute malloc: YES 
+Compiler for C supports function attribute pure: YES 
+Compiler for C supports function attribute unused: YES 
+Compiler for C supports function attribute warn_unused_result: YES 
+Compiler for C supports function attribute weak: YES 
+Compiler for C supports function attribute format: YES 
+Compiler for C supports function attribute packed: YES 
+Compiler for C supports function attribute returns_nonnull: YES 
+Compiler for C supports function attribute alias: YES 
+Compiler for C supports function attribute noreturn: YES 
+Compiler for C supports function attribute optimize: NO 
+Compiler for C supports function attribute cold: YES 
+Compiler for C supports function attribute visibility:hidden: YES 
+Checking if "__uint128_t" compiles: YES 
+Checking for function "reallocarray" : YES 
+Checking for function "fmemopen" : YES 
+Checking if "gc-sections" links: YES 
+Compiler for C supports arguments -Werror=implicit-function-declaration: YES 
+Compiler for C supports arguments -Werror=missing-prototypes: YES 
+Compiler for C supports arguments -Werror=return-type: YES 
+Compiler for C supports arguments -Werror=empty-body: YES 
+Compiler for C supports arguments -Werror=incompatible-pointer-types: YES 
+Compiler for C supports arguments -Werror=int-conversion: YES 
+Compiler for C supports arguments -Wimplicit-fallthrough: YES 
+Compiler for C supports arguments -Wmisleading-indentation: YES 
+Compiler for C supports arguments -Wno-error=maybe-uninitialized: NO 
+Compiler for C supports arguments -Wno-missing-field-initializers: YES 
+Compiler for C supports arguments -Wno-format-truncation: NO 
+Compiler for C supports arguments -Wno-nonnull-compare: NO 
+Compiler for C supports arguments -fno-math-errno: YES 
+Compiler for C supports arguments -fno-trapping-math: YES 
+Compiler for C supports arguments -Qunused-arguments: YES 
+Compiler for C supports arguments -fno-common: YES 
+Compiler for C supports arguments -Wno-unknown-pragmas: YES 
+Compiler for C supports arguments -Wno-microsoft-enum-value: YES 
+Compiler for C supports arguments -Wno-unused-function: YES 
+Compiler for C supports arguments -Werror=format: YES 
+Compiler for C supports arguments -Wformat-security: YES 
+Compiler for C supports arguments -Werror=thread-safety: YES 
+Compiler for C supports arguments -ffunction-sections: YES 
+Compiler for C supports arguments -fdata-sections: YES 
+Compiler for C++ supports arguments -Werror=return-type: YES 
+Compiler for C++ supports arguments -Werror=empty-body: YES 
+Compiler for C++ supports arguments -Wmisleading-indentation: YES 
+Compiler for C++ supports arguments -Wno-error=maybe-uninitialized: NO 
+Compiler for C++ supports arguments -Wno-non-virtual-dtor: YES 
+Compiler for C++ supports arguments -Wno-missing-field-initializers: YES 
+Compiler for C++ supports arguments -Wno-format-truncation: NO 
+Compiler for C++ supports arguments -fno-math-errno: YES 
+Compiler for C++ supports arguments -fno-trapping-math: YES 
+Compiler for C++ supports arguments -Qunused-arguments: YES 
+Compiler for C++ supports arguments -flifetime-dse=1: NO 
+Compiler for C++ supports arguments -Wno-unknown-pragmas: YES 
+Compiler for C++ supports arguments -Wno-microsoft-enum-value: YES 
+Compiler for C++ supports arguments -Werror=format: YES 
+Compiler for C++ supports arguments -Wformat-security: YES 
+Compiler for C++ supports arguments -ffunction-sections: YES 
+Compiler for C++ supports arguments -fdata-sections: YES 
+Compiler for C supports arguments -Wno-override-init: YES 
+Compiler for C supports arguments -Wno-initializer-overrides: YES 
+Compiler for C supports arguments -Werror=pointer-arith: YES 
+Compiler for C supports arguments -Werror=vla: YES 
+Compiler for C supports arguments -Werror=gnu-empty-initializer: YES 
+Compiler for C supports arguments -Wgnu-pointer-arith: YES 
+Compiler for C++ supports arguments -Werror=pointer-arith: YES 
+Compiler for C++ supports arguments -Werror=vla: YES 
+Compiler for C++ supports arguments -Werror=gnu-empty-initializer: YES 
+Compiler for C++ supports arguments -Wgnu-pointer-arith: YES 
+Compiler for C supports arguments -Werror=date-time: YES 
+Compiler for C supports arguments -Werror=gnu-alignof-expression: YES 
+Compiler for C supports arguments -Werror=ignored-qualifiers: YES 
+Compiler for C supports arguments -Werror=implicit-fallthrough: YES 
+Compiler for C supports arguments -Werror=int-conversion: YES (cached)
+Compiler for C supports arguments -Werror=missing-prototypes: YES (cached)
+Compiler for C supports arguments -Werror=pragma-pack: YES 
+Compiler for C supports arguments -Werror=pragma-pack-suspicious-include: YES 
+Compiler for C supports arguments -Werror=sizeof-array-div: YES 
+Compiler for C supports arguments -Werror=string-plus-int: YES 
+Compiler for C supports arguments -Werror=unreachable-code-loop-increment: YES 
+Compiler for C++ supports arguments -D_LIBCPP_ENABLE_THREAD_SAFETY_ANNOTATIONS: YES 
+Compiler for C++ supports arguments -Werror=date-time: YES 
+Compiler for C++ supports arguments -Werror=gnu-alignof-expression: YES 
+Compiler for C++ supports arguments -Werror=ignored-qualifiers: YES 
+Compiler for C++ supports arguments -Werror=implicit-fallthrough: YES 
+Compiler for C++ supports arguments -Werror=pragma-pack: YES 
+Compiler for C++ supports arguments -Werror=pragma-pack-suspicious-include: YES 
+Compiler for C++ supports arguments -Werror=sizeof-array-div: YES 
+Compiler for C++ supports arguments -Werror=string-plus-int: YES 
+Compiler for C++ supports arguments -Werror=unreachable-code-loop-increment: YES 
+Compiler for C++ supports arguments -Werror=missing-prototypes: YES 
+Checking for function "__builtin_ia32_clflushopt" : YES 
+Checking if "GCC atomic builtins" compiles: YES 
+Checking if "GCC atomic builtins required -latomic" links: YES 
+Checking if "GCC 64bit atomics" with dependency  links: YES 
+Library ws2_32 found: NO
+Header "sys/sysmacros.h" has symbol "major" : YES 
+Header "sys/sysmacros.h" has symbol "minor" : YES 
+Header "sys/sysmacros.h" has symbol "makedev" : YES 
+Header "sys/mkdev.h" has symbol "major" : NO 
+Check usable header "sched.h" : YES 
+Checking for function "sched_getaffinity" : YES 
+Check usable header "sys/sysctl.h" : NO 
+Check usable header "xlocale.h" : YES 
+Check usable header "linux/futex.h" : YES 
+Check usable header "endian.h" : YES 
+Check usable header "dlfcn.h" : YES 
+Check usable header "sys/shm.h" : YES 
+Check usable header "cet.h" : YES 
+Check usable header "pthread_np.h" : NO 
+Check usable header "poll.h" : YES 
+Check usable header "sys/inotify.h" : YES 
+Check usable header "linux/udmabuf.h" : YES 
+Checking for function "strtof" : YES 
+Checking for function "mkostemp" : YES 
+Checking for function "memfd_create" : YES 
+Checking for function "random_r" : NO 
+Checking for function "flock" : YES 
+Checking for function "strtok_r" : YES 
+Checking for function "getrandom" : YES 
+Checking for function "qsort_s" : NO 
+Checking for function "posix_fallocate" : YES 
+Checking for function "secure_getenv" : NO 
+Checking for function "sysconf" : YES 
+Checking if "GNU qsort_r" links: NO 
+Checking if "BSD qsort_r" links: NO 
+Header "time.h" has symbol "struct timespec" : YES 
+Checking for function "thrd_create" : YES 
+Header "errno.h" has symbol "program_invocation_name" : NO 
+Header "math.h" has symbol "issignaling" : NO 
+Checking for function "posix_memalign" : YES 
+Checking whether type "struct dirent" has member "d_type" : YES 
+Checking if "strtod has locale support" links: YES 
+Checking if "Bsymbolic" links: YES 
+Checking if "version-script" links: YES 
+Checking if "dynamic-list" links: YES 
+Compiler for C supports link arguments -Wl,--build-id=sha1: YES 
+Checking for function "dlopen" : YES 
+Checking for function "dladdr" with dependency : YES 
+Checking for function "dl_iterate_phdr" : YES 
+Checking for function "clock_gettime" : YES 
+Found pkg-config: NO
+Found CMake: NO
+Run-time dependency zlib found: YES 1.2.13
+Run-time dependency libzstd found: NO (tried pkgconfig and cmake)
+Run-time dependency threads found: YES
+Checking for function "pthread_setaffinity_np" with dependency threads: NO 
+Run-time dependency expat found: NO (tried pkgconfig and cmake)
+Looking for a fallback subproject for the dependency expat
+Downloading expat source from https://github.com/libexpat/libexpat/releases/download/R_2_5_0/expat-2.5.0.tar.xz
+Download size: 460560
+Downloading: ..........
+Downloading expat patch from https://wrapdb.mesonbuild.com/v2/expat_2.5.0-3/get_patch
+Download size: 4343
+Downloading: ..........
+
+Executing subproject expat 
+
+expat| Project name: expat
+expat| Project version: 2.5.0
+expat| C compiler for the host machine: /home/hilman/Android/Sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android34-clang (clang 17.0.2 "Android (10552028, +pgo, +bolt, +lto, -mlgo, based on r487747d) clang version 17.0.2 (https://android.googlesource.com/toolchain/llvm-project d9f89f4d16663d5012e5c09495f3b30ece3d2362)")
+expat| C linker for the host machine: /home/hilman/Android/Sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android34-clang ld.lld 17.0.2
+expat| C compiler for the build machine: cc (gcc 15.2.0 "cc (Ubuntu 15.2.0-16ubuntu1) 15.2.0")
+expat| C linker for the build machine: cc ld.bfd 2.46
+expat| Run-time dependency libbsd-overlay found: NO (tried pkgconfig and cmake)
+expat| Checking for function "arc4random_buf" with dependency libbsd-overlay: YES
+expat| Checking for function "arc4random" with dependency libbsd-overlay: YES
+expat| Has header "dlfcn.h" : YES
+expat| Has header "fcntl.h" : YES
+expat| Has header "inttypes.h" : YES
+expat| Has header "memory.h" : YES
+expat| Has header "stdint.h" : YES
+expat| Has header "stdlib.h" : YES
+expat| Has header "strings.h" : YES
+expat| Has header "string.h" : YES
+expat| Has header "sys/stat.h" : YES
+expat| Has header "sys/types.h" : YES
+expat| Has header "unistd.h" : YES
+expat| Has header "stdlib.h" : YES (cached)
+expat| Has header "stdarg.h" : YES
+expat| Has header "string.h" : YES (cached)
+expat| Has header "float.h" : YES
+expat| Checking for function "getpagesize" : YES
+expat| Checking for function "mmap" : YES
+expat| Checking for function "getrandom" : YES
+expat| Header "sys/types.h" has symbol "off_t" : YES
+expat| Header "sys/types.h" has symbol "size_t" : YES
+expat| Header "sys/syscall.h" has symbol "SYS_getrandom" : YES
+expat| Configuring expat_config.h using configuration
+expat| Compiler for C supports arguments -fno-strict-aliasing: YES
+expat| Configuring libexpat.def using configuration
+expat| Found pkg-config: NO
+expat| Build targets in project: 1
+expat| Subproject expat finished.
+
+Dependency expat from subproject subprojects/expat-2.5.0 found: YES 2.5.0
+Library m found: YES
+Run-time dependency libudev found: NO (tried pkgconfig and cmake)
+llvm-config found: NO need ['>= 8.0.0']
+Run-time dependency LLVM found: NO (tried config-tool)
+Looking for a fallback subproject for the dependency llvm (modules: bitwriter, engine, mcdisassembler, mcjit, core, executionengine, scalaropts, transformutils, instcombine, native)
+Building fallback subproject with default_library=shared
+Neither a subproject directory nor a llvm.wrap file was found.
+Subproject llvm is buildable: NO (disabling)
+Dependency llvm (modules: bitwriter, engine, mcdisassembler, mcjit, core, executionengine, scalaropts, transformutils, instcombine, native) from subproject llvm found: NO (subproject failed to configure)
+Run-time dependency spirv-tools found: NO (tried pkgconfig and cmake)
+Run-time dependency lua54 found: NO (tried pkgconfig and cmake)
+Run-time dependency lua5.4 found: NO (tried pkgconfig and cmake)
+Run-time dependency lua-5.4 found: NO (tried pkgconfig and cmake)
+Run-time dependency lua53 found: NO (tried pkgconfig and cmake)
+Run-time dependency lua5.3 found: NO (tried pkgconfig and cmake)
+Run-time dependency lua-5.3 found: NO (tried pkgconfig and cmake)
+Run-time dependency lua found: NO (tried pkgconfig and cmake)
+Run-time dependency libelf found: NO (tried pkgconfig and cmake)
+Library elf found: NO
+Run-time dependency valgrind found: NO (tried pkgconfig)
+Program bison found: YES (/usr/bin/bison)
+Program bison found: YES 3.8.2 3.8.2 (/usr/bin/bison)
+Program flex found: YES (/usr/bin/flex)
+Program ln found: YES (/usr/bin/ln)
+Dependency libunwind skipped: feature libunwind disabled
+Library sensors found: NO
+Program nm found: YES (/usr/bin/nm)
+Program symbols-check.py found: YES (/usr/bin/python3 /media/hilman/work/mesa/mesa/mesa/bin/symbols-check.py)
+Program install_megadrivers.py found: YES (/usr/bin/python3 /media/hilman/work/mesa/mesa/mesa/bin/install_megadrivers.py)
+Checking for size of "void *" : 8 
+Compiler for C supports arguments -Wno-error: YES 
+Program decode.py found: YES (/media/hilman/work/mesa/mesa/mesa/src/compiler/isaspec/decode.py)
+Program encode.py found: YES (/media/hilman/work/mesa/mesa/mesa/src/compiler/isaspec/encode.py)
+Run-time dependency libarchive found: NO (tried pkgconfig and cmake)
+Looking for a fallback subproject for the dependency libarchive
+Downloading libarchive source from https://github.com/libarchive/libarchive/releases/download/v3.7.2/libarchive-3.7.2.tar.xz
+Download size: 5237056
+Downloading: ..........
+Downloading libarchive patch from https://wrapdb.mesonbuild.com/v2/libarchive_3.7.2-3/get_patch
+Download size: 8339
+Downloading: ..........
+
+Executing subproject libarchive 
+
+libarchive| Project name: libarchive
+libarchive| Project version: 3.7.2
+libarchive| C compiler for the host machine: /home/hilman/Android/Sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android34-clang (clang 17.0.2 "Android (10552028, +pgo, +bolt, +lto, -mlgo, based on r487747d) clang version 17.0.2 (https://android.googlesource.com/toolchain/llvm-project d9f89f4d16663d5012e5c09495f3b30ece3d2362)")
+libarchive| C linker for the host machine: /home/hilman/Android/Sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android34-clang ld.lld 17.0.2
+libarchive| C compiler for the build machine: cc (gcc 15.2.0 "cc (Ubuntu 15.2.0-16ubuntu1) 15.2.0")
+libarchive| C linker for the build machine: cc ld.bfd 2.46
+libarchive| Compiler for C supports arguments -Wformat: YES
+libarchive| Compiler for C supports arguments -Wformat-security: YES (cached)
+libarchive| Checking for size of "long" : 8
+libarchive| Checking for type "__int64" : NO
+libarchive| Checking for type "int16_t" : YES
+libarchive| Checking for type "int32_t" : YES
+libarchive| Checking for type "int64_t" : YES
+libarchive| Checking for type "intmax_t" : YES
+libarchive| Checking for type "uint8_t" : YES
+libarchive| Checking for type "uint16_t" : YES
+libarchive| Checking for type "uint32_t" : YES
+libarchive| Checking for type "uint64_t" : YES
+libarchive| Checking for type "uintmax_t" : YES
+libarchive| Checking for type "unsigned __int64" : NO
+libarchive| Checking for size of "short" : 2
+libarchive| Checking for size of "int" : 4
+libarchive| Checking for size of "long" : 8
+libarchive| Checking for size of "long long" : 8
+libarchive| Checking for size of "unsigned" : 4
+libarchive| Checking for size of "unsigned long" : 8
+libarchive| Checking for size of "unsigned long long" : 8
+libarchive| Checking for size of "unsigned short" : 2
+libarchive| Checking for type "wchar_t" : YES
+libarchive| Checking for size of "wchar_t" : 4
+libarchive| Header "stdint.h" has symbol "INT32_MAX" : YES
+libarchive| Header "stdint.h" has symbol "INT32_MIN" : YES
+libarchive| Header "stdint.h" has symbol "INT64_MAX" : YES
+libarchive| Header "stdint.h" has symbol "INT64_MIN" : YES
+libarchive| Header "stdint.h" has symbol "INTMAX_MAX" : YES
+libarchive| Header "stdint.h" has symbol "INTMAX_MIN" : YES
+libarchive| Header "stdint.h" has symbol "SIZE_MAX" : YES
+libarchive| Header "limits.h" has symbol "SSIZE_MAX" : YES
+libarchive| Header "stdint.h" has symbol "UINT32_MAX" : YES
+libarchive| Header "stdint.h" has symbol "UINT64_MAX" : YES
+libarchive| Header "stdint.h" has symbol "UINTMAX_MAX" : YES
+libarchive| Header "langinfo.h" has symbol "D_MD_ORDER" : NO
+libarchive| Header "linux/fs.h" has symbol "FS_IOC_GETFLAGS" : YES
+libarchive| Header "errno.h" has symbol "EFTYPE" : NO
+libarchive| Header "errno.h" has symbol "EILSEQ" : YES
+libarchive| Header "time.h" has symbol "_mkgmtime" : NO
+libarchive| Header "time.h" has symbol "ctime_s" : NO
+libarchive| Header "time.h" has symbol "gmtime_s" : NO
+libarchive| Header "time.h" has symbol "localtime_s" : NO
+libarchive| Checking whether type "struct stat" has member "st_birthtime" : NO
+libarchive| Checking whether type "struct stat" has member "st_birthtimespec.tv_nsec" : NO
+libarchive| Checking whether type "struct stat" has member "st_mtimespec.tv_nsec" : NO
+libarchive| Checking whether type "struct stat" has member "st_mtim.tv_nsec" : YES
+libarchive| Checking whether type "struct stat" has member "st_mtime_n" : NO
+libarchive| Checking whether type "struct stat" has member "st_umtime" : NO
+libarchive| Checking whether type "struct stat" has member "st_mtime_usec" : NO
+libarchive| Checking whether type "struct stat" has member "st_blksize" : YES
+libarchive| Checking whether type "struct stat" has member "st_flags" : NO
+libarchive| Checking whether type "struct tm" has member "tm_gmtoff" : YES
+libarchive| Checking for type "acl_t" : NO
+libarchive| Checking for type "acl_entry_t" : NO
+libarchive| Checking for type "acl_permset_t" : NO
+libarchive| Checking for type "acl_tag_t" : NO
+libarchive| Header "dirent.h" has symbol "DIR" : YES
+libarchive| Checking whether type "struct tm" has member "tm_sec" : NO
+libarchive| Checking whether type "struct tm" has member "tm_sec" : NO
+libarchive| Checking whether type "struct tm" has member "tm_sec" : YES
+libarchive| Header "sys/sysmacros.h" has symbol "major" : YES (cached)
+libarchive| Header "crtdbg.h" has symbol "_CrtSetReportMode" : NO
+libarchive| Checking for type "dev_t" : YES
+libarchive| Checking for type "id_t" : YES
+libarchive| Checking for type "gid_t" : YES
+libarchive| Checking for type "mode_t" : YES
+libarchive| Checking for type "off_t" : YES
+libarchive| Checking for type "pid_t" : YES
+libarchive| Checking for type "size_t" : YES
+libarchive| Checking for type "ssize_t" : YES
+libarchive| Checking for type "uid_t" : YES
+libarchive| Run-time dependency dl found: YES
+libarchive| Run-time dependency libattr found: NO (tried pkgconfig and cmake)
+libarchive| Dependency zlib found: YES 1.2.13 (cached)
+libarchive| Run-time dependency bzip2 found: NO (tried pkgconfig and cmake)
+libarchive| Run-time dependency libb2 found: NO (tried pkgconfig and cmake)
+libarchive| Run-time dependency liblz4 found: NO (tried pkgconfig and cmake)
+libarchive| Run-time dependency libzstd found: NO (tried pkgconfig and cmake)
+libarchive| Run-time dependency liblzma found: NO (tried pkgconfig and cmake)
+libarchive| Run-time dependency lzo2 found: NO (tried pkgconfig and cmake)
+libarchive| Run-time dependency openssl found: NO (tried pkgconfig, system and cmake)
+libarchive| Run-time dependency libxml-2.0 found: NO (tried pkgconfig and cmake)
+libarchive| Dependency expat found: YES 2.5.0 (cached)
+libarchive| Run-time dependency iconv found: YES
+libarchive| Checking for function "regcomp" : YES
+libarchive| Run-time dependency libacl found: NO (tried pkgconfig and cmake)
+libarchive| Has header "copyfile.h" : NO
+libarchive| Has header "ctype.h" : YES
+libarchive| Has header "direct.h" : NO
+libarchive| Has header "errno.h" : YES
+libarchive| Has header "ext2fs/ext2_fs.h" : NO
+libarchive| Has header "fcntl.h" : YES (cached)
+libarchive| Has header "grp.h" : YES
+libarchive| Has header "iconv.h" with dependency iconv: YES
+libarchive| Has header "inttypes.h" : YES (cached)
+libarchive| Has header "io.h" : NO
+libarchive| Has header "langinfo.h" : YES
+libarchive| Has header "libxml/xmlreader.h" with dependency libxml-2.0: NO
+libarchive| Has header "libxml/xmlwriter.h" with dependency libxml-2.0: NO
+libarchive| Has header "limits.h" : YES
+libarchive| Has header "linux/ext2_fs.h" : NO
+libarchive| Has header "linux/fiemap.h" : YES
+libarchive| Has header "linux/fs.h" : YES
+libarchive| Has header "linux/magic.h" : YES
+libarchive| Has header "linux/types.h" : YES
+libarchive| Has header "localcharset.h" : NO
+libarchive| Has header "locale.h" : YES
+libarchive| Has header "membership.h" : NO
+libarchive| Has header "memory.h" : YES (cached)
+libarchive| Has header "paths.h" : YES
+libarchive| Has header "poll.h" : YES
+libarchive| Has header "process.h" : NO
+libarchive| Has header "pthread.h" : YES
+libarchive| Has header "pwd.h" : YES
+libarchive| Has header "readpassphrase.h" : NO
+libarchive| Has header "signal.h" : YES
+libarchive| Has header "spawn.h" : YES
+libarchive| Has header "stdarg.h" : YES (cached)
+libarchive| Has header "stdint.h" : YES (cached)
+libarchive| Has header "stdlib.h" : YES (cached)
+libarchive| Has header "string.h" : YES (cached)
+libarchive| Has header "strings.h" : YES (cached)
+libarchive| Has header "sys/acl.h" : NO
+libarchive| Has header "sys/cdefs.h" : YES
+libarchive| Has header "sys/ea.h" : NO
+libarchive| Has header "sys/extattr.h" : NO
+libarchive| Has header "sys/ioctl.h" : YES
+libarchive| Has header "sys/mkdev.h" : NO
+libarchive| Has header "sys/mount.h" : YES
+libarchive| Has header "sys/param.h" : YES
+libarchive| Has header "sys/poll.h" : YES
+libarchive| Has header "sys/richacl.h" : NO
+libarchive| Has header "sys/select.h" : YES
+libarchive| Has header "sys/stat.h" : YES (cached)
+libarchive| Has header "sys/statfs.h" : YES
+libarchive| Has header "sys/statvfs.h" : YES
+libarchive| Has header "sys/sysmacros.h" : YES
+libarchive| Has header "sys/time.h" : YES
+libarchive| Has header "sys/types.h" : YES (cached)
+libarchive| Has header "sys/utime.h" : NO
+libarchive| Has header "sys/utsname.h" : YES
+libarchive| Has header "sys/vfs.h" : YES
+libarchive| Has header "sys/wait.h" : YES
+libarchive| Has header "sys/xattr.h" : YES
+libarchive| Has header "time.h" : YES
+libarchive| Has header "unistd.h" : YES (cached)
+libarchive| Has header "utime.h" : YES
+libarchive| Has header "wchar.h" : YES
+libarchive| Has header "wctype.h" : YES
+libarchive| Has header "wincrypt.h" : NO
+libarchive| Has header "windows.h" : NO
+libarchive| Has header "winioctl.h" : NO
+libarchive| Checking for function "arc4random_buf" : YES (cached)
+libarchive| Checking for function "chflags" : NO
+libarchive| Checking for function "chown" : YES
+libarchive| Checking for function "chroot" : YES
+libarchive| Checking for function "ctime_r" : YES
+libarchive| Checking for function "cygwin_conv_path" : NO
+libarchive| Checking for function "dirfd" : YES
+libarchive| Checking for function "fchdir" : YES
+libarchive| Checking for function "fchflags" : NO
+libarchive| Checking for function "fchmod" : YES
+libarchive| Checking for function "fchown" : YES
+libarchive| Checking for function "fcntl" : YES
+libarchive| Checking for function "fdopendir" : YES
+libarchive| Checking for function "fgetxattr" : YES
+libarchive| Checking for function "flistxattr" : YES
+libarchive| Checking for function "fork" : YES
+libarchive| Checking for function "fseeko" : YES
+libarchive| Checking for function "fsetxattr" : YES
+libarchive| Checking for function "fstat" : YES
+libarchive| Checking for function "fstatat" : YES
+libarchive| Checking for function "fstatfs" : YES
+libarchive| Checking for function "fstatvfs" : YES
+libarchive| Checking for function "ftruncate" : YES
+libarchive| Checking for function "futimens" : YES
+libarchive| Checking for function "futimes" : YES
+libarchive| Checking for function "futimesat" : YES
+libarchive| Checking for function "geteuid" : YES
+libarchive| Checking for function "getgrgid_r" : YES
+libarchive| Checking for function "getgrnam_r" : YES
+libarchive| Checking for function "getpwnam_r" : YES
+libarchive| Checking for function "getpwuid_r" : YES
+libarchive| Checking for function "getpid" : YES
+libarchive| Checking for function "getvfsbyname" : NO
+libarchive| Checking for function "getxattr" : YES
+libarchive| Checking for function "gmtime_r" : YES
+libarchive| Checking for function "lchflags" : NO
+libarchive| Checking for function "lchmod" : NO
+libarchive| Checking for function "lchown" : YES
+libarchive| Checking for function "lgetxattr" : YES
+libarchive| Checking for function "link" : YES
+libarchive| Checking for function "linkat" : YES
+libarchive| Checking for function "listxattr" : YES
+libarchive| Checking for function "llistxattr" : YES
+libarchive| Checking for function "locale_charset" with dependency iconv: NO
+libarchive| Checking for function "localtime_r" : YES
+libarchive| Checking for function "lsetxattr" : YES
+libarchive| Checking for function "lstat" : YES
+libarchive| Checking for function "lutimes" : YES
+libarchive| Checking for function "mbrtowc" : YES
+libarchive| Checking for function "memmove" : YES
+libarchive| Checking for function "mkdir" : YES
+libarchive| Checking for function "mkfifo" : YES
+libarchive| Checking for function "mknod" : YES
+libarchive| Checking for function "mkstemp" : YES
+libarchive| Checking for function "nl_langinfo" : YES
+libarchive| Checking for function "openat" : YES
+libarchive| Checking for function "pipe" : YES
+libarchive| Checking for function "poll" : YES
+libarchive| Checking for function "posix_spawnp" : YES
+libarchive| Checking for function "readdir_r" : YES
+libarchive| Checking for function "readlink" : YES
+libarchive| Checking for function "readlinkat" : YES
+libarchive| Checking for function "readpassphrase" : NO
+libarchive| Checking for function "select" : YES
+libarchive| Checking for function "setenv" : YES
+libarchive| Checking for function "setlocale" : YES
+libarchive| Checking for function "setxattr" : YES
+libarchive| Checking for function "sigaction" : YES
+libarchive| Checking for function "statfs" : YES
+libarchive| Checking for function "statvfs" : YES
+libarchive| Checking for function "strchr" : YES
+libarchive| Checking for function "strdup" : YES
+libarchive| Checking for function "strerror" : YES
+libarchive| Checking for function "strerror_r" : YES
+libarchive| Checking for function "strftime" : YES
+libarchive| Checking for function "strncpy_s" : NO
+libarchive| Checking for function "strnlen" : YES
+libarchive| Checking for function "strrchr" : YES
+libarchive| Checking for function "symlink" : YES
+libarchive| Checking for function "timegm" : YES
+libarchive| Checking for function "tzset" : YES
+libarchive| Checking for function "unlinkat" : YES
+libarchive| Checking for function "unsetenv" : YES
+libarchive| Checking for function "utime" : YES
+libarchive| Checking for function "utimes" : YES
+libarchive| Checking for function "utimensat" : YES
+libarchive| Checking for function "vprintf" : YES
+libarchive| Checking for function "vfork" : YES
+libarchive| Checking for function "wcrtomb" : YES
+libarchive| Checking for function "wcscmp" : YES
+libarchive| Checking for function "wcscpy" : YES
+libarchive| Checking for function "wcslen" : YES
+libarchive| Checking for function "wctomb" : YES
+libarchive| Checking for function "wmemcmp" : YES
+libarchive| Checking for function "wmemcpy" : YES
+libarchive| Checking for function "wmemmove" : YES
+libarchive| Checking for function "_fseeki64" : NO
+libarchive| Checking for function "_get_timezone" : NO
+libarchive| Configuring config.h using configuration
+libarchive| Build targets in project: 93
+libarchive| Subproject libarchive finished.
+
+Dependency libarchive from subproject subprojects/libarchive-3.7.2 found: YES 3.7.2
+Run-time dependency libxml-2.0 found: NO (tried pkgconfig and cmake)
+Looking for a fallback subproject for the dependency libxml-2.0
+Downloading libxml2 source from https://download.gnome.org/sources/libxml2/2.11/libxml2-2.11.6.tar.xz
+Download size: 2628652
+Downloading: ..........
+Downloading libxml2 patch from https://wrapdb.mesonbuild.com/v2/libxml2_2.11.6-1/get_patch
+Download size: 5526
+Downloading: ..........
+
+Executing subproject libxml2 
+
+libxml2| Project name: libxml2
+libxml2| Project version: 2.11.6
+libxml2| C compiler for the host machine: /home/hilman/Android/Sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android34-clang (clang 17.0.2 "Android (10552028, +pgo, +bolt, +lto, -mlgo, based on r487747d) clang version 17.0.2 (https://android.googlesource.com/toolchain/llvm-project d9f89f4d16663d5012e5c09495f3b30ece3d2362)")
+libxml2| C linker for the host machine: /home/hilman/Android/Sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android34-clang ld.lld 17.0.2
+libxml2| C compiler for the build machine: cc (gcc 15.2.0 "cc (Ubuntu 15.2.0-16ubuntu1) 15.2.0")
+libxml2| C linker for the build machine: cc ld.bfd 2.46
+libxml2| Compiler for C supports function attribute destructor: YES
+libxml2| Header "sys/socket.h" has symbol "AF_INET6" : YES
+libxml2| Header "stdlib.h" has symbol "rand_r" : YES
+libxml2| Header "stdarg.h" has symbol "va_copy" : YES
+libxml2| Header "stdarg.h" has symbol "__va_copy" : YES
+libxml2| Dependency dl found: YES unknown (cached)
+libxml2| Library m found: YES
+libxml2| Dependency iconv found: YES unknown (cached)
+libxml2| Dependency threads found: YES unknown (cached)
+libxml2| Run-time dependency liblzma found: NO (tried pkgconfig and cmake)
+libxml2| Dependency zlib found: YES 1.2.13 (cached)
+libxml2| Library readline found: NO
+libxml2| Library history found: NO
+libxml2| Library ws2_32 found: NO
+libxml2| Has header "arpa/inet.h" : YES
+libxml2| Has header "arpa/nameser.h" : YES
+libxml2| Has header "dl.h" : NO
+libxml2| Has header "fcntl.h" : YES (cached)
+libxml2| Has header "float.h" : YES (cached)
+libxml2| Has header "inttypes.h" : YES (cached)
+libxml2| Has header "netdb.h" : YES
+libxml2| Has header "netinet/in.h" : YES
+libxml2| Has header "poll.h" : YES (cached)
+libxml2| Has header "pthread.h" with dependency threads: YES
+libxml2| Has header "resolv.h" : YES
+libxml2| Has header "stdint.h" : YES (cached)
+libxml2| Has header "sys/mman.h" : YES
+libxml2| Has header "sys/select.h" : YES (cached)
+libxml2| Has header "sys/socket.h" : YES
+libxml2| Has header "sys/stat.h" : YES (cached)
+libxml2| Has header "sys/time.h" : YES (cached)
+libxml2| Has header "sys/timeb.h" : NO
+libxml2| Has header "sys/types.h" : YES (cached)
+libxml2| Has header "unistd.h" : YES (cached)
+libxml2| Checking for function "ftime" : NO
+libxml2| Checking for function "getaddrinfo" with dependency -lws2_32: YES
+libxml2| Checking for function "gettimeofday" : YES
+libxml2| Checking for function "isascii" : YES
+libxml2| Checking for function "mmap" : YES (cached)
+libxml2| Checking for function "munmap" : YES
+libxml2| Checking for function "putenv" : YES
+libxml2| Checking for function "stat" : YES
+libxml2| Configuring config.h using configuration
+libxml2| Checking for function "printf" : YES
+libxml2| Checking for function "sprintf" : YES
+libxml2| Checking for function "fprintf" : YES
+libxml2| Checking for function "snprintf" : YES
+libxml2| Checking for function "vfprintf" : YES
+libxml2| Checking for function "vsprintf" : YES
+libxml2| Checking for function "vsnprintf" : YES
+libxml2| Checking for function "sscanf" : YES
+libxml2| Configuring xmlversion.h using configuration
+libxml2| Build targets in project: 96
+libxml2| Subproject libxml2 finished.
+
+Dependency libxml-2.0 from subproject subprojects/libxml2-2.11.6 found: YES 2.11.6
+Program gzip found: YES (/usr/bin/gzip)
+Run-time dependency libconfig found: NO (tried pkgconfig and cmake)
+ncursesw6-config found: NO
+Run-time dependency curses found: NO (tried pkgconfig, pkgconfig, pkgconfig, pkgconfig, config-tool and system)
+Compiler for C++ supports arguments -fno-exceptions: YES 
+Compiler for C++ supports arguments -fno-rtti: YES 
+Compiler for C++ supports arguments -Wno-address-of-temporary: YES 
+Compiler for C++ supports arguments -Wno-array-bounds: YES 
+Compiler for C++ supports arguments -Wno-c++11-narrowing: YES 
+Compiler for C++ supports arguments -Wno-c99-designator: YES 
+Compiler for C++ supports arguments -Wno-class-memaccess: NO 
+Compiler for C++ supports arguments -Wno-missing-braces: YES 
+Compiler for C++ supports arguments -Wno-narrowing: YES 
+Compiler for C++ supports arguments -Wno-pointer-arith: YES 
+Compiler for C++ supports arguments -Wno-reorder-init-list: YES 
+Compiler for C++ supports arguments -Wno-sign-compare: YES 
+Compiler for C++ supports arguments -Wno-switch: YES 
+Compiler for C++ supports arguments -Wno-unused-function: YES 
+Compiler for C++ supports arguments -Wno-vla-cxx-extension: NO 
+Compiler for C++ supports arguments -Wno-writable-strings: YES 
+Compiler for C++ supports arguments -Wno-write-strings: YES 
+Program sphinx-build skipped: feature html-docs disabled
+Build targets in project: 168
+
+libarchive 3.7.2
+
+    regex support: glibc
+
+mesa 26.3.0-devel
+
+  Directories
+    prefix              : /usr/local
+    libdir              : lib
+    includedir          : include
+
+  Common C and C++ arguments
+    c_cpp_args          : -fno-emulated-tls
+
+  OpenGL
+    OpenGL              : NO
+    ES1                 : NO
+    ES2                 : NO
+    GLVND               : NO
+
+  DRI
+    Platform            : none
+    Driver dir          : /usr/local/lib/dri
+
+  GLX
+    Enabled             : NO
+    Provider            : None
+
+  EGL
+    Enabled             : NO
+
+  GBM
+    Enabled             : NO
+
+  Vulkan
+    Drivers             : freedreno
+    Platforms           : android
+    ICD dir             : share/vulkan/icd.d
+    Intel Ray tracing   : NO
+
+  Video
+    Codecs              : all_free av1dec av1enc vp9dec mpeg12dec jpegdec
+    APIs                : vulkan
+    Encoding            : YES
+
+  LLVM
+    Required            : auto
+
+  Gallium
+    Enabled             : NO
+
+  Perfetto
+    Enabled             : NO
+
+  Teflon (TensorFlow Lite delegate)
+    Enabled             : NO
+
+  Subprojects
+    expat               : YES
+    libarchive          : YES
+    libxml2             : YES
+    llvm                : NO Neither a subproject directory nor a llvm.wrap file was found.
+
+  User defined options
+    Cross files         : android-x86_64
+    android-libbacktrace: disabled
+    android-stub        : true
+    egl                 : disabled
+    freedreno-kmds      : kgsl
+    gallium-drivers     : 
+    platform-sdk-version: 34
+    platforms           : android
+    vulkan-drivers      : freedreno
+
+Found ninja-1.13.2 at /usr/bin/ninja
+INFO: autodetecting backend as ninja
+INFO: calculating backend command to run: /usr/bin/ninja -C /media/hilman/work/mesa/mesa/mesa/build-android-x86_64
+ninja: Entering directory `/media/hilman/work/mesa/mesa/mesa/build-android-x86_64'
+[923/923] Linking target src/freedreno/vulkan/libvulkan_freedreno.so
+[ble: elapsed 110.450s (CPU 540.5%)] meson setup build-android-x86_64 \
+hilman@hilman-20vd:/work/mesa/mesa/mesa$ find . -name "*.so"
+./build-android-x86_64/subprojects/libxml2-2.11.6/libxml2.so
+./build-android-x86_64/subprojects/expat-2.5.0/libexpat.so
+./build-android-x86_64/subprojects/libarchive-3.7.2/libarchive/libarchive.so
+./build-android-x86_64/src/freedreno/vulkan/libvulkan_freedreno.so
+./build-android-x86_64/src/android_stub/libsync.so
+./build-android-x86_64/src/android_stub/libhardware.so
+./build-android-x86_64/src/android_stub/libnativewindow.so
+./build-android-x86_64/src/android_stub/liblog.so
+hilman@hilman-20vd:/work/mesa/mesa/mesa$ find . -name "*.so"
+

@@ -33,7 +33,7 @@
 
 #include "DriverIncludes.h"
 #include "util/u_hash_table.h"
-
+#include "cso_cache/cso_context.h"
 
 #define SUPPORT_MSAA 0
 #define SUPPORT_D3D10_1 0
@@ -58,28 +58,31 @@ struct Shader
    uint type;
    struct pipe_shader_state state;
    unsigned output_mapping[PIPE_MAX_SHADER_OUTPUTS];
-   boolean output_resolved;
+   bool output_resolved;
 };
 
 struct Query;
+struct ElementLayout;
 
 struct Device
 {
    struct pipe_context *pipe;
 
+   struct cso_context *cso;
    struct pipe_framebuffer_state fb;
    struct pipe_vertex_buffer vertex_buffers[PIPE_MAX_ATTRIBS];
+   unsigned vertex_strides[PIPE_MAX_ATTRIBS];
    struct pipe_resource *index_buffer;
    unsigned restart_index;
    unsigned index_size;
    unsigned ib_offset;
-   void *samplers[PIPE_SHADER_TYPES][PIPE_MAX_SAMPLERS];
-   struct pipe_sampler_view *sampler_views[PIPE_SHADER_TYPES][PIPE_MAX_SHADER_SAMPLER_VIEWS];
+   void *samplers[MESA_SHADER_STAGES][PIPE_MAX_SAMPLERS];
+   struct pipe_sampler_view *sampler_views[MESA_SHADER_STAGES][PIPE_MAX_SHADER_SAMPLER_VIEWS];
 
    void *empty_fs;
    void *empty_vs;
 
-   enum pipe_prim_type primitive;
+   enum mesa_prim primitive;
 
    struct pipe_stream_output_target *so_targets[PIPE_MAX_SO_BUFFERS];
    struct pipe_stream_output_target *draw_so_target;
@@ -102,6 +105,10 @@ struct Device
 
    Query *pPredicate;
    BOOL PredicateValue;
+
+   ElementLayout *element_layout;
+   BOOL velems_changed;
+   BOOL vbuffers_changed;
 };
 
 
@@ -200,7 +207,7 @@ CastPipeBuffer(D3D10DDI_HRESOURCE hResource)
 
 struct RenderTargetView
 {
-   struct pipe_surface *surface;
+   struct pipe_surface surface;
    D3D10DDI_HRTRENDERTARGETVIEW hRTRenderTargetView;
 };
 
@@ -216,13 +223,13 @@ static inline struct pipe_surface *
 CastPipeRenderTargetView(D3D10DDI_HRENDERTARGETVIEW hRenderTargetView)
 {
    RenderTargetView *pRenderTargetView = CastRenderTargetView(hRenderTargetView);
-   return pRenderTargetView ? pRenderTargetView->surface : NULL;
+   return pRenderTargetView ? &pRenderTargetView->surface : NULL;
 }
 
 
 struct DepthStencilView
 {
-   struct pipe_surface *surface;
+   struct pipe_surface surface;
    D3D10DDI_HRTDEPTHSTENCILVIEW hRTDepthStencilView;
 };
 
@@ -238,7 +245,7 @@ static inline struct pipe_surface *
 CastPipeDepthStencilView(D3D10DDI_HDEPTHSTENCILVIEW hDepthStencilView)
 {
    DepthStencilView *pDepthStencilView = CastDepthStencilView(hDepthStencilView);
-   return pDepthStencilView ? pDepthStencilView->surface : NULL;
+   return pDepthStencilView ? &pDepthStencilView->surface : NULL;
 }
 
 
@@ -322,7 +329,7 @@ CastPipeShader(D3D10DDI_HSHADER hShader)
 
 struct ElementLayout
 {
-   void *handle;
+   struct cso_velems_state state;
 };
 
 
@@ -331,14 +338,6 @@ CastElementLayout(D3D10DDI_HELEMENTLAYOUT hElementLayout)
 {
    return static_cast<ElementLayout *>(hElementLayout.pDrvPrivate);
 }
-
-static inline void *
-CastPipeInputLayout(D3D10DDI_HELEMENTLAYOUT hElementLayout)
-{
-   ElementLayout *pElementLayout = CastElementLayout(hElementLayout);
-   return pElementLayout ? pElementLayout->handle : NULL;
-}
-
 
 struct SamplerState
 {
@@ -409,4 +408,3 @@ CastPipeQuery(D3D10DDI_HQUERY hQuery)
    Query *pQuery = CastQuery(hQuery);
    return pQuery ? pQuery->handle : NULL;
 }
-

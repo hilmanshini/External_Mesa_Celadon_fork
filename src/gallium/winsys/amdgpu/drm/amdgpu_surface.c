@@ -1,28 +1,8 @@
 /*
  * Copyright © 2011 Red Hat All Rights Reserved.
  * Copyright © 2014 Advanced Micro Devices, Inc.
- * All Rights Reserved.
  *
- * Permission is hereby granted, free of charge, to any person obtaining
- * a copy of this software and associated documentation files (the
- * "Software"), to deal in the Software without restriction, including
- * without limitation the rights to use, copy, modify, merge, publish,
- * distribute, sub license, and/or sell copies of the Software, and to
- * permit persons to whom the Software is furnished to do so, subject to
- * the following conditions:
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
- * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NON-INFRINGEMENT. IN NO EVENT SHALL THE COPYRIGHT HOLDERS, AUTHORS
- * AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
- * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE.
- *
- * The above copyright notice and this permission notice (including the
- * next paragraph) shall be included in all copies or substantial portions
- * of the Software.
+ * SPDX-License-Identifier: MIT
  */
 
 #include "amdgpu_winsys.h"
@@ -61,22 +41,18 @@ static int amdgpu_surface_sanity(const struct pipe_resource *tex)
 }
 
 static int amdgpu_surface_init(struct radeon_winsys *rws,
+                               const struct radeon_info *info,
                                const struct pipe_resource *tex,
                                uint64_t flags, unsigned bpe,
                                enum radeon_surf_mode mode,
                                struct radeon_surf *surf)
 {
-   struct amdgpu_winsys *ws = amdgpu_winsys(rws);
+   struct amdgpu_winsys *aws = amdgpu_winsys(rws);
    int r;
 
    r = amdgpu_surface_sanity(tex);
    if (r)
       return r;
-
-   surf->blk_w = util_format_get_blockwidth(tex->format);
-   surf->blk_h = util_format_get_blockheight(tex->format);
-   surf->bpe = bpe;
-   surf->flags = flags;
 
    struct ac_surf_config config;
 
@@ -92,21 +68,66 @@ static int amdgpu_surface_init(struct radeon_winsys *rws,
                   tex->target == PIPE_TEXTURE_1D_ARRAY;
    config.is_3d = tex->target == PIPE_TEXTURE_3D;
    config.is_cube = tex->target == PIPE_TEXTURE_CUBE;
+   config.is_array = tex->target == PIPE_TEXTURE_1D_ARRAY ||
+                     tex->target == PIPE_TEXTURE_2D_ARRAY ||
+                     tex->target == PIPE_TEXTURE_CUBE_ARRAY;
+   config.blk_w = util_format_get_blockwidth(tex->format);
+   config.blk_h = util_format_get_blockheight(tex->format);
+   config.bpe = bpe;
+   config.surf_flags = flags;
+   config.modifier = surf->modifier;
 
-   /* Use different surface counters for color and FMASK, so that MSAA MRTs
-    * always use consecutive surface indices when FMASK is allocated between
-    * them.
-    */
-   config.info.surf_index = &ws->surf_index_color;
-   config.info.fmask_surf_index = &ws->surf_index_fmask;
+   if (info->gfx_level >= GFX9) {
+      config.gfx9.swizzle_mode = surf->u.gfx9.swizzle_mode;
+      config.gfx9.dcc_number_type = surf->u.gfx9.dcc_number_type;
+      config.gfx9.dcc_data_format = surf->u.gfx9.dcc_data_format;
+      config.gfx9.dcc_max_compressed_block_size = surf->u.gfx9.color.dcc.max_compressed_block_size;
+      config.gfx9.dcc_independent_64B_blocks = surf->u.gfx9.color.dcc.independent_64B_blocks;
+      config.gfx9.dcc_independent_128B_blocks = surf->u.gfx9.color.dcc.independent_128B_blocks;
+      config.gfx9.dcc_write_compress_disable = surf->u.gfx9.dcc_write_compress_disable;
+      config.gfx9.display_dcc_pitch_max = surf->u.gfx9.color.display_dcc_pitch_max;
+   } else {
+      config.gfx6.pipe_config = surf->u.legacy.pipe_config;
+      config.gfx6.bankw = surf->u.legacy.bankw;
+      config.gfx6.bankh = surf->u.legacy.bankh;
+      config.gfx6.tile_split = surf->u.legacy.tile_split;
+      config.gfx6.mtilea = surf->u.legacy.mtilea;
+      config.gfx6.num_banks = surf->u.legacy.num_banks;
+   }
 
-   if (flags & RADEON_SURF_Z_OR_SBUFFER)
-      config.info.surf_index = NULL;
-
-   return ac_compute_surface(ws->addrlib, &ws->info, &config, mode, surf);
+   /* Use radeon_info from the driver, not the winsys. The driver is allowed to change it. */
+   return ac_compute_surface(aws->addrlib, info, &config, mode, surf);
 }
 
-void amdgpu_surface_init_functions(struct amdgpu_screen_winsys *ws)
+static uint64_t
+amdgpu_surface_offset_from_coord(struct radeon_winsys *rws,
+                                 const struct radeon_info *info,
+                                 const struct radeon_surf *surf,
+                                 const struct pipe_resource *tex,
+                                 unsigned level, unsigned x,
+                                 unsigned y, unsigned layer)
 {
-   ws->base.surface_init = amdgpu_surface_init;
+   struct amdgpu_winsys *aws = amdgpu_winsys(rws);
+   unsigned samples = MAX2(1, tex->nr_samples);
+
+   const struct ac_surf_info surf_info = {
+      .width = tex->width0,
+      .height = tex->height0,
+      .depth = tex->depth0,
+      .samples = samples,
+      .storage_samples = samples,
+      .levels = tex->last_level + 1,
+      .num_channels = util_format_get_last_component(tex->format) + 1,
+      .array_size = tex->array_size,
+   };
+
+   return ac_surface_addr_from_coord(
+      aws->addrlib, info, surf, &surf_info,
+      level, x, y, layer, tex->target == PIPE_TEXTURE_3D);
+}
+
+void amdgpu_surface_init_functions(struct amdgpu_screen_winsys *sws)
+{
+   sws->base.surface_init = amdgpu_surface_init;
+   sws->base.surface_offset_from_coord = amdgpu_surface_offset_from_coord;
 }

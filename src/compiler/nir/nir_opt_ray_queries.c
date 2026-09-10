@@ -25,8 +25,8 @@
 #include "nir_builder.h"
 
 #include "util/hash_table.h"
-#include "util/set.h"
 #include "util/macros.h"
+#include "util/set.h"
 #include "util/u_dynarray.h"
 
 /** @file nir_opt_ray_queries.c
@@ -39,18 +39,17 @@ static void
 mark_query_read(struct set *queries,
                 nir_intrinsic_instr *intrin)
 {
-   nir_ssa_def *rq_def = intrin->src[0].ssa;
+   nir_def *rq_def = intrin->src[0].ssa;
 
    nir_variable *query;
-   if (rq_def->parent_instr->type == nir_instr_type_intrinsic) {
+   if (nir_def_is_intrinsic(rq_def)) {
       nir_intrinsic_instr *load_deref =
-         nir_instr_as_intrinsic(rq_def->parent_instr);
+         nir_def_as_intrinsic(rq_def);
       assert(load_deref->intrinsic == nir_intrinsic_load_deref);
 
       query = nir_intrinsic_get_var(load_deref, 0);
-   } else if (rq_def->parent_instr->type == nir_instr_type_deref) {
-      query = nir_deref_instr_get_variable(
-         nir_instr_as_deref(rq_def->parent_instr));
+   } else if (nir_def_is_deref(rq_def)) {
+      query = nir_deref_instr_get_variable(nir_def_as_deref(rq_def));
    } else {
       return;
    }
@@ -63,12 +62,7 @@ static void
 nir_find_ray_queries_read(struct set *queries,
                           nir_shader *shader)
 {
-   nir_foreach_function(function, shader) {
-      nir_function_impl *impl = function->impl;
-
-      if (!impl)
-         continue;
-
+   nir_foreach_function_impl(impl, shader) {
       nir_foreach_block(block, impl) {
          nir_foreach_instr(instr, block) {
             if (instr->type != nir_instr_type_intrinsic)
@@ -77,8 +71,7 @@ nir_find_ray_queries_read(struct set *queries,
             nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
             switch (intrin->intrinsic) {
             case nir_intrinsic_rq_proceed:
-               if (list_length(&intrin->dest.ssa.uses) > 0 ||
-                   list_length(&intrin->dest.ssa.if_uses) > 0)
+               if (!list_is_empty(&intrin->def.uses))
                   mark_query_read(queries, intrin);
                break;
             case nir_intrinsic_rq_load:
@@ -120,10 +113,8 @@ nir_replace_unread_queries_instr(nir_builder *b, nir_instr *instr, void *data)
    if (entry)
       return false;
 
-   if (intrin->intrinsic == nir_intrinsic_rq_load) {
-      assert(list_is_empty(&intrin->dest.ssa.uses));
-      assert(list_is_empty(&intrin->dest.ssa.if_uses));
-   }
+   if (intrin->intrinsic == nir_intrinsic_rq_load)
+      assert(list_is_empty(&intrin->def.uses));
 
    nir_instr_remove(instr);
 
@@ -139,8 +130,7 @@ nir_opt_ray_queries(nir_shader *shader)
    bool progress =
       nir_shader_instructions_pass(shader,
                                    nir_replace_unread_queries_instr,
-                                   nir_metadata_block_index |
-                                   nir_metadata_dominance,
+                                   nir_metadata_control_flow,
                                    read_queries);
 
    /* Update the number of queries if some have been removed. */
@@ -158,10 +148,10 @@ nir_opt_ray_queries(nir_shader *shader)
 
 /**
  * Merge ray queries that are not used in parallel to reduce scratch memory:
- * 
+ *
  * 1. Store all the ray queries we will consider into an array for
  *    convenient access. Ignore arrays since it would be really complex
- *    to handle and will be rare in praxis.
+ *    to handle and will be rare in practise.
  *
  * 2. Count the number of ray query ranges and allocate the required ranges.
  *
@@ -171,16 +161,16 @@ nir_opt_ray_queries(nir_shader *shader)
  *
  *    1. rq_initialize can be inside some form of controlflow which can result
  *       in incorrect ranges and invalid merging.
- * 
+ *
  *       SOLUTION: Discard the entire ray query when encountering an
  *                 instruction that is not dominated by the rq_initialize
  *                 of the range.
- * 
+ *
  *    2. With loops, we can underestimate the range because the state may
  *       have to be preserved for multiple iterations.
- * 
+ *
  *       SOLUTION: Track parent loops.
- * 
+ *
  * 4. Try to rewrite the variables. For that, we iterate over every ray query
  *    and try to move its ranges to the preceding ray queries.
  */
@@ -198,14 +188,11 @@ struct rq_range {
 #define RQ_NEW_INDEX_NONE 0xFFFFFFFF
 
 static bool
-count_ranges(struct nir_builder *b, nir_instr *instr, void *data)
+count_ranges(struct nir_builder *b, nir_intrinsic_instr *intrinsic,
+             void *data)
 {
-   if (instr->type != nir_instr_type_intrinsic)
-      return false;
-
-   nir_intrinsic_instr *intrinsic = nir_instr_as_intrinsic(instr);
    if (intrinsic->intrinsic == nir_intrinsic_rq_initialize)
-      (*(uint32_t *) data)++;
+      (*(uint32_t *)data)++;
 
    return false;
 }
@@ -226,11 +213,12 @@ get_parent_loop(nir_cf_node *node)
 bool
 nir_opt_ray_query_ranges(nir_shader *shader)
 {
-   assert(exec_list_length(&shader->functions) == 1);
+   if (!exec_list_is_singular(&shader->functions)) {
+      nir_shader_preserve_all_metadata(shader);
+      return false;
+   }
 
-   struct nir_function *func =
-      (struct nir_function *)exec_list_get_head_const(&shader->functions);
-   assert(func->impl);
+   nir_function_impl *impl = nir_shader_get_entrypoint(shader);
 
    uint32_t ray_query_count = 0;
    nir_foreach_variable_in_shader(var, shader) {
@@ -238,49 +226,49 @@ nir_opt_ray_query_ranges(nir_shader *shader)
          continue;
       ray_query_count++;
    }
-   nir_foreach_function_temp_variable(var, func->impl) {
+   nir_foreach_function_temp_variable(var, impl) {
       if (!var->data.ray_query || glsl_type_is_array(var->type))
          continue;
       ray_query_count++;
    }
 
    if (ray_query_count <= 1) {
-      nir_metadata_preserve(func->impl, nir_metadata_all);
-      return false;
+      return nir_no_progress(impl);
    }
 
    void *mem_ctx = ralloc_context(NULL);
 
-   nir_metadata_require(func->impl, nir_metadata_instr_index | nir_metadata_dominance);
+   nir_metadata_require(impl, nir_metadata_instr_index | nir_metadata_dominance);
 
-   nir_variable **ray_queries = ralloc_array(mem_ctx, nir_variable*, ray_query_count);
+   nir_variable **ray_queries = ralloc_array(mem_ctx, nir_variable *, ray_query_count);
    ray_query_count = 0;
 
    nir_foreach_variable_in_shader(var, shader) {
       if (!var->data.ray_query || glsl_type_is_array(var->type))
          continue;
-      
+
       ray_queries[ray_query_count] = var;
       ray_query_count++;
    }
 
-   nir_foreach_function_temp_variable(var, func->impl) {
+   nir_foreach_function_temp_variable(var, impl) {
       if (!var->data.ray_query || glsl_type_is_array(var->type))
          continue;
-      
+
       ray_queries[ray_query_count] = var;
       ray_query_count++;
    }
 
    uint32_t range_count = 0;
-   nir_shader_instructions_pass(shader, count_ranges, nir_metadata_all, &range_count);
+   nir_shader_intrinsics_pass(shader, count_ranges, nir_metadata_all,
+                              &range_count);
 
    struct rq_range *ranges = rzalloc_array(mem_ctx, struct rq_range, range_count);
 
    struct hash_table *range_indices = _mesa_pointer_hash_table_create(mem_ctx);
    uint32_t target_index = 0;
 
-   nir_foreach_block(block, func->impl) {
+   nir_foreach_block(block, impl) {
       nir_cf_node *parent_loop = get_parent_loop(&block->cf_node);
 
       nir_foreach_instr(instr, block) {
@@ -292,7 +280,7 @@ nir_opt_ray_query_ranges(nir_shader *shader)
             continue;
 
          nir_deref_instr *ray_query_deref =
-            nir_instr_as_deref(intrinsic->src[0].ssa->parent_instr);
+            nir_def_as_deref(intrinsic->src[0].ssa);
 
          if (ray_query_deref->deref_type != nir_deref_type_var)
             continue;
@@ -312,13 +300,26 @@ nir_opt_ray_query_ranges(nir_shader *shader)
 
          struct hash_entry *index_entry =
             _mesa_hash_table_search(range_indices, ray_query_deref->var);
+         if (!index_entry) {
+            /* The range doesn't exist yet which means that the first instruction
+             * isn't the initialize. Ignore it.
+             */
+            for (uint32_t i = 0; i < ray_query_count; i++) {
+               if (ray_queries[i] == ray_query_deref->var) {
+                  ray_queries[i] = NULL;
+                  break;
+               }
+            }
+            continue;
+         }
+
          struct rq_range *range = ranges + (uintptr_t)index_entry->data;
-         
+
          if (intrinsic->intrinsic != nir_intrinsic_rq_initialize) {
             /* If the initialize instruction does not dominate every other
              * instruction in the range, we have to reject the enire query
              * since we can not be certain about the ranges:
-             * 
+             *
              * rayQuery rq;
              * if (i == 0)
              *    init(rq);
@@ -345,7 +346,7 @@ nir_opt_ray_query_ranges(nir_shader *shader)
             range->last = MAX2(range->last, instr->index);
          }
 
-         util_dynarray_append(&range->instrs, nir_instr *, instr);
+         util_dynarray_append(&range->instrs, instr);
 
          if (parent_loop)
             _mesa_set_add(range->loops, parent_loop);
@@ -409,7 +410,7 @@ nir_opt_ray_query_ranges(nir_shader *shader)
       util_dynarray_foreach(&range->instrs, nir_instr *, instr) {
          nir_intrinsic_instr *intrinsic = nir_instr_as_intrinsic(*instr);
          nir_deref_instr *ray_query_deref =
-            nir_instr_as_deref(intrinsic->src[0].ssa->parent_instr);
+            nir_def_as_deref(intrinsic->src[0].ssa);
          if (ray_query_deref->var != range->variable) {
             ray_query_deref->var = range->variable;
             progress = true;
@@ -417,7 +418,7 @@ nir_opt_ray_query_ranges(nir_shader *shader)
       }
    }
 
-   nir_metadata_preserve(func->impl, nir_metadata_all);
+   nir_no_progress(impl);
 
    /* Remove dead ray queries. */
    if (progress) {

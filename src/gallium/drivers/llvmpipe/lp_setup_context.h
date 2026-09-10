@@ -77,7 +77,7 @@ struct lp_setup_context
    struct pipe_context *pipe;
    struct vertex_info *vertex_info;
    uint view_index;
-   enum pipe_prim_type prim;
+   enum mesa_prim prim;
    uint vertex_size;
    uint nr_vertices;
    uint sprite_coord_enable, sprite_coord_origin;
@@ -102,7 +102,7 @@ struct lp_setup_context
    unsigned flatshade_first:1;
    unsigned ccw_is_frontface:1;
    unsigned scissor_test:1;
-   unsigned point_tri_clip:1;
+   unsigned point_line_tri_clip:1;
    unsigned point_size_per_vertex:1;
    unsigned legacy_points:1;
    unsigned rasterizer_discard:1;
@@ -110,7 +110,8 @@ struct lp_setup_context
    unsigned multisample:1;
    unsigned rectangular_lines:1;
    unsigned cullmode:2; /**< PIPE_FACE_x */
-   unsigned bottom_edge_rule;
+   unsigned bottom_edge_rule:1;
+   unsigned sample_locations_enabled:1;
    float pixel_offset;
    float line_width;
    float point_size;
@@ -118,6 +119,7 @@ struct lp_setup_context
    int8_t viewport_index_slot;
    int8_t layer_slot;
    int8_t face_slot;
+   uint8_t sample_locations[LP_MAX_SAMPLES];
 
    struct pipe_framebuffer_state fb;
    struct u_rect framebuffer;
@@ -186,7 +188,7 @@ struct lp_setup_context
                     const float (*v1)[4],
                     const float (*v2)[4]);
 
-   boolean
+   bool
    (*rect)(struct lp_setup_context *,
            const float (*v0)[4],
            const float (*v1)[4],
@@ -198,7 +200,7 @@ struct lp_setup_context
 
 
 static inline void
-scissor_planes_needed(boolean scis_planes[4], const struct u_rect *bbox,
+scissor_planes_needed(bool scis_planes[4], const struct u_rect *bbox,
                       const struct u_rect *scissor)
 {
    /* left */
@@ -215,7 +217,7 @@ scissor_planes_needed(boolean scis_planes[4], const struct u_rect *bbox,
 void
 lp_setup_add_scissor_planes(const struct u_rect *scissor,
                             struct lp_rast_plane *plane_s,
-                            boolean s_planes[4], bool multisample);
+                            bool s_planes[4]);
 
 void
 lp_setup_choose_triangle(struct lp_setup_context *setup);
@@ -232,22 +234,22 @@ lp_setup_choose_rect(struct lp_setup_context *setup);
 void
 lp_setup_init_vbuf(struct lp_setup_context *setup);
 
-boolean
+bool
 lp_setup_update_state(struct lp_setup_context *setup,
-                      boolean update_scene);
+                      bool update_scene);
 
 void
 lp_setup_destroy(struct lp_setup_context *setup);
 
-boolean
+bool
 lp_setup_flush_and_restart(struct lp_setup_context *setup);
 
-boolean
+bool
 lp_setup_whole_tile(struct lp_setup_context *setup,
                     const struct lp_rast_shader_inputs *inputs,
-                    int tx, int ty, boolean opaque);
+                    int tx, int ty, bool opaque);
 
-boolean
+bool
 lp_setup_is_blit(const struct lp_setup_context *setup,
                  const struct lp_rast_shader_inputs *inputs);
 
@@ -267,46 +269,45 @@ lp_rect_cw(struct lp_setup_context *setup,
            const float (*v0)[4],
            const float (*v1)[4],
            const float (*v2)[4],
-           boolean frontfacing);
+           bool frontfacing);
 
 void
 lp_setup_triangle_ccw(struct lp_setup_context *setup,
                       const float (*v0)[4],
                       const float (*v1)[4],
                       const float (*v2)[4],
-                      boolean front);
+                      bool front);
 
 struct lp_rast_triangle *
 lp_setup_alloc_triangle(struct lp_scene *scene,
                         unsigned num_inputs,
-                        unsigned nr_planes,
-                        unsigned *tri_size);
+                        unsigned nr_planes);
 
 struct lp_rast_rectangle *
 lp_setup_alloc_rectangle(struct lp_scene *scene,
                          unsigned nr_inputs);
 
-boolean
+bool
 lp_setup_analyse_triangles(struct lp_setup_context *setup,
                            const void *vb,
                            int stride,
                            int nr);
 
-boolean
+bool
 lp_setup_bin_triangle(struct lp_setup_context *setup,
                       struct lp_rast_triangle *tri,
-                      boolean use_32bits,
-                      boolean opaque,
+                      int max_szorig,
+                      bool opaque,
                       const struct u_rect *bbox,
                       int nr_planes,
                       unsigned scissor_index);
 
-boolean
+bool
 lp_setup_bin_rectangle(struct lp_setup_context *setup,
                        struct lp_rast_rectangle *rect,
-                       boolean opaque);
+                       bool opaque);
 
-static inline boolean
+static inline bool
 lp_setup_zero_sample_mask(struct lp_setup_context *setup)
 {
    uint32_t sample_mask = setup->fs.current.jit_context.sample_mask;

@@ -30,25 +30,21 @@
 #include <stdint.h>
 
 struct etna_context;
-struct etna_surface;
 
 #include "pipe/p_context.h"
 
 void
-etna_rs_gen_clear_surface(struct etna_context *ctx, struct etna_surface *surf,
-                          uint64_t clear_value);
-
-void
 etna_copy_resource(struct pipe_context *pctx, struct pipe_resource *dst,
-                   struct pipe_resource *src, int first_level, int last_level);
+                   struct pipe_resource *src, int first_level, int last_level,
+                   bool rb_swap);
 
 void
 etna_copy_resource_box(struct pipe_context *pctx, struct pipe_resource *dst,
-                       struct pipe_resource *src, int level,
-                       struct pipe_box *box);
+                       struct pipe_resource *src, int dst_level, int src_level,
+                       struct pipe_box *box, bool rb_swap);
 
 void
-etna_blit_save_state(struct etna_context *ctx);
+etna_blit_save_state(struct etna_context *ctx, bool render_cond);
 
 uint64_t
 etna_clear_blit_pack_rgba(enum pipe_format format, const union pipe_color_union *color);

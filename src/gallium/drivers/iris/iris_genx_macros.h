@@ -1,26 +1,9 @@
 /*
  * Copyright © 2019 Intel Corporation
+ * SPDX-License-Identifier: MIT
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
+ * @file iris_genx_macros.h
  *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
-
-/**
  * Macro and function definitions needed in order to use genxml.
  *
  * This should only be included in sources compiled per-generation.
@@ -31,6 +14,7 @@
 #define __gen_address_type struct iris_address
 #define __gen_user_data struct iris_batch
 #define __gen_combine_address iris_combine_address
+#define __gen_get_write_fencing_status(b) (&(b)->write_fence_status)
 
 static inline void *
 __gen_get_batch_dwords(struct iris_batch *batch, unsigned dwords)
@@ -64,7 +48,7 @@ __gen_combine_address(struct iris_batch *batch, void *location,
 static inline struct iris_address
 __gen_get_batch_address(struct iris_batch *batch, void *location)
 {
-   unreachable("Not supported by iris");
+   UNREACHABLE("Not supported by iris");
 }
 
 #define __gen_address_type struct iris_address
@@ -79,6 +63,12 @@ __gen_get_batch_address(struct iris_batch *batch, void *location)
 #include "genxml/genX_pack.h"
 #include "genxml/gen_macros.h"
 #include "genxml/genX_bits.h"
+
+#if GFX_VER >= 11 && GFX_VERx10 < 125
+#define IRIS_BT_OFFSET_SHIFT 3
+#else
+#define IRIS_BT_OFFSET_SHIFT 0
+#endif
 
 /* CS_GPR(15) is reserved for combining conditional rendering predicates
  * with GL_ARB_indirect_parameters draw number predicates.
@@ -107,6 +97,9 @@ __gen_get_batch_address(struct iris_batch *batch, void *location)
 
 #define iris_emit_cmd(batch, cmd, name) \
    _iris_pack_command(batch, cmd, __gen_get_batch_dwords(batch, __genxml_cmd_length(cmd)), name)
+
+#define iris_emit_dwords(batch, n) \
+   __gen_get_batch_dwords(batch, n)
 
 #define iris_emit_merge(batch, dwords0, dwords1, num_dwords)    \
    do {                                                         \
@@ -152,4 +145,11 @@ rw_bo(struct iris_bo *bo, uint64_t offset, enum iris_domain access)
 {
    return (struct iris_address) { .bo = bo, .offset = offset,
                                   .access = access };
+}
+
+UNUSED static struct iris_address
+iris_address_add(struct iris_address addr, uint64_t offset)
+{
+   addr.offset += offset;
+   return addr;
 }

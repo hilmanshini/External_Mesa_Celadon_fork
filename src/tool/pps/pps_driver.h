@@ -78,11 +78,21 @@ class Driver
    /// @return The GPU timestamp associated to current sample, or 0 if there are no more samples
    virtual uint64_t next() = 0;
 
+   /// @return True when next() timestamps mark the start of the sampling interval.
+   /// Drivers returning end-of-interval timestamps should leave this false.
+   virtual bool sample_timestamps_are_interval_starts() const { return false; }
+
    /// Clock ID in which the values returned by gpu_timestamp() belong
    virtual uint32_t gpu_clock_id() const = 0;
 
    /// Sample a timestamp from the GPU
    virtual uint64_t gpu_timestamp() const = 0;
+
+   /// Sample a timestamp from both the CPU & the GPU
+   ///
+   /// This is useful when the driver can do a better timestamp correlation
+   /// than sampling separately CPU & GPU timestamps.
+   virtual bool cpu_gpu_timestamp(uint64_t &cpu_timestamp, uint64_t &gpu_timestamp) const = 0;
 
    DrmDevice drm_device;
 

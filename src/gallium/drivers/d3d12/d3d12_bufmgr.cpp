@@ -23,6 +23,7 @@
 
 #include "d3d12_bufmgr.h"
 #include "d3d12_context.h"
+#include "d3d12_fence.h"
 #include "d3d12_format.h"
 #include "d3d12_screen.h"
 
@@ -30,6 +31,7 @@
 #include "pipebuffer/pb_bufmgr.h"
 
 #include "util/format/u_format.h"
+#include "util/set.h"
 #include "util/u_memory.h"
 
 #include <dxguids/dxguids.h>
@@ -64,7 +66,7 @@ describe_suballoc_bo(char *buf, struct d3d12_bo *ptr)
    d3d12_bo *base = d3d12_bo_get_base(ptr, &offset);
    describe_direct_bo(res, base);
    sprintf(buf, "d3d12_bo<suballoc<%s>,0x%x,0x%x>", res,
-           (unsigned)ptr->buffer->size, (unsigned)offset);
+           (unsigned)ptr->buffer->base.size, (unsigned)offset);
 }
 
 void
@@ -81,9 +83,10 @@ d3d12_bo_wrap_res(struct d3d12_screen *screen, ID3D12Resource *res, enum d3d12_r
 {
    struct d3d12_bo *bo;
 
-   bo = CALLOC_STRUCT(d3d12_bo);
+   bo = MALLOC_STRUCT(d3d12_bo);
    if (!bo)
       return NULL;
+   memset(bo, 0, offsetof(d3d12_bo, local_context_states));
 
    D3D12_RESOURCE_DESC desc = GetDesc(res);
    unsigned array_size = desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1 : desc.DepthOrArraySize;
@@ -99,7 +102,8 @@ d3d12_bo_wrap_res(struct d3d12_screen *screen, ID3D12Resource *res, enum d3d12_r
 
    bo->residency_status = residency;
    bo->last_used_timestamp = 0;
-   screen->dev->GetCopyableFootprints(&desc, 0, total_subresources, 0, nullptr, nullptr, nullptr, &bo->estimated_size);
+   desc.Flags &= ~D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+   bo->estimated_size = GetResourceAllocationInfo(screen->dev, 0, 1, &desc).SizeInBytes;
    if (residency == d3d12_resident) {
       mtx_lock(&screen->submit_mutex);
       list_add(&bo->residency_list_entry, &screen->residency_list);
@@ -125,7 +129,7 @@ d3d12_bo_new(struct d3d12_screen *screen, uint64_t size, const pb_desc *pb_desc)
    res_desc.MipLevels = 1;
    res_desc.SampleDesc.Count = 1;
    res_desc.SampleDesc.Quality = 0;
-   res_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+   res_desc.Flags = (screen->max_feature_level >= D3D_FEATURE_LEVEL_11_0) ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE;
    res_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 
    D3D12_HEAP_TYPE heap_type = D3D12_HEAP_TYPE_DEFAULT;
@@ -140,12 +144,16 @@ d3d12_bo_new(struct d3d12_screen *screen, uint64_t size, const pb_desc *pb_desc)
       d3d12_evicted : d3d12_resident;
 
    D3D12_HEAP_PROPERTIES heap_pris = GetCustomHeapProperties(dev, heap_type);
-   HRESULT hres = dev->CreateCommittedResource(&heap_pris,
-                                               heap_flags,
-                                               &res_desc,
-                                               D3D12_RESOURCE_STATE_COMMON,
-                                               NULL,
-                                               IID_PPV_ARGS(&res));
+   d3d12_screen_reclaim_completed(screen);
+   HRESULT hres;
+   do {
+      hres = dev->CreateCommittedResource(&heap_pris,
+                                          heap_flags,
+                                          &res_desc,
+                                          D3D12_RESOURCE_STATE_COMMON,
+                                          NULL,
+                                          IID_PPV_ARGS(&res));
+   } while (hres == E_OUTOFMEMORY && d3d12_screen_reclaim_one(screen));
 
    if (FAILED(hres))
       return NULL;
@@ -158,9 +166,10 @@ d3d12_bo_wrap_buffer(struct d3d12_screen *screen, struct pb_buffer *buf)
 {
    struct d3d12_bo *bo;
 
-   bo = CALLOC_STRUCT(d3d12_bo);
+   bo = MALLOC_STRUCT(d3d12_bo);
    if (!bo)
       return NULL;
+   memset(bo, 0, offsetof(d3d12_bo, local_context_states));
 
    pipe_reference_init(&bo->reference, 1);
    bo->screen = screen;
@@ -192,16 +201,79 @@ d3d12_bo_unreference(struct d3d12_bo *bo)
 
       /* MSVC's offsetof fails when the name is ambiguous between struct and function */
       typedef struct d3d12_context d3d12_context_type;
-      list_for_each_entry(d3d12_context_type, ctx, &bo->screen->context_list, context_list_entry)
-         util_dynarray_append(&ctx->recently_destroyed_bos, uint64_t, bo->unique_id);
+      list_for_each_entry(d3d12_context_type, ctx, &bo->screen->context_list, context_list_entry) {
+         if (ctx->id == D3D12_CONTEXT_NO_ID) {
+            util_dynarray_append_typed(&ctx->recently_destroyed_bos, uint64_t, bo->unique_id);
+         } else if (bo->local_context_state_mask & (1u << ctx->id)) {
+            _mesa_set_remove_key(ctx->local_state_bos, bo);
+         }
+      }
 
       mtx_unlock(&bo->screen->submit_mutex);
 
       d3d12_resource_state_cleanup(&bo->global_state);
       if (bo->res)
          bo->res->Release();
+
+      uint64_t mask = bo->local_context_state_mask;
+      while (mask) {
+         int ctxid = u_bit_scan64(&mask);
+         d3d12_destroy_context_state_table_entry(&bo->local_context_states[ctxid]);
+      }
+
       FREE(bo);
    }
+}
+
+bool
+d3d12_screen_reclaim_completed(struct d3d12_screen *screen)
+{
+   uint64_t completed = screen->fence->GetCompletedValue();
+   struct list_head retired;
+   list_inithead(&retired);
+
+   mtx_lock(&screen->pending_free_lock);
+   list_for_each_entry_safe(struct d3d12_pending_free_entry, entry,
+                            &screen->pending_free_list, link) {
+      if (entry->fence_value > completed)
+         break;
+      list_del(&entry->link);
+      list_addtail(&entry->link, &retired);
+   }
+   mtx_unlock(&screen->pending_free_lock);
+
+   bool dropped = !list_is_empty(&retired);
+   list_for_each_entry_safe(struct d3d12_pending_free_entry, entry, &retired, link) {
+      d3d12_bo_unreference(entry->bo);
+      FREE(entry);
+   }
+   return dropped;
+}
+
+bool
+d3d12_screen_reclaim_one(struct d3d12_screen *screen)
+{
+   uint64_t target = 0;
+   bool have_target = false;
+
+   mtx_lock(&screen->pending_free_lock);
+   if (!list_is_empty(&screen->pending_free_list)) {
+      struct d3d12_pending_free_entry *head =
+         list_first_entry(&screen->pending_free_list,
+                          struct d3d12_pending_free_entry, link);
+      target = head->fence_value;
+      have_target = true;
+   }
+   mtx_unlock(&screen->pending_free_lock);
+
+   if (!have_target)
+      return false;
+
+   if (screen->fence->GetCompletedValue() < target)
+      screen->fence->SetEventOnCompletion(target, nullptr);
+
+   d3d12_screen_reclaim_completed(screen);
+   return true;
 }
 
 void *
@@ -215,12 +287,12 @@ d3d12_bo_map(struct d3d12_bo *bo, D3D12_RANGE *range)
    base_bo = d3d12_bo_get_base(bo, &offset);
 
    if (!range || range->Begin >= range->End) {
-      offset_range.Begin = offset;
-      offset_range.End = offset + d3d12_bo_get_size(bo);
+      offset_range.Begin = static_cast<size_t>(offset);
+      offset_range.End = static_cast<size_t>(offset + d3d12_bo_get_size(bo));
       range = &offset_range;
    } else {
-      offset_range.Begin = range->Begin + offset;
-      offset_range.End = range->End + offset;
+      offset_range.Begin = static_cast<size_t>(range->Begin + offset);
+      offset_range.End = static_cast<size_t>(range->End + offset);
       range = &offset_range;
    }
 
@@ -240,12 +312,12 @@ d3d12_bo_unmap(struct d3d12_bo *bo, D3D12_RANGE *range)
    base_bo = d3d12_bo_get_base(bo, &offset);
 
    if (!range || range->Begin >= range->End) {
-      offset_range.Begin = offset;
-      offset_range.End = offset + d3d12_bo_get_size(bo);
+      offset_range.Begin = static_cast<size_t>(offset);
+      offset_range.End = static_cast<size_t>(offset + d3d12_bo_get_size(bo));
       range = &offset_range;
    } else {
-      offset_range.Begin = range->Begin + offset;
-      offset_range.End = range->End + offset;
+      offset_range.Begin = static_cast<size_t>(range->Begin + offset);
+      offset_range.End = static_cast<size_t>(range->End + offset);
       range = &offset_range;
    }
 
@@ -296,8 +368,18 @@ d3d12_buffer_validate(struct pb_buffer *pbuf,
 
 static void
 d3d12_buffer_fence(struct pb_buffer *pbuf,
-                   struct pipe_fence_handle *fence )
+                   struct pipe_fence_handle *fence)
 {
+   if (!fence)
+      return;
+   struct d3d12_buffer *buf = d3d12_buffer(pbuf);
+   struct d3d12_fence *f = d3d12_fence(fence);
+   uint64_t offset;
+   struct d3d12_bo *base = d3d12_bo_get_base(buf->bo, &offset);
+   if (f->cmdqueue_fence != base->screen->fence)
+      return;
+   if (f->value > base->last_used_fence)
+      base->last_used_fence = f->value;
 }
 
 const struct pb_vtbl d3d12_buffer_vtbl = {
@@ -321,13 +403,13 @@ d3d12_bufmgr_create_buffer(struct pb_manager *pmgr,
    if (!buf)
       return NULL;
 
-   pipe_reference_init(&buf->base.reference, 1);
-   buf->base.alignment_log2 = util_logbase2(pb_desc->alignment);
-   buf->base.usage = pb_desc->usage;
+   pipe_reference_init(&buf->base.base.reference, 1);
+   buf->base.base.alignment_log2 = static_cast<uint8_t>(util_logbase2(pb_desc->alignment));
+   buf->base.base.usage = static_cast<uint16_t>(pb_desc->usage);
    buf->base.vtbl = &d3d12_buffer_vtbl;
-   buf->base.size = size;
+   buf->base.base.size = size;
    buf->range.Begin = 0;
-   buf->range.End = size;
+   buf->range.End = static_cast<size_t>(size);
 
    buf->bo = d3d12_bo_new(mgr->screen, size, pb_desc);
    if (!buf->bo) {
@@ -360,11 +442,14 @@ d3d12_bufmgr_destroy(struct pb_manager *_mgr)
    FREE(mgr);
 }
 
-static boolean
+static bool
 d3d12_bufmgr_is_buffer_busy(struct pb_manager *_mgr, struct pb_buffer *_buf)
 {
-   /* We're only asked this on buffers that are known not busy */
-   return false;
+   struct d3d12_bufmgr *mgr = d3d12_bufmgr(_mgr);
+   struct d3d12_buffer *buf = d3d12_buffer(_buf);
+   uint64_t offset;
+   struct d3d12_bo *base = d3d12_bo_get_base(buf->bo, &offset);
+   return base->last_used_fence > mgr->screen->fence->GetCompletedValue();
 }
 
 struct pb_manager *

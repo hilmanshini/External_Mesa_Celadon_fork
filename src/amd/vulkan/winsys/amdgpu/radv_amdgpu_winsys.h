@@ -5,56 +5,55 @@
  * Copyright © 2011 Marek Olšák <maraeo@gmail.com>
  * Copyright © 2015 Advanced Micro Devices, Inc.
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef RADV_AMDGPU_WINSYS_H
 #define RADV_AMDGPU_WINSYS_H
 
-#include <amdgpu.h>
 #include <pthread.h>
 #include "util/list.h"
 #include "util/rwlock.h"
+#include "util/simple_mtx.h"
 #include "ac_gpu_info.h"
+#include "ac_linux_drm.h"
 #include "radv_radeon_winsys.h"
 
 #include "vk_sync.h"
 #include "vk_sync_timeline.h"
 
+/**
+ * Process-global per-GPU allocation tracker.
+ *
+ * Tracks userspace BO allocation counters across all winsys instances for
+ * the same GPU within this process. This ensures VK_EXT_memory_budget
+ * reports correct process-wide usage even with multiple VkInstance objects.
+ */
+struct radv_amdgpu_alloc_tracker {
+   uintptr_t cookie;
+   alignas(8) uint64_t allocated_vram;
+   alignas(8) uint64_t allocated_vram_vis;
+   alignas(8) uint64_t allocated_gtt;
+   uint32_t refcount;
+};
+
 struct radv_amdgpu_winsys {
    struct radeon_winsys base;
-   amdgpu_device_handle dev;
+   ac_drm_device *dev;
+   int fd;
 
    struct radeon_info info;
-   struct ac_addrlib *addrlib;
 
    bool debug_all_bos;
    bool debug_log_bos;
-   bool use_ib_bos;
+   bool dump_ibs;
+   FILE *bo_history_logfile;
+   bool chain_ib;
    bool zero_all_vram_allocs;
-   bool reserve_vmid;
+   bool debug_vm;
    uint64_t perftest;
 
-   uint64_t allocated_vram;
-   uint64_t allocated_vram_vis;
-   uint64_t allocated_gtt;
+   struct radv_amdgpu_alloc_tracker *alloc_tracker;
 
    /* Global BO list */
    struct {
@@ -68,17 +67,38 @@ struct radv_amdgpu_winsys {
    struct u_rwlock log_bo_list_lock;
    struct list_head log_bo_list;
 
-   const struct vk_sync_type *sync_types[3];
-   struct vk_sync_type syncobj_sync_type;
-   struct vk_sync_timeline_type emulated_timeline_sync_type;
+   simple_mtx_t vm_ioctl_lock;
+   uint32_t vm_timeline_syncobj;
+   uint64_t vm_timeline_seq_num;
 
-   uint32_t refcount;
+   struct {
+      /* A zero-allocated BO used to map the LOW address space of virtual allocations. */
+      struct radeon_winsys_bo *bo;
+      simple_mtx_t lock;
+   } null_prt_bug;
 };
 
 static inline struct radv_amdgpu_winsys *
 radv_amdgpu_winsys(struct radeon_winsys *base)
 {
    return (struct radv_amdgpu_winsys *)base;
+}
+
+static inline uint32_t
+radeon_to_amdgpu_priority(enum radeon_ctx_priority priority)
+{
+   switch (priority) {
+   case RADEON_CTX_PRIORITY_REALTIME:
+      return AMDGPU_CTX_PRIORITY_VERY_HIGH;
+   case RADEON_CTX_PRIORITY_HIGH:
+      return AMDGPU_CTX_PRIORITY_HIGH;
+   case RADEON_CTX_PRIORITY_MEDIUM:
+      return AMDGPU_CTX_PRIORITY_NORMAL;
+   case RADEON_CTX_PRIORITY_LOW:
+      return AMDGPU_CTX_PRIORITY_LOW;
+   default:
+      UNREACHABLE("Invalid context priority");
+   }
 }
 
 #endif /* RADV_AMDGPU_WINSYS_H */

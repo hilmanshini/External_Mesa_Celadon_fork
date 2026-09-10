@@ -27,8 +27,18 @@
 #include "util/anon_file.h"
 #include "anv_private.h"
 
-uint32_t
-anv_gem_create(struct anv_device *device, uint64_t size)
+static void
+stub_gem_close(struct anv_device *device, struct anv_bo *bo)
+{
+   close(bo->gem_handle);
+}
+
+static uint32_t
+stub_gem_create(struct anv_device *device,
+                const struct intel_memory_class_instance **regions,
+                uint16_t num_regions, uint64_t size,
+                enum anv_bo_alloc_flags alloc_flags,
+                uint64_t *actual_size)
 {
    int fd = os_create_anonymous_file(size, "fake bo");
    if (fd == -1)
@@ -36,45 +46,52 @@ anv_gem_create(struct anv_device *device, uint64_t size)
 
    assert(fd != 0);
 
+   *actual_size = size;
    return fd;
 }
 
-void
-anv_gem_close(struct anv_device *device, uint32_t gem_handle)
+static void *
+stub_gem_mmap(struct anv_device *device, struct anv_bo *bo, uint64_t offset,
+              uint64_t size, void *placed_addr)
 {
-   close(gem_handle);
+   return mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, bo->gem_handle,
+               offset);
 }
 
-uint32_t
-anv_gem_create_regions(struct anv_device *device, uint64_t anv_bo_size,
-                       uint32_t flags, uint32_t num_regions,
-                       struct drm_i915_gem_memory_class_instance *regions)
+static VkResult
+stub_queue_exec_locked(struct anv_queue *queue,
+                       uint32_t wait_count,
+                       const struct vk_sync_wait *waits,
+                       uint32_t cmd_buffer_count,
+                       struct anv_cmd_buffer **cmd_buffers,
+                       uint32_t signal_count,
+                       const struct vk_sync_signal *signals,
+                       struct anv_query_pool *perf_query_pool,
+                       uint32_t perf_query_pass,
+                       struct anv_utrace_submit *utrace_submit)
+{
+   return VK_ERROR_UNKNOWN;
+}
+
+static VkResult
+stub_queue_exec_async(struct anv_async_submit *submit,
+                      uint32_t wait_count,
+                      const struct vk_sync_wait *waits,
+                      uint32_t signal_count,
+                      const struct vk_sync_signal *signals)
+{
+   return VK_ERROR_UNKNOWN;
+}
+
+static uint32_t
+stub_bo_alloc_flags_to_bo_flags(struct anv_device *device,
+                                enum anv_bo_alloc_flags alloc_flags)
 {
    return 0;
 }
 
-void*
-anv_gem_mmap(struct anv_device *device, struct anv_bo *bo,
-             uint64_t offset, uint64_t size, uint32_t flags)
-{
-   /* Ignore flags, as they're specific to I915_GEM_MMAP. */
-   (void) flags;
-
-   return mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED,
-               bo->gem_handle, offset);
-}
-
-/* This is just a wrapper around munmap, but it also notifies valgrind that
- * this map is no longer valid.  Pair this with anv_gem_mmap().
- */
-void
-anv_gem_munmap(struct anv_device *device, void *p, uint64_t size)
-{
-   munmap(p, size);
-}
-
-uint32_t
-anv_gem_userptr(struct anv_device *device, void *mem, size_t size)
+static uint32_t
+stub_gem_create_userptr(struct anv_device *device, void *mem, uint64_t size)
 {
    int fd = os_create_anonymous_file(size, "fake bo");
    if (fd == -1)
@@ -87,13 +104,6 @@ anv_gem_userptr(struct anv_device *device, void *mem, size_t size)
 
 int
 anv_gem_wait(struct anv_device *device, uint32_t gem_handle, int64_t *timeout_ns)
-{
-   return 0;
-}
-
-int
-anv_gem_execbuffer(struct anv_device *device,
-                   struct drm_i915_gem_execbuffer2 *execbuf)
 {
    return 0;
 }
@@ -112,46 +122,52 @@ anv_gem_get_tiling(struct anv_device *device, uint32_t gem_handle)
 }
 
 int
-anv_gem_set_caching(struct anv_device *device, uint32_t gem_handle,
-                    uint32_t caching)
-{
-   return 0;
-}
-
-int
-anv_gem_set_context_param(int fd, uint32_t context, uint32_t param, uint64_t value)
-{
-   unreachable("Unused");
-}
-
-bool
-anv_gem_has_context_priority(int fd, VkQueueGlobalPriorityKHR priority)
-{
-   unreachable("Unused");
-}
-
-int
-anv_gem_context_get_reset_stats(int fd, int context,
-                                uint32_t *active, uint32_t *pending)
-{
-   unreachable("Unused");
-}
-
-int
 anv_gem_handle_to_fd(struct anv_device *device, uint32_t gem_handle)
 {
-   unreachable("Unused");
+   UNREACHABLE("Unused");
 }
 
 uint32_t
 anv_gem_fd_to_handle(struct anv_device *device, int fd)
 {
-   unreachable("Unused");
+   UNREACHABLE("Unused");
 }
 
-int
-anv_i915_query(int fd, uint64_t query_id, void *buffer,
-               int32_t *buffer_len)
+VkResult
+anv_gem_import_bo_alloc_flags_to_bo_flags(struct anv_device *device,
+                                          struct anv_bo *bo,
+                                          enum anv_bo_alloc_flags alloc_flags,
+                                          uint32_t *bo_flags)
 {
-   unreachable("Unused");
+   return VK_SUCCESS;
+}
+
+static VkResult
+stub_vm_bind(struct anv_device *device, struct anv_sparse_submission *submit,
+             enum anv_vm_bind_flags flags)
+{
+   return VK_SUCCESS;
+}
+
+static VkResult
+stub_vm_bind_bo(struct anv_device *device, struct anv_bo *bo)
+{
+   return VK_SUCCESS;
+}
+
+const struct anv_kmd_backend *anv_stub_kmd_backend_get(void)
+{
+   static const struct anv_kmd_backend stub_backend = {
+      .gem_create = stub_gem_create,
+      .gem_create_userptr = stub_gem_create_userptr,
+      .gem_close = stub_gem_close,
+      .gem_mmap = stub_gem_mmap,
+      .vm_bind = stub_vm_bind,
+      .vm_bind_bo = stub_vm_bind_bo,
+      .vm_unbind_bo = stub_vm_bind_bo,
+      .queue_exec_locked = stub_queue_exec_locked,
+      .queue_exec_async = stub_queue_exec_async,
+      .bo_alloc_flags_to_bo_flags = stub_bo_alloc_flags_to_bo_flags,
+   };
+   return &stub_backend;
 }

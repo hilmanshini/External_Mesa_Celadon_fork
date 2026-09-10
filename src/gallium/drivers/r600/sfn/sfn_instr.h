@@ -1,27 +1,7 @@
 /* -*- mesa-c++  -*-
- *
- * Copyright (c) 2021 Collabora LTD
- *
+ * Copyright 2021 Collabora LTD
  * Author: Gert Wollny <gert.wollny@collabora.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #pragma once
@@ -56,6 +36,10 @@ class LDSAtomicInstr;
 class LDSReadInstr;
 class RatInstr;
 
+bool
+int_from_string_with_prefix_optional(const std::string& str,
+                                     const std::string& prefix,
+                                     int& value);
 int
 int_from_string_with_prefix(const std::string& str, const std::string& prefix);
 int
@@ -71,6 +55,7 @@ public:
       force_cf,
       ack_rat_return_write,
       helper,
+      no_lds_or_addr_group,
       nflags
    };
 
@@ -98,16 +83,11 @@ public:
       m_instr_flags.set(scheduled);
       forward_set_scheduled();
    }
-   void add_use() { ++m_use_count; }
-   void dec_use()
-   {
-      assert(m_use_count > 0);
-      --m_use_count;
-   }
    bool is_dead() const { return m_instr_flags.test(dead); }
    bool is_scheduled() const { return m_instr_flags.test(scheduled); }
    bool keep() const { return m_instr_flags.test(always_keep); }
-   bool has_uses() const { return m_use_count > 0; }
+   bool can_start_alu_block() { return m_instr_flags.test(no_lds_or_addr_group);}
+   bool group_force_alu_cf() { return m_instr_flags.test(force_cf);}
 
    bool has_instr_flag(Flags f) const { return m_instr_flags.test(f); }
    void set_instr_flag(Flags f) { m_instr_flags.set(f); }
@@ -138,8 +118,19 @@ public:
    virtual AluInstr *as_alu() { return nullptr; }
    virtual uint8_t allowed_src_chan_mask() const { return 0; }
 
-protected:
+   virtual void update_indirect_addr(PRegister old_reg, PRegister addr) {
+      (void)old_reg;
+      (void)addr;
+      UNREACHABLE("Instruction type has no indirect address");
+   };
    const InstrList& required_instr() const { return m_required_instr; }
+
+   virtual AluGroup *as_alu_group() { return nullptr;}
+
+   virtual void pin_registers() {}
+
+protected:
+
 
 private:
    virtual void forward_set_blockid(int id, int index);
@@ -153,7 +144,6 @@ private:
    InstrList m_required_instr;
    InstrList m_dependend_instr;
 
-   int m_use_count;
    int m_block_id;
    int m_index;
    std::bitset<nflags> m_instr_flags{0};
@@ -189,9 +179,15 @@ public:
    const_iterator begin() const { return m_instructions.begin(); }
    const_iterator end() const { return m_instructions.end(); }
 
+   void set_cf_start(ControlFlowInstr *cf) { m_cf_start = cf; }
+   ControlFlowInstr *cf_start() { return m_cf_start; }
+   const ControlFlowInstr *cf_start() const { return m_cf_start; }
+
    bool empty() const { return m_instructions.empty(); }
 
    void erase(iterator node);
+
+   iterator insert(const iterator pos, Instr *instr);
 
    bool is_equal_to(const Block& lhs) const;
 
@@ -202,12 +198,17 @@ public:
 
    int id() const { return m_id; }
 
-   auto type() const { return m_blocK_type; }
-   void set_type(Type t);
-   uint32_t remaining_slots() const { return m_remaining_slots; }
+   auto type() const {return m_block_type; }
+   void set_type(Type t, r600_chip_class chip_class);
+   int32_t remaining_slots() const { return m_remaining_slots;}
 
-   bool try_reserve_kcache(const AluGroup& instr);
-   bool try_reserve_kcache(const AluInstr& group);
+   auto try_reserve_kcache(const AluGroup& instr) const
+      -> std::pair<std::array<KCacheLine, 4>, bool>;
+   auto try_reserve_kcache(const AluInstr& group) const
+      -> std::pair<std::array<KCacheLine, 4>, bool>;
+   void commit_kcache_reservation(const std::array<KCacheLine, 4>& kcache);
+   bool update_kcache_reservation(const AluGroup& instr);
+   bool update_kcache_reservation(const AluInstr& instr);
 
    auto last_lds_instr() { return m_last_lds_instr; }
    void set_last_lds_instr(Instr *instr) { m_last_lds_instr = instr; }
@@ -218,11 +219,18 @@ public:
 
    size_t size() const { return m_instructions.size(); }
 
-   bool kcache_reservation_failed() const { return m_kcache_alloc_failed; }
-
    int inc_rat_emitted() { return ++m_emitted_rat_instr; }
 
+   void set_expected_ar_uses(uint32_t n) {m_expected_ar_uses = n;}
+   auto expected_ar_uses() const {return m_expected_ar_uses;}
+   void dec_expected_ar_uses() {
+      assert(m_expected_ar_uses > 0);
+      --m_expected_ar_uses;
+   }
+
    static void set_chipclass(r600_chip_class chip_class);
+
+   bool kcache_needs_extended() const;
 
 private:
    bool try_reserve_kcache(const UniformValue& u,
@@ -235,11 +243,10 @@ private:
    int m_id;
    int m_next_index;
 
-   Type m_blocK_type{unknown};
+   Type m_block_type{unknown};
    uint32_t m_remaining_slots{0xffff};
 
    std::array<KCacheLine, 4> m_kcache;
-   bool m_kcache_alloc_failed{false};
 
    Instr *m_last_lds_instr{nullptr};
 
@@ -247,24 +254,27 @@ private:
    AluInstr *m_lds_group_start{nullptr};
    static unsigned s_max_kcache_banks;
    int m_emitted_rat_instr{0};
+   uint32_t m_expected_ar_uses{0};
+   ControlFlowInstr *m_cf_start{nullptr};
 };
 
-class InstrWithResource : public Instr {
+class Resource {
 public:
-   InstrWithResource(int base, PRegister offset):
+   Resource(Instr *user, int base, PRegister offset):
        m_base(base),
-       m_offset(offset)
+       m_offset(offset),
+       m_user(user)
    {
       if (m_offset) {
-         m_offset->add_use(this);
+         m_offset->add_use(m_user);
       }
    }
    bool replace_resource_offset(PRegister old_offset, PRegister new_offset)
    {
       if (m_offset && old_offset->equal_to(*m_offset)) {
-         m_offset->del_use(this);
+         m_offset->del_use(m_user);
          m_offset = new_offset;
-         m_offset->add_use(this);
+         m_offset->add_use(m_user);
          return true;
       }
       return false;
@@ -272,14 +282,14 @@ public:
    void set_resource_offset(PRegister offset)
    {
       if (m_offset)
-         m_offset->del_use(this);
+         m_offset->del_use(m_user);
       m_offset = offset;
       if (m_offset) {
-         m_offset->add_use(this);
+         m_offset->add_use(m_user);
       }
    }
 
-   bool resource_is_equal(const InstrWithResource& other) const
+   bool resource_is_equal(const Resource& other) const
    {
       if (m_base != other.m_base)
          return false;
@@ -288,21 +298,22 @@ public:
       return !m_offset && !other.m_offset;
    }
 
-   auto resource_base() const { return m_base; }
+   auto resource_id() const { return m_base; }
 
    auto resource_offset() const { return m_offset; }
 
-   auto buffer_index_mode() const -> EBufferIndexMode
+   auto resource_index_mode() const -> EBufferIndexMode
    {
-      if (!m_offset)
+      if (!m_offset || !m_offset->has_flag(Register::addr_or_idx))
          return bim_none;
+
       switch (m_offset->sel()) {
       case 1:
          return bim_zero;
       case 2:
          return bim_one;
       default:
-         unreachable("Invalid resource offset, scheduler must substitute registers");
+         UNREACHABLE("Invalid resource offset, scheduler must substitute registers");
       }
    }
 
@@ -321,9 +332,10 @@ protected:
 private:
    int m_base{0};
    PRegister m_offset{nullptr};
+   Instr *m_user;
 };
 
-class InstrWithVectorResult : public InstrWithResource {
+class InstrWithVectorResult : public Instr, public Resource {
 public:
    InstrWithVectorResult(const RegisterVec4& dest,
                          const RegisterVec4::Swizzle& dest_swizzle,
@@ -334,6 +346,12 @@ public:
    int dest_swizzle(int i) const { return m_dest_swizzle[i]; }
    const RegisterVec4::Swizzle& all_dest_swizzle() const { return m_dest_swizzle; }
    const RegisterVec4& dst() const { return m_dest; }
+
+   void update_indirect_addr(PRegister old_reg, PRegister addr) override;
+
+   void pin_registers() override;
+
+   virtual Block::Instructions prepare_instr() const { return Block::Instructions(); }
 
 protected:
    InstrWithVectorResult(const InstrWithVectorResult& orig);

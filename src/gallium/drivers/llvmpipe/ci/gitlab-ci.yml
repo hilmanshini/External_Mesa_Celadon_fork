@@ -1,75 +1,57 @@
-.llvmpipe-test:
-  extends:
-    - .llvmpipe-rules
-  variables:
-    LIBGL_ALWAYS_SOFTWARE: "true"
-    GALLIUM_DRIVER: "llvmpipe"
-    FLAKES_CHANNEL: "#mesa-swrast-ci"
-    GPU_VERSION: llvmpipe
-
-.llvmpipe-piglit-cl:
-  extends:
-    - .test-cl
-    - .deqp-test
-    - .llvmpipe-test
-  variables:
-    LP_NUM_THREADS: 1
-    PIGLIT_PROFILES: cl
-
-llvmpipe-piglit-clover:
-  extends:
-    - .llvmpipe-piglit-cl
-    - .llvmpipe-clover-rules
-  needs:
-    - debian-clover-testing
-    - debian/x86_test-gl
-  variables:
-    LP_CL: 1
-    DEQP_SUITE: llvmpipe-clover
-    GPU_VERSION: llvmpipe-clover
+include:
+  - local: 'src/gallium/drivers/llvmpipe/ci/gitlab-ci-inc.yml'
 
 llvmpipe-piglit-rusticl:
   extends:
     - .llvmpipe-piglit-cl
     - .llvmpipe-rusticl-rules
+    - .test-piglit
   needs:
-    - debian-rusticl-testing
-    - debian/x86_test-gl
+    - job: debian-x86_64
+    - job: debian/x86_64_test-gl
+      optional: true
   variables:
-    RUSTICL_ENABLE: "llvmpipe"
     DEQP_SUITE: llvmpipe-rusticl
     GPU_VERSION: llvmpipe-rusticl
 
 llvmpipe-traces:
   extends:
     - .test-gl
-    - .piglit-traces-test
+    - .traces-test
     - .llvmpipe-test
   variables:
-    EGL_PLATFORM: "surfaceless"
-    PIGLIT_REPLAY_DESCRIPTION_FILE: "${CI_PROJECT_DIR}/install/traces-llvmpipe.yml"
-    PIGLIT_REPLAY_DEVICE_NAME: "gl-vmware-llvmpipe"
-    PIGLIT_RESULTS: "llvmpipe-replay"
-
-.llvmpipe-deqp-test:
-  variables:
-    GALLIVM_PERF: "nopt"
-  extends:
-    - .test-gl
-    - .deqp-test
-    - .llvmpipe-test
+    REPLAY_CONFIG: traces-llvmpipe.toml
+  script: |
+    export LD_LIBRARY_PATH="$CI_PROJECT_DIR/install/lib"
+    export LIBGL_DRIVERS_PATH="$CI_PROJECT_DIR/install/lib/dri"
+    section_start weston "weston: prepare"
+    . "$CI_PROJECT_DIR/install/common/weston.sh"
+    section_end weston
+    $HWCI_TEST_SCRIPT
 
 llvmpipe:
-  tags:
-    - mesa-swrast
   variables:
     DEQP_SUITE: llvmpipe
-    XDG_RUNTIME_DIR: /run/user
-  extends: .llvmpipe-deqp-test
-  script:
-    - mkdir -p $XDG_RUNTIME_DIR
-    - LD_LIBRARY_PATH=`pwd`/install weston -Bheadless-backend.so -Swayland-0 &
-    - LD_LIBRARY_PATH=`pwd`/install WAYLAND_DISPLAY=wayland-0 xvfb-run --server-args='-noreset' install/deqp-runner.sh
+    DEQP_FRACTION: 4
+  extends:
+    - .llvmpipe-deqp-test
+    - .test-piglit
+  script: |
+    . "$SCRIPTS_DIR"/setup-test-env.sh
+    export LD_LIBRARY_PATH="$CI_PROJECT_DIR/install/lib"
+    export LIBGL_DRIVERS_PATH="$CI_PROJECT_DIR/install/lib/dri"
+    section_start weston "weston: prepare"
+    . "$CI_PROJECT_DIR/install/common/weston.sh"
+    section_end weston
+    $CI_PROJECT_DIR/install/deqp-runner.sh
+
+llvmpipe-full:
+  extends:
+    - llvmpipe
+    - .llvmpipe-manual-rules
+  timeout: 1h  # base runtime = 40m
+  variables:
+    DEQP_FRACTION: 1
 
 llvmpipe-deqp-asan:
   variables:
@@ -80,7 +62,20 @@ llvmpipe-deqp-asan:
     # busy at the deqp-runner level, and we don't want to overload fd.o
     # shared runners
     LP_NUM_THREADS: 0
+    DEQP_FORCE_ASAN: 1
+    S3_ARTIFACT_NAME: mesa-x86_64-asan-debugoptimized
   extends: .llvmpipe-deqp-test
   needs:
-    - debian/x86_test-gl
-    - debian-testing-asan
+    - job: debian/x86_64_test-gl
+      optional: true
+    - job: debian-x86_64-asan
+
+.android-llvmpipe:
+  extends:
+    - .test-android
+    - .llvmpipe-rules
+  variables:
+    CUTTLEFISH_GPU_MODE: mesa_swrast
+    GPU_VERSION: llvmpipe
+    DEQP_SUITE: android-llvmpipe
+    # TODO: define DEQP_FRACTION?

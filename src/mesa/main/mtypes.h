@@ -45,18 +45,17 @@
 #include "main/glconfig.h"
 #include "main/menums.h"
 #include "main/config.h"
-#include "glapi/glapi.h"
+#include "glapi/glapi/glapi.h"
 #include "math/m_matrix.h"	/* GLmatrix */
 #include "compiler/shader_enums.h"
 #include "compiler/shader_info.h"
 #include "main/formats.h"       /* MESA_FORMAT_COUNT */
-#include "compiler/glsl/list.h"
-#include "compiler/glsl/ir_uniform.h"
 #include "util/u_idalloc.h"
 #include "util/simple_mtx.h"
+#include "util/set.h"
 #include "util/u_dynarray.h"
-#include "util/mesa-sha1.h"
 #include "vbo/vbo.h"
+#include "state_tracker/st_atom.h"
 
 #include "pipe/p_state.h"
 
@@ -74,7 +73,6 @@ extern "C" {
  * \name Some forward type declarations
  */
 /*@{*/
-struct _mesa_HashTable;
 struct gl_attrib_node;
 struct gl_list_extensions;
 struct gl_meta_state;
@@ -294,7 +292,7 @@ struct gl_colorbuffer_attrib
     * draw buffer, and NVX_blend_equation_advanced_multi_draw_buffer still
     * requires all draw buffers to match, so we only need a single value.
     */
-   enum gl_advanced_blend_mode _AdvancedBlendMode;
+   enum pipe_advanced_blend_mode _AdvancedBlendMode;
 
    /** Coherency requested via glEnable(GL_BLEND_ADVANCED_COHERENT_KHR)? */
    bool BlendCoherent;
@@ -317,18 +315,6 @@ struct gl_colorbuffer_attrib
    GLenum16 ClampReadColor;     /**< GL_TRUE, GL_FALSE or GL_FIXED_ONLY_ARB */
 
    GLboolean sRGBEnabled;  /**< Framebuffer sRGB blending/updating requested */
-};
-
-union gl_vertex_format_user {
-   struct {
-      GLenum16 Type;        /**< datatype: GL_FLOAT, GL_INT, etc */
-      bool Bgra;            /**< true if GL_BGRA, else GL_RGBA */
-      GLubyte Size:5;       /**< components per element (1,2,3,4) */
-      GLubyte Normalized:1; /**< GL_ARB_vertex_program */
-      GLubyte Integer:1;    /**< Integer-valued? */
-      GLubyte Doubles:1;    /**< double values are not converted to floats */
-   };
-   uint32_t All;
 };
 
 /**
@@ -778,15 +764,12 @@ struct gl_texture_image
    mesa_format TexFormat;         /**< The actual texture memory format */
 
    GLuint Border;		/**< 0 or 1 */
-   GLuint Width;		/**< = 2^WidthLog2 + 2*Border */
-   GLuint Height;		/**< = 2^HeightLog2 + 2*Border */
-   GLuint Depth;		/**< = 2^DepthLog2 + 2*Border */
+   GLuint Width;
+   GLuint Height;
+   GLuint Depth;
    GLuint Width2;		/**< = Width - 2*Border */
    GLuint Height2;		/**< = Height - 2*Border */
    GLuint Depth2;		/**< = Depth - 2*Border */
-   GLuint WidthLog2;		/**< = log2(Width2) */
-   GLuint HeightLog2;		/**< = log2(Height2) */
-   GLuint DepthLog2;		/**< = log2(Depth2) */
    GLuint MaxNumLevels;		/**< = maximum possible number of mipmap
                                        levels, computed from the dimensions */
 
@@ -907,6 +890,8 @@ struct gl_sampler_object
 
    uint8_t glclamp_mask; /**< mask of GL_CLAMP wraps active */
 
+   bool DeletePending; /**< true if sampler object is removed from the hash */
+
    /** GL_ARB_bindless_texture */
    bool HandleAllocated;
    struct util_dynarray Handles;
@@ -950,6 +935,7 @@ struct gl_texture_object
    GLboolean _IsFloat;         /**< GL_OES_float_texture */
    GLboolean _IsHalfFloat;     /**< GL_OES_half_float_texture */
    bool HandleAllocated;       /**< GL_ARB_bindless_texture */
+   bool DeletePending;         /**< true if texture object is removed from the hash */
 
    /* This should not be restored by glPopAttrib: */
    bool StencilSampling;       /**< Should we sample stencil instead of depth? */
@@ -957,6 +943,8 @@ struct gl_texture_object
    /** GL_OES_EGL_image_external */
    GLboolean External;
    GLubyte RequiredTextureImageUnits;
+
+   GLboolean NullTexture; /**< this texture is incomplete and should be passed to the driver as NULL */
 
    /** GL_EXT_memory_object */
    GLenum16 TextureTiling;
@@ -983,6 +971,12 @@ struct gl_texture_object
    GLboolean IsSparse;
    GLint VirtualPageSizeIndex;
    GLint NumSparseLevels;
+
+   /** GL_EXT_texture_storage_compression */
+   GLint CompressionRate; /**< Fixed-rate compression bitrate */
+
+   /** GL_EXT_texture_compression_astc_decode_mode */
+   GLenum16 AstcDecodePrecision; /**< ASTC decoding precision */
 
    /* The texture must include at levels [0..lastLevel] once validated:
     */
@@ -1056,9 +1050,8 @@ struct gl_texture_object
    /* When non-negative, samplers should use this layer instead of the one
     * specified by the GL state.
     *
-    * This is used for EGL images and VDPAU interop, where imported
-    * pipe_resources may be cube, 3D, or array textures (containing layers
-    * with different fields in the case of VDPAU) even though the GL state
+    * This is used for EGL images interop, where imported pipe_resources
+    * may be cube, 3D, or array textures even though the GL state
     * describes one non-array texture per field.
     */
    int layer_override;
@@ -1068,6 +1061,8 @@ struct gl_texture_object
      * the pipe_resource *pt above.
      */
     bool needs_validation;
+
+    GLboolean IsProtected;
 };
 
 
@@ -1333,6 +1328,8 @@ struct gl_texture_attrib
    /** GL_ARB_seamless_cubemap */
    GLboolean CubeMapSeamless;
 
+   GLshort NumSamplersWithClamp;
+
    struct gl_texture_unit Unit[MAX_COMBINED_TEXTURE_IMAGE_UNITS];
    struct gl_fixedfunc_texture_unit FixedFuncUnit[MAX_TEXTURE_COORD_UNITS];
 };
@@ -1446,22 +1443,6 @@ struct gl_buffer_object
    gl_buffer_usage UsageHistory; /**< How has this buffer been used so far? */
 
    struct pipe_resource *buffer;
-   struct gl_context *private_refcount_ctx;
-   /* This mechanism allows passing buffer references to the driver without
-    * using atomics to increase the reference count.
-    *
-    * This private refcount can be decremented without atomics but only one
-    * context (ctx above) can use this counter to be thread-safe.
-    *
-    * This number is atomically added to buffer->reference.count at
-    * initialization. If it's never used, the same number is atomically
-    * subtracted from buffer->reference.count before destruction. If this
-    * number is decremented, we can pass that reference to the driver without
-    * touching reference.count. At buffer destruction we only subtract
-    * the number of references we did not return. This can possibly turn
-    * a million atomic increments into 1 add and 1 subtract atomic op.
-    */
-   int private_refcount;
 
    GLbitfield StorageFlags; /**< GL_MAP_PERSISTENT_BIT, etc. */
 
@@ -1475,6 +1456,7 @@ struct gl_buffer_object
    bool DeletePending:1;  /**< true if buffer object is removed from the hash */
    bool Immutable:1;    /**< GL_ARB_buffer_storage */
    bool HandleAllocated:1; /**< GL_ARB_bindless_texture */
+   bool GLThreadInternal:1; /**< Created by glthread. */
    GLenum16 Usage;      /**< GL_STREAM_DRAW_ARB, GL_STREAM_READ_ARB, etc. */
    GLchar *Label;       /**< GL_KHR_debug */
    GLsizeiptrARB Size;  /**< Size of buffer storage in bytes */
@@ -1485,28 +1467,6 @@ struct gl_buffer_object
 
    struct gl_buffer_mapping Mappings[MAP_COUNT];
    struct pipe_transfer *transfer[MAP_COUNT];
-};
-
-
-/**
- * Client pixel packing/unpacking attributes
- */
-struct gl_pixelstore_attrib
-{
-   GLint Alignment;
-   GLint RowLength;
-   GLint SkipPixels;
-   GLint SkipRows;
-   GLint ImageHeight;
-   GLint SkipImages;
-   GLboolean SwapBytes;
-   GLboolean LsbFirst;
-   GLboolean Invert;        /**< GL_MESA_pack_invert */
-   GLint CompressedBlockWidth;   /**< GL_ARB_compressed_texture_pixel_storage */
-   GLint CompressedBlockHeight;
-   GLint CompressedBlockDepth;
-   GLint CompressedBlockSize;
-   struct gl_buffer_object *BufferObj; /**< GL_ARB_pixel_buffer_object */
 };
 
 
@@ -1642,25 +1602,11 @@ struct gl_vertex_array_object
    GLboolean EverBound;
 
    /**
-    * Whether the VAO is changed by the application so often that some of
-    * the derived fields are not updated at all to decrease overhead.
-    * Also, interleaved arrays are not detected, because it's too expensive
-    * to do that before every draw call.
-    */
-   bool IsDynamic;
-
-   /**
     * Marked to true if the object is shared between contexts and immutable.
     * Then reference counting is done using atomics and thread safe.
     * Is used for dlist VAOs.
     */
    bool SharedAndImmutable;
-
-   /**
-    * Number of updates that were done by the application. This is used to
-    * decide whether the VAO is static or dynamic.
-    */
-   unsigned NumUpdates;
 
    /** Vertex attribute arrays */
    struct gl_array_attributes VertexAttrib[VERT_ATTRIB_MAX];
@@ -1676,6 +1622,12 @@ struct gl_vertex_array_object
 
    /** Mask of VERT_BIT_* values indicating which arrays are enabled */
    GLbitfield Enabled;
+
+   /**
+    * Mask of vertex attributes that have:
+    *    VertexAttrib[i].BufferBindingIndex != i.
+    */
+   GLbitfield NonIdentityBufferAttribMapping;
 
    /**
     * Mask indicating which VertexAttrib and BufferBinding structures have
@@ -1715,7 +1667,7 @@ struct gl_array_attrib
    struct gl_vertex_array_object DefaultVAOState;
 
    /** Array objects (GL_ARB_vertex_array_object) */
-   struct _mesa_HashTable *Objects;
+   struct _mesa_HashTable Objects;
 
    GLint ActiveTexture;		/**< Client Active Texture */
    GLuint LockFirst;            /**< GL_EXT_compiled_vertex_array */
@@ -1889,6 +1841,17 @@ struct gl_transform_feedback_object
    GLboolean EverBound; /**< Has this object been bound? */
 
    /**
+    * Primitive mode from glBeginTransformFeedback.
+    *
+    * The spec doesn't list the primitive mode as part of transform feedback
+    * objects, but it has to be because when transform feedback is resumed,
+    * all draws must be validated against the primitive type that transform
+    * feedback began with instead of whatever last transform feedback object
+    * happened to be used.
+    */
+   GLenum16 Mode;
+
+   /**
     * GLES: if Active is true, remaining number of primitives which can be
     * rendered without overflow.  This is necessary to track because GLES
     * requires us to generate INVALID_OPERATION if a call to glDrawArrays or
@@ -1948,7 +1911,7 @@ struct gl_transform_feedback_state
    struct gl_buffer_object *CurrentBuffer;
 
    /** The table of all transform feedback objects */
-   struct _mesa_HashTable *Objects;
+   struct _mesa_HashTable Objects;
 
    /** The current xform-fb object (GL_TRANSFORM_FEEDBACK_BINDING) */
    struct gl_transform_feedback_object *CurrentObject;
@@ -2080,7 +2043,7 @@ struct gl_perf_monitor_state
    GLuint NumGroups;
 
    /** The table of all performance monitors. */
-   struct _mesa_HashTable *Monitors;
+   struct _mesa_HashTable Monitors;
 };
 
 
@@ -2089,7 +2052,7 @@ struct gl_perf_monitor_state
  */
 struct gl_perf_query_state
 {
-   struct _mesa_HashTable *Objects; /**< The table of all performance query objects */
+   struct _mesa_HashTable Objects; /**< The table of all performance query objects */
 };
 
 
@@ -2224,6 +2187,30 @@ struct gl_compute_program_state
 
 
 /**
+ * Context state for task programs.
+ */
+struct gl_task_program_state
+{
+   /** Currently enabled and valid program (including internal programs
+    * and compiled shader programs).
+    */
+   struct gl_program *_Current;
+};
+
+
+/**
+ * Context state for mesh programs.
+ */
+struct gl_mesh_program_state
+{
+   /** Currently enabled and valid program (including internal programs
+    * and compiled shader programs).
+    */
+   struct gl_program *_Current;
+};
+
+
+/**
  * ATI_fragment_shader runtime state
  */
 
@@ -2304,9 +2291,9 @@ struct gl_pipeline_object
     *
     * There is a separate program set for each shader stage.
     */
-   struct gl_program *CurrentProgram[MESA_SHADER_STAGES];
+   struct gl_program *CurrentProgram[MESA_SHADER_MESH_STAGES];
 
-   struct gl_shader_program *ReferencedPrograms[MESA_SHADER_STAGES];
+   struct gl_shader_program *ReferencedPrograms[MESA_SHADER_MESH_STAGES];
 
    /**
     * Program used by glUniform calls.
@@ -2335,7 +2322,7 @@ struct gl_pipeline_shader_state
    struct gl_pipeline_object *Default;
 
    /** Pipeline objects */
-   struct _mesa_HashTable *Objects;
+   struct _mesa_HashTable Objects;
 };
 
 /**
@@ -2366,7 +2353,7 @@ struct gl_query_object
  */
 struct gl_query_state
 {
-   struct _mesa_HashTable *QueryObjects;
+   struct _mesa_HashTable QueryObjects;
    struct gl_query_object *CurrentOcclusionObject; /* GL_ARB_occlusion_query */
    struct gl_query_object *CurrentTimerObject;     /* GL_EXT_timer_query */
 
@@ -2386,6 +2373,11 @@ struct gl_query_state
 
    /** GL_ARB_pipeline_statistics_query */
    struct gl_query_object *pipeline_stats[MAX_PIPELINE_STATISTICS];
+
+   /** GL_EXT_mesh_shader */
+   struct gl_query_object *task_shader_invocations;
+   struct gl_query_object *mesh_shader_invocations;
+   struct gl_query_object *mesh_primitives_generated;
 
    GLenum16 CondRenderMode;
 };
@@ -2418,14 +2410,17 @@ struct gl_shared_state
    GLint RefCount;			   /**< Reference count */
    bool DisplayListsAffectGLThread;
 
-   struct _mesa_HashTable *DisplayList;	   /**< Display lists hash table */
-   struct _mesa_HashTable *TexObjects;	   /**< Texture objects hash table */
+   struct list_head Contexts;   /**< gl_context objects */
+   struct set ReleaseResources; /**< in use by some context */
+
+   struct _mesa_HashTable DisplayList;	   /**< Display lists hash table */
+   struct _mesa_HashTable TexObjects;	   /**< Texture objects hash table */
 
    /** Default texture objects (shared by all texture units) */
    struct gl_texture_object *DefaultTex[NUM_TEXTURE_TARGETS];
 
    /** Fallback texture used when a bound texture is incomplete */
-   struct gl_texture_object *FallbackTex[NUM_TEXTURE_TARGETS];
+   struct gl_texture_object *FallbackTex[NUM_TEXTURE_TARGETS][2]; /**< [color, depth] */
 
    /**
     * \name Thread safety and statechange notification for texture
@@ -2442,16 +2437,16 @@ struct gl_shared_state
     * \name Vertex/geometry/fragment programs
     */
    /*@{*/
-   struct _mesa_HashTable *Programs; /**< All vertex/fragment programs */
+   struct _mesa_HashTable Programs; /**< All vertex/fragment programs */
    struct gl_program *DefaultVertexProgram;
    struct gl_program *DefaultFragmentProgram;
    /*@}*/
 
    /* GL_ATI_fragment_shader */
-   struct _mesa_HashTable *ATIShaders;
+   struct _mesa_HashTable ATIShaders;
    struct ati_fragment_shader *DefaultFragmentShader;
 
-   struct _mesa_HashTable *BufferObjects;
+   struct _mesa_HashTable BufferObjects;
 
    /* Buffer objects released by a different context than the one that
     * created them. Since the creating context holds one global buffer
@@ -2467,17 +2462,17 @@ struct gl_shared_state
    struct set *ZombieBufferObjects;
 
    /** Table of both gl_shader and gl_shader_program objects */
-   struct _mesa_HashTable *ShaderObjects;
+   struct _mesa_HashTable ShaderObjects;
 
    /* GL_EXT_framebuffer_object */
-   struct _mesa_HashTable *RenderBuffers;
-   struct _mesa_HashTable *FrameBuffers;
+   struct _mesa_HashTable RenderBuffers;
+   struct _mesa_HashTable FrameBuffers;
 
    /* GL_ARB_sync */
    struct set *SyncObjects;
 
    /** GL_ARB_sampler_objects */
-   struct _mesa_HashTable *SamplerObjects;
+   struct _mesa_HashTable SamplerObjects;
 
    /* GL_ARB_bindless_texture */
    struct hash_table_u64 *TextureHandles;
@@ -2491,31 +2486,11 @@ struct gl_shared_state
     */
    simple_mtx_t ShaderIncludeMutex;
 
-   /**
-    * Some context in this share group was affected by a GPU reset
-    *
-    * On the next call to \c glGetGraphicsResetStatus, contexts that have not
-    * been affected by a GPU reset must also return
-    * \c GL_INNOCENT_CONTEXT_RESET_ARB.
-    *
-    * Once this field becomes true, it is never reset to false.
-    */
-   bool ShareGroupReset;
-
    /** EXT_external_objects */
-   struct _mesa_HashTable *MemoryObjects;
+   struct _mesa_HashTable MemoryObjects;
 
    /** EXT_semaphore */
-   struct _mesa_HashTable *SemaphoreObjects;
-
-   /**
-    * Some context in this share group was affected by a disjoint
-    * operation. This operation can be anything that has effects on
-    * values of timer queries in such manner that they become invalid for
-    * performance metrics. As example gpu reset, counter overflow or gpu
-    * frequency changes.
-    */
-   bool DisjointOperation;
+   struct _mesa_HashTable SemaphoreObjects;
 
    /**
     * Whether at least one image has been imported or exported, excluding
@@ -2531,6 +2506,22 @@ struct gl_shared_state
       struct util_idalloc free_idx;
       unsigned size;
    } small_dlist_store;
+
+   /* Global GLThread state. */
+   struct {
+      /* The last context that locked global mutexes. */
+      struct gl_context *LastExecutingCtx;
+
+      /* The last time LastExecutingCtx started executing after a different
+       * context (the time of multiple active contexts).
+       */
+      int64_t LastContextSwitchTime;
+
+      /* The time for which no context can lock global mutexes since
+       * LastContextSwitchTime.
+       */
+      int64_t NoLockDuration;
+   } GLThread;
 };
 
 
@@ -2542,7 +2533,6 @@ struct gl_shared_state
  */
 struct gl_renderbuffer
 {
-   GLuint ClassID;        /**< Useful for drivers */
    GLuint Name;
    GLchar *Label;         /**< GL_KHR_debug */
    GLint RefCount;
@@ -2574,12 +2564,9 @@ struct gl_renderbuffer
                              GLuint width, GLuint height);
 
    struct pipe_resource *texture;
-   /* This points to either "surface_linear" or "surface_srgb".
-    * It doesn't hold the pipe_surface reference. The other two do.
-    */
-   struct pipe_surface *surface;
-   struct pipe_surface *surface_linear;
-   struct pipe_surface *surface_srgb;
+   enum pipe_format format_linear;
+   enum pipe_format format_srgb;
+   struct pipe_surface surface;
    GLboolean defined;        /**< defined contents? */
 
    struct pipe_transfer *transfer; /**< only used when mapping the resource */
@@ -2587,16 +2574,17 @@ struct gl_renderbuffer
    /**
     * Used only when hardware accumulation buffers are not supported.
     */
-   boolean software;
+   bool software;
    void *data;
 
    bool use_readpix_cache;
 
    /* Inputs from Driver.RenderTexture, don't use directly. */
-   boolean is_rtt; /**< whether Driver.RenderTexture was called */
+   bool is_rtt; /**< whether Driver.RenderTexture was called */
    unsigned rtt_face, rtt_slice;
-   boolean rtt_layered; /**< whether glFramebufferTexture was called */
+   bool rtt_layered; /**< whether glFramebufferTexture was called */
    unsigned rtt_nr_samples; /**< from FramebufferTexture2DMultisampleEXT */
+   unsigned rtt_numviews;
 };
 
 
@@ -2626,6 +2614,7 @@ struct gl_renderbuffer_attachment
    GLuint Zoffset;      /**< Slice for 3D textures,  or layer for both 1D
                          * and 2D array textures */
    GLboolean Layered;
+   GLsizei NumViews;
 };
 
 
@@ -2712,10 +2701,14 @@ struct gl_framebuffer
     */
    bool _HasAttachments;
 
-   GLbitfield _IntegerBuffers;  /**< Which color buffers are integer valued */
-   GLbitfield _BlendForceAlphaToOne;  /**< Which color buffers need blend factor adjustment */
-   GLbitfield _IsRGB;  /**< Which color buffers have an RGB base format? */
-   GLbitfield _FP32Buffers; /**< Which color buffers are FP32 */
+   GLbitfield _IntegerBuffers;  /**< Which color buffer attachments are integer valued */
+   GLbitfield _IntegerDrawBuffers;  /**< Which color draw buffers are integer valued */
+   GLbitfield _BlendForceAlphaToOne;  /**< Which color attachments need blend factor adjustment */
+   GLbitfield _BlendForceAlphaToOneDraw;  /**< Which color buffers need blend factor adjustment */
+   GLbitfield _IsRGB;  /**< Which color attachments have an RGB base format? */
+   GLbitfield _IsRGBDraw;  /**< Which color buffers have an RGB base format? */
+   GLbitfield _FP32Buffers; /**< Which color attachments are FP32 */
+   GLbitfield _FP32DrawBuffers; /**< Which color buffers are FP32 */
 
    /* ARB_color_buffer_float */
    GLboolean _AllColorBuffersFixedPoint; /* no integer, no float */
@@ -2732,6 +2725,7 @@ struct gl_framebuffer
 
    /** Array of all renderbuffer attachments, indexed by BUFFER_* tokens. */
    struct gl_renderbuffer_attachment Attachment[BUFFER_COUNT];
+   struct pipe_resource *resolve; /**< color resolve attachment */
 
    /* In unextended OpenGL these vars are part of the GL_COLOR_BUFFER
     * attribute group and GL_PIXEL attribute group, respectively.
@@ -2893,6 +2887,7 @@ struct gl_dlist_state
        */
       GLenum16 ShadeModel;
       bool UseLoopback;
+      bool NeedsFlush;
    } Current;
 };
 
@@ -2908,28 +2903,28 @@ struct gl_driver_flags
    /**
     * gl_context::AtomicBufferBindings
     */
-   uint64_t NewAtomicBuffer;
+   st_state_bitset NewAtomicBuffer;
 
    /** gl_context::Color::Alpha* */
-   uint64_t NewAlphaTest;
+   st_state_bitset NewAlphaTest;
 
    /** gl_context::Multisample::Enabled */
-   uint64_t NewMultisampleEnable;
+   st_state_bitset NewMultisampleEnable;
 
    /** gl_context::Multisample::(Min)SampleShading */
-   uint64_t NewSampleShading;
+   st_state_bitset NewSampleShading;
 
    /** gl_context::Transform::ClipPlanesEnabled */
-   uint64_t NewClipPlaneEnable;
+   st_state_bitset NewClipPlaneEnable;
 
    /** gl_context::Color::ClampFragmentColor */
-   uint64_t NewFragClamp;
+   st_state_bitset NewFragClamp;
 
    /** Shader constants (uniforms, program parameters, state constants) */
-   uint64_t NewShaderConstants[MESA_SHADER_STAGES];
+   st_state_bitset NewShaderConstants[MESA_SHADER_MESH_STAGES];
 
    /** For GL_CLAMP emulation */
-   uint64_t NewSamplersWithClamp;
+   st_state_bitset NewSamplersWithClamp;
 };
 
 struct gl_buffer_binding
@@ -3204,6 +3199,60 @@ struct gl_attrib_node
 };
 
 /**
+ * Dispatch tables.
+ */
+struct gl_dispatch
+{
+   /**
+    * For non-displaylist-saving, non-begin/end.
+    */
+   struct _glapi_table *OutsideBeginEnd;
+
+   /**
+    * The dispatch table used between glBegin() and glEnd() (outside of a
+    * display list).  Only valid functions between those two are set.
+    */
+   struct _glapi_table *BeginEnd;
+
+   /**
+    * Same as BeginEnd except glVertex{Attrib} functions. Used when
+    * HW GL_SELECT mode instead of BeginEnd to insert extra code
+    * for GL_SELECT.
+    */
+   struct _glapi_table *HWSelectModeBeginEnd;
+
+   /**
+    * The dispatch table used between glNewList() and glEndList().
+    */
+   struct _glapi_table *Save;
+
+   /**
+    * Dispatch table for when a graphics reset has happened.
+    */
+   struct _glapi_table *ContextLost;
+
+   /**
+    * The current dispatch table for non-displaylist-saving execution.
+    * It can be equal to one of these:
+    * - OutsideBeginEnd
+    * - BeginEnd
+    * - HWSelectModeBeginEnd
+    */
+   struct _glapi_table *Exec;
+
+   /**
+    * The current dispatch table overall. It can be equal to one of these:
+    * - Exec
+    * - Save
+    * - ContextLost
+    */
+   struct _glapi_table *Current;
+
+   struct _glapi_table *Trace;
+   struct _glapi_table *RealPublished;
+};
+
+/**
  * Mesa rendering context.
  *
  * This is the central context data structure for Mesa.  Almost all
@@ -3215,6 +3264,10 @@ struct gl_context
 {
    /** State possibly shared with other contexts in the address space */
    struct gl_shared_state *Shared;
+   struct list_head SharedLink;
+
+   /** Only accessible while Shared->Mutex is held */
+   struct util_dynarray ReleaseResources;
 
    /** Whether Shared->BufferObjects has already been locked for this context. */
    bool BufferObjectsLocked;
@@ -3226,47 +3279,23 @@ struct gl_context
    gl_api API;
 
    /**
-    * The current dispatch table for non-displaylist-saving execution, either
-    * BeginEnd or OutsideBeginEnd
+    * Dispatch tables implementing OpenGL functions. GLThread has no effect
+    * on this.
     */
-   struct _glapi_table *Exec;
+   struct gl_dispatch Dispatch;
+
    /**
-    * The normal dispatch table for non-displaylist-saving, non-begin/end
-    */
-   struct _glapi_table *OutsideBeginEnd;
-   /** The dispatch table used between glNewList() and glEndList() */
-   struct _glapi_table *Save;
-   /**
-    * The dispatch table used between glBegin() and glEnd() (outside of a
-    * display list).  Only valid functions between those two are set.
-    */
-   struct _glapi_table *BeginEnd;
-   /**
-    * Same as BeginEnd except vertex postion set functions. Used when
-    * HW GL_SELECT mode instead of BeginEnd.
-    */
-   struct _glapi_table *HWSelectModeBeginEnd;
-   /**
-    * Dispatch table for when a graphics reset has happened.
-    */
-   struct _glapi_table *ContextLost;
-   /**
-    * Dispatch table used to marshal API calls from the client program to a
-    * separate server thread.
+    * Dispatch table used by GLThread, a component used to marshal API
+    * calls from an application to a separate thread.
     */
    struct _glapi_table *MarshalExec;
+
    /**
     * Dispatch table currently in use for fielding API calls from the client
     * program.  If API calls are being marshalled to another thread, this ==
-    * MarshalExec.  Otherwise it == CurrentServerDispatch.
+    * MarshalExec.  Otherwise it == Dispatch.Current.
     */
-   struct _glapi_table *CurrentClientDispatch;
-
-   /**
-    * Dispatch table currently in use for performing API calls.  == Save or
-    * Exec.
-    */
-   struct _glapi_table *CurrentServerDispatch;
+   struct _glapi_table *GLApi;
 
    /*@}*/
 
@@ -3306,6 +3335,9 @@ struct gl_context
     * Same as ValidPrimMask, but should be applied to glDrawElements*.
     */
    GLbitfield ValidPrimMaskIndexed;
+
+   /** DrawID for the next non-multi non-indirect draw. Only set by glthread. */
+   GLuint DrawID;
 
    /**
     * Whether DrawPixels/CopyPixels/Bitmap are valid to render.
@@ -3402,6 +3434,8 @@ struct gl_context
    struct gl_tess_ctrl_program_state TessCtrlProgram;
    struct gl_tess_eval_program_state TessEvalProgram;
    struct gl_ati_fragment_shader_state ATIFragmentShader;
+   struct gl_task_program_state TaskProgram;
+   struct gl_mesh_program_state MeshProgram;
 
    struct gl_pipeline_shader_state Pipeline; /**< GLSL pipeline shader object state */
    struct gl_pipeline_object Shader; /**< GLSL shader object state */
@@ -3499,7 +3533,7 @@ struct gl_context
     */
    struct gl_image_unit ImageUnits[MAX_IMAGE_UNITS];
 
-   struct gl_subroutine_index_binding SubroutineIndex[MESA_SHADER_STAGES];
+   struct gl_subroutine_index_binding SubroutineIndex[MESA_SHADER_MESH_STAGES];
    /*@}*/
 
    struct gl_meta_state *Meta;  /**< for "meta" operations */
@@ -3522,7 +3556,7 @@ struct gl_context
    GLenum16 RenderMode;      /**< either GL_RENDER, GL_SELECT, GL_FEEDBACK */
    GLbitfield NewState;      /**< bitwise-or of _NEW_* flags */
    GLbitfield PopAttribState; /**< Updated state since glPushAttrib */
-   uint64_t NewDriverState;  /**< bitwise-or of flags from DriverFlags */
+   st_state_bitset NewDriverState;  /**< bitwise-or of flags from DriverFlags */
 
    struct gl_driver_flags DriverFlags;
 
@@ -3551,15 +3585,16 @@ struct gl_context
     */
    GLboolean HasConfig;
 
-   GLboolean TextureFormatSupported[MESA_FORMAT_COUNT];
-
    GLboolean RasterDiscard;  /**< GL_RASTERIZER_DISCARD */
    GLboolean IntelConservativeRasterization; /**< GL_CONSERVATIVE_RASTERIZATION_INTEL */
    GLboolean ConservativeRasterization; /**< GL_CONSERVATIVE_RASTERIZATION_NV */
    GLfloat ConservativeRasterDilate;
    GLenum16 ConservativeRasterMode;
 
+   GLboolean RepresentativeFragmentTest; /**< GL_REPRESENTATIVE_FRAGMENT_TEST_NV */
+
    GLboolean IntelBlackholeRender; /**< GL_INTEL_blackhole_render */
+   GLboolean PixelLocalStorage;    /**< GL_EXT_shader_pixel_local_storage */
 
    /** Does glVertexAttrib(0) alias glVertex()? */
    bool _AttribZeroAliasesVertex;
@@ -3592,15 +3627,6 @@ struct gl_context
     */
    bool invalidate_on_gl_viewport;
 
-   /*@}*/
-
-   /**
-    * \name NV_vdpau_interop
-    */
-   /*@{*/
-   const void *vdpDevice;
-   const void *vdpGetProcAddress;
-   struct set *vdpSurfaces;
    /*@}*/
 
    /**
@@ -3645,19 +3671,9 @@ extern int MESA_DEBUG_FLAGS;
 /** The MESA_VERBOSE var is a bitmask of these flags */
 enum _verbose
 {
-   VERBOSE_VARRAY		= 0x0001,
-   VERBOSE_TEXTURE		= 0x0002,
-   VERBOSE_MATERIAL		= 0x0004,
-   VERBOSE_PIPELINE		= 0x0008,
-   VERBOSE_DRIVER		= 0x0010,
-   VERBOSE_STATE		= 0x0020,
-   VERBOSE_API			= 0x0040,
-   VERBOSE_DISPLAY_LIST		= 0x0100,
-   VERBOSE_LIGHTING		= 0x0200,
-   VERBOSE_PRIMS		= 0x0400,
-   VERBOSE_VERTS		= 0x0800,
-   VERBOSE_DISASSEM		= 0x1000,
-   VERBOSE_SWAPBUFFERS          = 0x4000
+   VERBOSE_STATE        = 0x0001,
+   VERBOSE_DISPLAY_LIST = 0x0002,
+   VERBOSE_API          = 0x0004,
 };
 
 
@@ -3668,7 +3684,8 @@ enum _debug
    DEBUG_ALWAYS_FLUSH		= (1 << 1),
    DEBUG_INCOMPLETE_TEXTURE     = (1 << 2),
    DEBUG_INCOMPLETE_FBO         = (1 << 3),
-   DEBUG_CONTEXT                = (1 << 4)
+   DEBUG_CONTEXT                = (1 << 4),
+   DEBUG_FALLBACK_TEXTURE       = (1 << 5),
 };
 
 #ifdef __cplusplus

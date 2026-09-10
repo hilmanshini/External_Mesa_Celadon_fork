@@ -1,41 +1,79 @@
 # Copyright © 2017 Intel Corporation
-
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-
-# The above copyright notice and this permission notice shall be included in
-# all copies or substantial portions of the Software.
-
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-# SOFTWARE.
+# SPDX-License-Identifier: MIT
 
 # TODO: android?
 
 files_libintel_dev = files(
+  'i915/intel_device_info.c',
+  'i915/intel_device_info.h',
+  'xe/intel_device_info.c',
+  'xe/intel_device_info.h',
   'intel_debug.c',
   'intel_debug.h',
   'intel_device_info.c',
   'intel_device_info.h',
   'intel_hwconfig.c',
   'intel_hwconfig.h',
+  'intel_kmd.c',
+  'intel_kmd.h',
 )
+
+inc_intel_dev_virtio = []
+link_intel_dev_virtio = []
+
+if with_intel_virtio
+files_libintel_dev += files(
+  'virtio/intel_virtio_bo.c',
+  'virtio/intel_virtio_device.c',
+  'virtio/i915_virtio_ccmd.c',
+  'virtio/i915_virtio_ccmd_execbuf.c',
+)
+
+inc_intel_dev_virtio += [
+  inc_virtio_gpu,
+  inc_virtio_vdrm,
+]
+
+link_intel_dev_virtio += [ libvdrm ]
+endif
+
+intel_dev_wa_src = custom_target('intel_wa.[ch]',
+                                 input : ['gen_wa_helpers.py', 'mesa_defs.json'],
+                                 output : ['intel_wa.h', 'intel_wa.c'],
+                                 command : [prog_python, '@INPUT@', '@OUTPUT@'])
+
+intel_dev_info_gen_src = custom_target('intel_device_info_gen.h',
+                                       input : 'intel_device_info_gen_h.py',
+                                       depend_files: 'intel_device_info.py',
+                                       output : ['intel_device_info_gen.h'],
+                                       command : [prog_python, '@INPUT@', '@OUTPUT@'])
+
+intel_dev_serialize_src = custom_target('intel_device_info_serialize_gen.c',
+                                        input : 'intel_device_info_serialize_gen_c.py',
+                                        depend_files: 'intel_device_info.py',
+                                        output : ['intel_device_info_serialize_gen.c'],
+                                        command : [prog_python, '@INPUT@', '@OUTPUT@'])
+
+# ensures intel_wa.h exists before implementation files are compiled
+idep_intel_dev_wa = declare_dependency(sources : [intel_dev_wa_src[0]])
+
+idep_intel_dev_info_gen = declare_dependency(sources : [intel_dev_info_gen_src[0]])
 
 libintel_dev = static_library(
   'intel_dev',
-  [files_libintel_dev, sha1_h],
-  include_directories : [inc_include, inc_src, inc_intel],
-  dependencies : [dep_libdrm, idep_mesautil],
-  c_args : [no_override_init_args],
+  [files_libintel_dev, sha1_h, [intel_dev_wa_src]],
+  include_directories : [inc_include, inc_src, inc_intel, inc_intel_dev_virtio],
+  dependencies : [dep_libdrm, idep_mesautil, idep_intel_dev_wa,
+                  idep_intel_dev_info_gen],
+  c_args : [no_override_init_args, soong_compat_c_args],
   gnu_symbol_visibility : 'hidden',
+  link_with : [link_intel_dev_virtio],
+)
+
+idep_intel_dev = declare_dependency(
+  link_with : libintel_dev,
+  dependencies : [idep_intel_dev_wa, idep_intel_dev_info_gen, idep_mesautil],
+  sources : [intel_dev_info_gen_src, intel_dev_wa_src[0]],
 )
 
 if with_tests
@@ -43,8 +81,8 @@ if with_tests
        executable(
          'intel_device_info_test',
          'intel_device_info_test.c',
-         include_directories : [inc_include, inc_src],
-         link_with : libintel_dev,
+         include_directories : [inc_include, inc_src, inc_intel],
+         dependencies : idep_intel_dev,
        ),
        suite : ['intel'],
       )
@@ -62,9 +100,8 @@ if with_tests and with_tools.contains('drm-shim') and with_tools.contains('intel
   intel_devinfo_override_test = executable(
     'intel_device_info_override_test',
     'intel_device_info_override_test.c',
-    dependencies : [dep_libdrm],
-    include_directories : [inc_include, inc_src],
-    link_with : libintel_dev,
+    dependencies : [dep_libdrm, idep_intel_dev],
+    include_directories : [inc_include, inc_src, inc_intel],
   )
   intel_drm_ld_preload = join_paths(meson.current_build_dir(), '..', 'tools', 'libintel_noop_drm_shim.so')
   foreach _gens : platforms
@@ -82,17 +119,4 @@ if with_tests and with_tools.contains('drm-shim') and with_tools.contains('intel
                   )
     endforeach
   endforeach
-endif
-
-if with_intel_tools
-  intel_dev_info = executable(
-    'intel_dev_info',
-    files('intel_dev_info.c'),
-    dependencies : [dep_libdrm, dep_dl, dep_thread, dep_m],
-    include_directories : [inc_include, inc_src, inc_intel],
-    link_with : libintel_dev,
-    c_args : [no_override_init_args],
-    gnu_symbol_visibility : 'hidden',
-    install : true
-  )
 endif

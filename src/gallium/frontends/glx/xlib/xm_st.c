@@ -65,6 +65,7 @@ static bool
 xmesa_st_framebuffer_display(struct pipe_frontend_drawable *drawable,
                              struct st_context *st,
                              enum st_attachment_type statt,
+                             unsigned nboxes,
                              struct pipe_box *box)
 {
    struct xmesa_st_framebuffer *xstfb = xmesa_st_framebuffer(drawable);
@@ -82,7 +83,7 @@ xmesa_st_framebuffer_display(struct pipe_frontend_drawable *drawable,
       pres = xstfb->display_resource;
    }
 
-   xstfb->screen->flush_frontbuffer(xstfb->screen, pctx, pres, 0, 0, &xstfb->buffer->ws, box);
+   xstfb->screen->flush_frontbuffer(xstfb->screen, pctx, pres, 0, 0, &xstfb->buffer->ws, nboxes, box);
    return true;
 }
 
@@ -182,7 +183,7 @@ xmesa_st_framebuffer_validate_textures(struct pipe_frontend_drawable *drawable,
          xstfb->textures[i] =
             xstfb->screen->resource_create(xstfb->screen, &templ);
          if (!xstfb->textures[i])
-            return FALSE;
+            return false;
       }
    }
 
@@ -208,7 +209,8 @@ xmesa_st_framebuffer_validate(struct st_context *st,
                               struct pipe_frontend_drawable *drawable,
                               const enum st_attachment_type *statts,
                               unsigned count,
-                              struct pipe_resource **out)
+                              struct pipe_resource **out,
+                              struct pipe_resource **resolve)
 {
    struct xmesa_st_framebuffer *xstfb = xmesa_st_framebuffer(drawable);
    unsigned statt_mask, new_mask, i;
@@ -256,6 +258,12 @@ xmesa_st_framebuffer_validate(struct st_context *st,
 
    for (i = 0; i < count; i++)
       pipe_resource_reference(&out[i], xstfb->textures[statts[i]]);
+   if (resolve && drawable->visual->samples > 1) {
+      if (statt_mask & BITFIELD_BIT(ST_ATTACHMENT_FRONT_LEFT))
+         pipe_resource_reference(resolve, xstfb->display_resource);
+      else if (statt_mask & BITFIELD_BIT(ST_ATTACHMENT_BACK_LEFT))
+         pipe_resource_reference(resolve, xstfb->display_resource);
+   }
 
    return true;
 }
@@ -275,7 +283,7 @@ xmesa_st_framebuffer_flush_front(struct st_context *st,
    if (statt != ST_ATTACHMENT_FRONT_LEFT)
       return false;
 
-   ret = xmesa_st_framebuffer_display(drawable, st, statt, NULL);
+   ret = xmesa_st_framebuffer_display(drawable, st, statt, 0, NULL);
 
    if (ret && xmesa_strict_invalidate())
       xmesa_check_buffer_size(xstfb->buffer);
@@ -302,7 +310,7 @@ xmesa_create_st_framebuffer(XMesaDisplay xmdpy, XMesaBuffer b)
    xstfb->buffer = b;
    xstfb->screen = xmdpy->screen;
    xstfb->stvis = b->xm_visual->stvis;
-   if (xstfb->screen->get_param(xstfb->screen, PIPE_CAP_NPOT_TEXTURES))
+   if (xstfb->screen->caps.npot_textures)
       xstfb->target = PIPE_TEXTURE_2D;
    else
       xstfb->target = PIPE_TEXTURE_RECT;
@@ -352,7 +360,7 @@ xmesa_swap_st_framebuffer(struct pipe_frontend_drawable *drawable)
    struct xmesa_st_framebuffer *xstfb = xmesa_st_framebuffer(drawable);
    bool ret;
 
-   ret = xmesa_st_framebuffer_display(drawable, NULL, ST_ATTACHMENT_BACK_LEFT, NULL);
+   ret = xmesa_st_framebuffer_display(drawable, NULL, ST_ATTACHMENT_BACK_LEFT, 0, NULL);
    if (ret) {
       struct pipe_resource **front, **back, *tmp;
 
@@ -389,7 +397,7 @@ xmesa_copy_st_framebuffer(struct pipe_frontend_drawable *drawable,
       box.y = y;
       box.width = w;
       box.height = h;
-      xmesa_st_framebuffer_display(drawable, NULL, src, &box);
+      xmesa_st_framebuffer_display(drawable, NULL, src, 1, &box);
    }
 }
 

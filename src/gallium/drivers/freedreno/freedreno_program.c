@@ -1,46 +1,32 @@
 /*
- * Copyright (C) 2014 Rob Clark <robclark@freedesktop.org>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * Copyright © 2014 Rob Clark <robclark@freedesktop.org>
+ * SPDX-License-Identifier: MIT
  *
  * Authors:
  *    Rob Clark <robclark@freedesktop.org>
  */
 
 #include "tgsi/tgsi_text.h"
-#include "tgsi/tgsi_ureg.h"
 
+#include "nir_builder.h"
+#include "nir/pipe_nir.h"
 #include "util/u_simple_shaders.h"
 
 #include "freedreno_context.h"
 #include "freedreno_program.h"
 
 static void
-update_bound_stage(struct fd_context *ctx, enum pipe_shader_type shader,
+update_bound_stage(struct fd_context *ctx, mesa_shader_stage shader,
                    bool bound) assert_dt
 {
+   uint32_t bound_shader_stages = ctx->bound_shader_stages;
    if (bound) {
       ctx->bound_shader_stages |= BIT(shader);
    } else {
       ctx->bound_shader_stages &= ~BIT(shader);
    }
+   if (ctx->update_draw && (bound_shader_stages != ctx->bound_shader_stages))
+      ctx->update_draw(ctx);
 }
 
 static void
@@ -78,7 +64,7 @@ fd_set_patch_vertices(struct pipe_context *pctx, uint8_t patch_vertices) in_dt
     * stage as TCS could be NULL (passthrough)
     */
    if (ctx->prog.ds || ctx->prog.hs) {
-      fd_context_dirty_shader(ctx, PIPE_SHADER_TESS_CTRL, FD_DIRTY_SHADER_PROG);
+      fd_context_dirty_shader(ctx, MESA_SHADER_TESS_CTRL, FD_DIRTY_SHADER_PROG);
    }
 }
 
@@ -87,8 +73,8 @@ fd_vs_state_bind(struct pipe_context *pctx, void *hwcso) in_dt
 {
    struct fd_context *ctx = fd_context(pctx);
    ctx->prog.vs = hwcso;
-   fd_context_dirty_shader(ctx, PIPE_SHADER_VERTEX, FD_DIRTY_SHADER_PROG);
-   update_bound_stage(ctx, PIPE_SHADER_VERTEX, !!hwcso);
+   fd_context_dirty_shader(ctx, MESA_SHADER_VERTEX, FD_DIRTY_SHADER_PROG);
+   update_bound_stage(ctx, MESA_SHADER_VERTEX, !!hwcso);
 }
 
 static void
@@ -96,8 +82,8 @@ fd_tcs_state_bind(struct pipe_context *pctx, void *hwcso) in_dt
 {
    struct fd_context *ctx = fd_context(pctx);
    ctx->prog.hs = hwcso;
-   fd_context_dirty_shader(ctx, PIPE_SHADER_TESS_CTRL, FD_DIRTY_SHADER_PROG);
-   update_bound_stage(ctx, PIPE_SHADER_TESS_CTRL, !!hwcso);
+   fd_context_dirty_shader(ctx, MESA_SHADER_TESS_CTRL, FD_DIRTY_SHADER_PROG);
+   update_bound_stage(ctx, MESA_SHADER_TESS_CTRL, !!hwcso);
 }
 
 static void
@@ -105,8 +91,8 @@ fd_tes_state_bind(struct pipe_context *pctx, void *hwcso) in_dt
 {
    struct fd_context *ctx = fd_context(pctx);
    ctx->prog.ds = hwcso;
-   fd_context_dirty_shader(ctx, PIPE_SHADER_TESS_EVAL, FD_DIRTY_SHADER_PROG);
-   update_bound_stage(ctx, PIPE_SHADER_TESS_EVAL, !!hwcso);
+   fd_context_dirty_shader(ctx, MESA_SHADER_TESS_EVAL, FD_DIRTY_SHADER_PROG);
+   update_bound_stage(ctx, MESA_SHADER_TESS_EVAL, !!hwcso);
 }
 
 static void
@@ -114,8 +100,8 @@ fd_gs_state_bind(struct pipe_context *pctx, void *hwcso) in_dt
 {
    struct fd_context *ctx = fd_context(pctx);
    ctx->prog.gs = hwcso;
-   fd_context_dirty_shader(ctx, PIPE_SHADER_GEOMETRY, FD_DIRTY_SHADER_PROG);
-   update_bound_stage(ctx, PIPE_SHADER_GEOMETRY, !!hwcso);
+   fd_context_dirty_shader(ctx, MESA_SHADER_GEOMETRY, FD_DIRTY_SHADER_PROG);
+   update_bound_stage(ctx, MESA_SHADER_GEOMETRY, !!hwcso);
 }
 
 static void
@@ -123,8 +109,8 @@ fd_fs_state_bind(struct pipe_context *pctx, void *hwcso) in_dt
 {
    struct fd_context *ctx = fd_context(pctx);
    ctx->prog.fs = hwcso;
-   fd_context_dirty_shader(ctx, PIPE_SHADER_FRAGMENT, FD_DIRTY_SHADER_PROG);
-   update_bound_stage(ctx, PIPE_SHADER_FRAGMENT, !!hwcso);
+   fd_context_dirty_shader(ctx, MESA_SHADER_FRAGMENT, FD_DIRTY_SHADER_PROG);
+   update_bound_stage(ctx, MESA_SHADER_FRAGMENT, !!hwcso);
 }
 
 static const char *solid_fs = "FRAG                                        \n"
@@ -157,69 +143,136 @@ assemble_tgsi(struct pipe_context *pctx, const char *src, bool frag)
       return pctx->create_vs_state(pctx, &cso);
 }
 
-/* the correct semantic to use for the texcoord varying depends on pipe-cap: */
-static enum tgsi_semantic
-texcoord_semantic(struct pipe_context *pctx)
+/* the correct slot to use for the texcoord varying depends on pipe-cap: */
+static gl_varying_slot
+texcoord_slot(struct pipe_context *pctx)
 {
    struct pipe_screen *pscreen = pctx->screen;
 
-   if (pscreen->get_param(pscreen, PIPE_CAP_TGSI_TEXCOORD)) {
-      return TGSI_SEMANTIC_TEXCOORD;
+   if (pscreen->caps.tgsi_texcoord) {
+      return VARYING_SLOT_TEX0;
    } else {
-      return TGSI_SEMANTIC_GENERIC;
+      return VARYING_SLOT_VAR0;
    }
+}
+
+static void *
+create_blit_shader(struct pipe_context *pctx, nir_shader *nir)
+{
+   struct pipe_screen *pscreen = pctx->screen;
+
+   if (pscreen->finalize_nir)
+      pscreen->finalize_nir(pscreen, nir, true);
+
+   nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+
+   return pipe_shader_from_nir(pctx, nir);
 }
 
 static void *
 fd_prog_blit_vs(struct pipe_context *pctx)
 {
-   struct ureg_program *ureg;
+   const nir_shader_compiler_options *options =
+      pctx->screen->nir_options[MESA_SHADER_VERTEX];
 
-   ureg = ureg_create(PIPE_SHADER_VERTEX);
-   if (!ureg)
-      return NULL;
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_VERTEX, options,
+                                                  "blit_vs");
 
-   struct ureg_src in0 = ureg_DECL_vs_input(ureg, 0);
-   struct ureg_src in1 = ureg_DECL_vs_input(ureg, 1);
+   const struct glsl_type *vec4 = glsl_vec4_type();
 
-   struct ureg_dst out0 = ureg_DECL_output(ureg, texcoord_semantic(pctx), 0);
-   struct ureg_dst out1 = ureg_DECL_output(ureg, TGSI_SEMANTIC_POSITION, 1);
+   nir_variable *in_tc =
+      nir_variable_create(b.shader, nir_var_shader_in, vec4, "in_tc");
+   in_tc->data.location = VERT_ATTRIB_GENERIC0;
+   in_tc->data.driver_location = 0;
 
-   ureg_MOV(ureg, out0, in0);
-   ureg_MOV(ureg, out1, in1);
+   nir_variable *in_pos =
+      nir_variable_create(b.shader, nir_var_shader_in, vec4, "in_pos");
+   in_pos->data.location = VERT_ATTRIB_GENERIC1;
+   in_pos->data.driver_location = 1;
 
-   ureg_END(ureg);
+   nir_variable *out_tc =
+      nir_variable_create(b.shader, nir_var_shader_out, vec4, "tc");
+   out_tc->data.location = texcoord_slot(pctx);
+   out_tc->data.driver_location = 0;
 
-   return ureg_create_shader_and_destroy(ureg, pctx);
+   nir_variable *out_pos =
+      nir_variable_create(b.shader, nir_var_shader_out, vec4, "gl_Position");
+   out_pos->data.location = VARYING_SLOT_POS;
+   out_pos->data.driver_location = 1;
+
+   nir_store_var(&b, out_tc, nir_load_var(&b, in_tc), 0xf);
+   nir_store_var(&b, out_pos, nir_load_var(&b, in_pos), 0xf);
+
+   b.shader->num_inputs = 2;
+   b.shader->num_outputs = 2;
+
+   return create_blit_shader(pctx, b.shader);
 }
 
 static void *
 fd_prog_blit_fs(struct pipe_context *pctx, int rts, bool depth)
 {
+   const nir_shader_compiler_options *options =
+      pctx->screen->nir_options[MESA_SHADER_FRAGMENT];
    int i;
-   struct ureg_src tc;
-   struct ureg_program *ureg;
 
    assert(rts <= MAX_RENDER_TARGETS);
 
-   ureg = ureg_create(PIPE_SHADER_FRAGMENT);
-   if (!ureg)
-      return NULL;
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT, options,
+                                                  "blit_fs");
 
-   tc = ureg_DECL_fs_input(ureg, texcoord_semantic(pctx), 0,
-                           TGSI_INTERPOLATE_PERSPECTIVE);
-   for (i = 0; i < rts; i++)
-      ureg_TEX(ureg, ureg_DECL_output(ureg, TGSI_SEMANTIC_COLOR, i),
-               TGSI_TEXTURE_2D, tc, ureg_DECL_sampler(ureg, i));
-   if (depth)
-      ureg_TEX(ureg,
-               ureg_writemask(ureg_DECL_output(ureg, TGSI_SEMANTIC_POSITION, 0),
-                              TGSI_WRITEMASK_Z),
-               TGSI_TEXTURE_2D, tc, ureg_DECL_sampler(ureg, rts));
+   const struct glsl_type *vec4 = glsl_vec4_type();
+   const struct glsl_type *sampler2D =
+      glsl_sampler_type(GLSL_SAMPLER_DIM_2D, false, false, GLSL_TYPE_FLOAT);
 
-   ureg_END(ureg);
+   nir_variable *in_tc =
+      nir_variable_create(b.shader, nir_var_shader_in, vec4, "tc");
+   in_tc->data.location = texcoord_slot(pctx);
+   in_tc->data.driver_location = 0;
+   in_tc->data.interpolation = INTERP_MODE_SMOOTH;
 
-   return ureg_create_shader_and_destroy(ureg, pctx);
+   nir_def *tc = nir_trim_vector(&b, nir_load_var(&b, in_tc), 2);
+
+   for (i = 0; i < rts; i++) {
+      nir_variable *sampler =
+         nir_variable_create(b.shader, nir_var_uniform, sampler2D, "sampler");
+      sampler->data.binding = i;
+
+      nir_variable *out_color =
+         nir_variable_create(b.shader, nir_var_shader_out, vec4, "color");
+      out_color->data.location = FRAG_RESULT_DATA0 + i;
+      out_color->data.driver_location = i;
+
+      nir_def *color = nir_tex(&b, tc, .texture_index = i, .sampler_index = i,
+                               .dim = GLSL_SAMPLER_DIM_2D,
+                               .dest_type = nir_type_float32);
+
+      nir_store_var(&b, out_color, color, 0xf);
+   }
+
+   if (depth) {
+      nir_variable *sampler =
+         nir_variable_create(b.shader, nir_var_uniform, sampler2D, "sampler");
+      sampler->data.binding = rts;
+
+      nir_variable *out_depth =
+         nir_variable_create(b.shader, nir_var_shader_out, glsl_float_type(),
+                             "gl_FragDepth");
+      out_depth->data.location = FRAG_RESULT_DEPTH;
+      out_depth->data.driver_location = rts;
+
+      nir_def *color = nir_tex(&b, tc, .texture_index = rts,
+                               .sampler_index = rts,
+                               .dim = GLSL_SAMPLER_DIM_2D,
+                               .dest_type = nir_type_float32);
+
+      nir_store_var(&b, out_depth, nir_channel(&b, color, 2), 0x1);
+   }
+
+   b.shader->num_inputs = 1;
+   b.shader->num_outputs = rts + (depth ? 1 : 0);
+
+   return create_blit_shader(pctx, b.shader);
 }
 
 void

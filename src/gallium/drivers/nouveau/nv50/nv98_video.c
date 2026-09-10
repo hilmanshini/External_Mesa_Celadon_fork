@@ -118,7 +118,7 @@ nv98_create_decoder(struct pipe_context *context,
 
    if (!ret)
       ret = nouveau_pushbuf_create(screen, &nv50->base, nv50->base.client, dec->channel[0],
-                                   4, 32 * 1024, true, &dec->pushbuf[0]);
+                                   4, 32 * 1024, &dec->pushbuf[0]);
 
    for (i = 1; i < 3; ++i) {
       dec->channel[i] = dec->channel[0];
@@ -194,12 +194,6 @@ nv98_create_decoder(struct pipe_context *context,
    switch (u_reduce_video_profile(templ->profile)) {
    case PIPE_VIDEO_FORMAT_MPEG12: {
       codec = 1;
-      assert(templ->max_references <= 2);
-      break;
-   }
-   case PIPE_VIDEO_FORMAT_MPEG4: {
-      codec = 4;
-      tmp_size = mb(templ->height)*16 * mb(templ->width)*16;
       assert(templ->max_references <= 2);
       break;
    }

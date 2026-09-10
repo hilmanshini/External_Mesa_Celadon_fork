@@ -21,7 +21,9 @@
  * IN THE SOFTWARE.
  */
 
-#include "v3dv_private.h"
+#include "v3dv_device.h"
+#include "v3dv_image.h"
+#include "v3dv_version_dispatch.h"
 #include "broadcom/common/v3d_macros.h"
 #include "broadcom/cle/v3dx_pack.h"
 #include "broadcom/compiler/v3d_compiler.h"
@@ -86,13 +88,15 @@ v3dX(max_descriptor_bo_size)(void)
 
 
 uint32_t
-v3dX(combined_image_sampler_texture_state_offset)(void)
+v3dX(combined_image_sampler_texture_state_offset)(uint8_t plane)
 {
-   return 0;
+   return v3dX(descriptor_bo_size)(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) *
+      plane;
 }
 
 uint32_t
-v3dX(combined_image_sampler_sampler_state_offset)(void)
+v3dX(combined_image_sampler_sampler_state_offset)(uint8_t plane)
 {
-   return cl_aligned_packet_length(TEXTURE_SHADER_STATE, 32);
+   return v3dX(combined_image_sampler_texture_state_offset)(plane) +
+      cl_aligned_packet_length(TEXTURE_SHADER_STATE, 32);
 }

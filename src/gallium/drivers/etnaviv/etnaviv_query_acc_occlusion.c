@@ -36,6 +36,8 @@
 #include "etnaviv_query_acc.h"
 #include "etnaviv_screen.h"
 
+#define MAX_OQ_SAMPLES 511 /* 4KB / 8Bytes/sample */
+
 /*
  * Occlusion Query:
  *
@@ -44,7 +46,7 @@
  */
 
 static bool
-occlusion_supports(unsigned query_type)
+occlusion_supports(UNUSED struct etna_context *ctx, unsigned query_type)
 {
    switch (query_type) {
    case PIPE_QUERY_OCCLUSION_COUNTER:
@@ -67,14 +69,14 @@ occlusion_allocate(struct etna_context *ctx, ASSERTED unsigned query_type)
 static void
 occlusion_resume(struct etna_acc_query *aq, struct etna_context *ctx)
 {
-   struct etna_resource *rsc = etna_resource(aq->prsc);
+   struct etna_buffer_resource *rsc = etna_buffer_resource(aq->prsc);
    struct etna_reloc r = {
       .bo = rsc->bo,
       .flags = ETNA_RELOC_WRITE
    };
 
-   if (aq->samples > 63) {
-      aq->samples = 63;
+   if (aq->samples > MAX_OQ_SAMPLES) {
+      aq->samples = MAX_OQ_SAMPLES;
       BUG("samples overflow");
    }
 
@@ -90,6 +92,7 @@ occlusion_suspend(struct etna_acc_query *aq, struct etna_context *ctx)
    /* 0x1DF5E76 is the value used by blob - but any random value will work */
    etna_set_state(ctx->stream, VIVS_GL_OCCLUSION_QUERY_CONTROL, 0x1DF5E76);
    resource_written(ctx, aq->prsc);
+   aq->samples++;
 }
 
 static bool

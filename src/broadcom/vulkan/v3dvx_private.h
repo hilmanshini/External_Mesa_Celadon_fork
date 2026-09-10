@@ -22,11 +22,11 @@
  */
 
 /* This file generates the per-v3d-version function prototypes.  It must only
- * be included from v3dv_private.h.
+ * be included from v3dv_version_dispatch.h.
  */
 
-#ifndef V3DV_PRIVATE_H
-#error This file is included by means other than v3dv_private.h
+#ifndef V3DV_VERSION_DISPATCH_H
+#error This file is included by means other than v3dv_version_dispatch.h
 #endif
 
 /* Used at v3dv_cmd_buffer */
@@ -55,7 +55,13 @@ void
 v3dX(cmd_buffer_emit_depth_bias)(struct v3dv_cmd_buffer *cmd_buffer);
 
 void
+v3dX(cmd_buffer_emit_depth_bounds)(struct v3dv_cmd_buffer *cmd_buffer);
+
+void
 v3dX(cmd_buffer_emit_line_width)(struct v3dv_cmd_buffer *cmd_buffer);
+
+void
+v3dX(cmd_buffer_emit_default_point_size)(struct v3dv_cmd_buffer *cmd_buffer);
 
 void
 v3dX(cmd_buffer_emit_sample_state)(struct v3dv_cmd_buffer *cmd_buffer);
@@ -76,6 +82,11 @@ v3dX(job_emit_binning_prolog)(struct v3dv_job *job,
 
 void
 v3dX(job_emit_enable_double_buffer)(struct v3dv_job *job);
+
+void
+v3dX(job_patch_resume_address)(struct v3dv_job *first_suspend,
+                               struct v3dv_job *suspend,
+                               struct v3dv_job *resume);
 
 void
 v3dX(cmd_buffer_execute_inside_pass)(struct v3dv_cmd_buffer *primary,
@@ -120,22 +131,21 @@ v3dX(cmd_buffer_emit_indexed_indirect)(struct v3dv_cmd_buffer *cmd_buffer,
                                        uint32_t stride);
 
 void
-v3dX(get_hw_clear_color)(const VkClearColorValue *color,
-                         uint32_t internal_type,
-                         uint32_t internal_size,
-                         uint32_t *hw_color);
+v3dX(cmd_buffer_suspend)(struct v3dv_cmd_buffer *cmd_buffer);
+
+struct v3dv_job *
+v3dX(cmd_buffer_prepare_suspend_job_for_submit)(struct v3dv_job *job);
 
 void
-v3dX(cmd_buffer_render_pass_setup_render_target)(struct v3dv_cmd_buffer *cmd_buffer,
-                                                 int rt,
-                                                 uint32_t *rt_bpp,
-                                                 uint32_t *rt_type,
-                                                 uint32_t *rt_clamp);
+v3dX(get_hw_clear_color)(const VkClearColorValue *color,
+                         const struct v3dv_format_plane *format,
+                         uint32_t *hw_color);
 
 /* Used at v3dv_device */
 
 void
-v3dX(pack_sampler_state)(struct v3dv_sampler *sampler,
+v3dX(pack_sampler_state)(const struct v3dv_device *device,
+                         struct v3dv_sampler *sampler,
                          const VkSamplerCreateInfo *pCreateInfo,
                          const VkSamplerCustomBorderColorCreateInfoEXT *bc_info);
 
@@ -143,9 +153,11 @@ void
 v3dX(framebuffer_compute_internal_bpp_msaa)(const struct v3dv_framebuffer *framebuffer,
                                             const struct v3dv_cmd_buffer_attachment_state *attachments,
                                             const struct v3dv_subpass *subpass,
-                                            uint8_t *max_bpp, bool *msaa);
+                                            uint8_t *max_internal_bpp,
+                                            uint8_t *total_color_bpp,
+                                            bool *msaa);
 
-#ifdef DEBUG
+#if MESA_DEBUG
 void
 v3dX(device_check_prepacked_sizes)(void);
 #endif
@@ -154,19 +166,11 @@ v3dX(device_check_prepacked_sizes)(void);
 const struct v3dv_format *
 v3dX(get_format)(VkFormat);
 
-void
-v3dX(get_internal_type_bpp_for_output_format)(uint32_t format,
-                                              uint32_t *type,
-                                              uint32_t *bpp);
-
 bool
 v3dX(format_supports_tlb_resolve)(const struct v3dv_format *format);
 
 bool
 v3dX(format_supports_blending)(const struct v3dv_format *format);
-
-bool
-v3dX(tfu_supports_tex_format)(uint32_t tex_format);
 
 /* Used at v3dv_image */
 
@@ -183,9 +187,6 @@ v3dX(pack_texture_shader_state_from_buffer_view)(struct v3dv_device *device,
 uint32_t
 v3dX(zs_buffer_from_aspect_bits)(VkImageAspectFlags aspects);
 
-uint8_t
-v3dX(get_internal_depth_type)(VkFormat format);
-
 struct v3dv_meta_framebuffer;
 
 void
@@ -201,26 +202,6 @@ v3dX(meta_emit_resolve_image_rcl)(struct v3dv_job *job,
                                   struct v3dv_image *src,
                                   struct v3dv_meta_framebuffer *framebuffer,
                                   const VkImageResolve2 *region);
-
-void
-v3dX(meta_emit_copy_buffer)(struct v3dv_job *job,
-                            struct v3dv_bo *dst,
-                            struct v3dv_bo *src,
-                            uint32_t dst_offset,
-                            uint32_t src_offset,
-                            struct v3dv_meta_framebuffer *framebuffer,
-                            uint32_t format,
-                            uint32_t item_size);
-
-void
-v3dX(meta_emit_copy_buffer_rcl)(struct v3dv_job *job,
-                                struct v3dv_bo *dst,
-                                struct v3dv_bo *src,
-                                uint32_t dst_offset,
-                                uint32_t src_offset,
-                                struct v3dv_meta_framebuffer *framebuffer,
-                                uint32_t format,
-                                uint32_t item_size);
 
 void
 v3dX(meta_emit_copy_image_rcl)(struct v3dv_job *job,
@@ -243,7 +224,7 @@ v3dX(meta_emit_tfu_job)(struct v3dv_cmd_buffer *cmd_buffer,
                         uint32_t src_cpp,
                         uint32_t width,
                         uint32_t height,
-                        const struct v3dv_format *format);
+                        const struct v3dv_format_plane *format_plane);
 
 void
 v3dX(meta_emit_clear_image_rcl)(struct v3dv_job *job,
@@ -299,25 +280,33 @@ v3dX(meta_framebuffer_init)(struct v3dv_meta_framebuffer *fb,
 /* Used at v3dv_pipeline */
 void
 v3dX(pipeline_pack_state)(struct v3dv_pipeline *pipeline,
-                          const VkPipelineColorBlendStateCreateInfo *cb_info,
-                          const VkPipelineDepthStencilStateCreateInfo *ds_info,
-                          const VkPipelineRasterizationStateCreateInfo *rs_info,
-                          const VkPipelineRasterizationProvokingVertexStateCreateInfoEXT *pv_info,
-                          const VkPipelineRasterizationLineStateCreateInfoEXT *ls_info,
-                          const VkPipelineMultisampleStateCreateInfo *ms_info);
+                          const struct vk_graphics_pipeline_state *state);
 void
 v3dX(pipeline_pack_compile_state)(struct v3dv_pipeline *pipeline,
                                   const VkPipelineVertexInputStateCreateInfo *vi_info,
                                   const VkPipelineVertexInputDivisorStateCreateInfoEXT *vd_info);
-/* Used at v3dv_queue */
-void
-v3dX(job_emit_noop)(struct v3dv_job *job);
+
+bool
+v3dX(pipeline_needs_default_attribute_values)(struct v3dv_pipeline *pipeline);
+
+struct v3dv_bo *
+v3dX(create_default_attribute_values)(struct v3dv_device *device,
+                                      struct v3dv_pipeline *pipeline);
 
 /* Used at v3dv_descriptor_set, and other descriptor set utils */
 uint32_t v3dX(descriptor_bo_size)(VkDescriptorType type);
 
 uint32_t v3dX(max_descriptor_bo_size)(void);
 
-uint32_t v3dX(combined_image_sampler_texture_state_offset)(void);
+uint32_t v3dX(combined_image_sampler_texture_state_offset)(uint8_t plane);
 
-uint32_t v3dX(combined_image_sampler_sampler_state_offset)(void);
+uint32_t v3dX(combined_image_sampler_sampler_state_offset)(uint8_t plane);
+
+void v3dX(pack_null_texture_state)(struct v3dv_device *device, void *map);
+
+/* General utils */
+
+void
+v3dX(viewport_compute_xform)(const VkViewport *viewport,
+                             float scale[3],
+                             float translate[3]);

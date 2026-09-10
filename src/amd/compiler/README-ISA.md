@@ -56,6 +56,13 @@ The correct description of `v_alignbyte_b32` is probably the following:
 D.u = ({S0, S1} >> (8 * S2.u[1:0])) & 0xffffffff
 ```
 
+## `v_cvt_pk_u8_f32`
+
+All versions of the ISA document fail to mention two things:
+- the conversion saturates instead of truncating like the `& 255` implies
+- the conversion uses the single precision rounding mode instead of always rounding
+  towards zero like every other floating point to integer conversion
+
 ## SMEM stores
 
 The Vega ISA references doesn't say this (or doesn't make it clear), but
@@ -112,6 +119,18 @@ SGPR_NULL.
 Some instructions have a `_LEGACY` variant which implements "DX9 rules", in which
 the zero "wins" in multiplications, ie. `0.0*x` is always `0.0`. The VEGA ISA
 mentions `V_MAC_LEGACY_F32` but this instruction is not really there on VEGA.
+
+## LDS size and allocation granule
+
+GFX7-8 ISA manuals are mistaken about the available LDS size.
+
+* GFX7+ workgroups can use 64KB LDS.
+  There is 64KB LDS per CU.
+* GFX6 workgroups can use 32KB LDS.
+  There is 64KB LDS per CU, but a single workgroup can only use half of it.
+
+ Regarding the LDS allocation granule, Mesa has the correct details and
+ the ISA manuals are mistaken.
 
 ## `m0` with LDS instructions on Vega and newer
 
@@ -177,6 +196,36 @@ On GFX9, the A16 field enables both 16 bit addresses and derivatives.
 Since GFX10+ these are fully independent of each other, A16 controls 16 bit addresses
 and G16 opcodes 16 bit derivatives. A16 without G16 uses 32 bit derivatives.
 
+## POPS collision wave ID argument (GFX9-10.3)
+
+The 2020 RDNA and RDNA 2 ISA references contain incorrect offsets and widths of
+the fields of the "POPS collision wave ID" SGPR argument.
+
+According to the code generated for Rasterizer Ordered View usage in Direct3D,
+the correct layout is:
+
+* [31]: Whether overlap has occurred.
+* [29:28] (GFX10+) / [28] (GFX9): ID of the packer the wave should be associated
+  with.
+* [25:16]: Newest overlapped wave ID.
+* [9:0]: Current wave ID.
+
+## RDNA3 `v_pk_fmac_f16_dpp`
+
+"Table 30. Which instructions support DPP" in the RDNA3 ISA documentation has no exception for
+VOP2 `v_pk_fmac_f16`. But like all other packed math opcodes, DPP does not function in practice.
+RDNA1 and RDNA2 support `v_pk_fmac_f16_dpp`.
+
+## DPP with integer `subrev` and shifts
+
+No documentation mentions this, but DPP is seemingly applied to src1 instead of src0 for
+integer reverse subtract and shift opcodes.
+
+## ds_swizzle_b32 rotate/fft modes
+
+These are first mentioned in the GFX9 (Vega) ISA doc, information from the LLVM bug tracker
+and testing show they were already present on GFX8.
+
 # Hardware Bugs
 
 ## SMEM corrupts VCCZ on SI/CI
@@ -193,6 +242,11 @@ Currently, we don't do this.
 [See this LLVM source.](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/Utils/AMDGPUBaseInfo.cpp#L1917-L1922)
 
 This leads to wrong bounds checking, using a VGPR offset fixes it.
+
+## unused VMEM/DS destination lanes can't be used without waiting
+
+On GFX11, we can't safely read/write unused lanes of VMEM/DS destination
+VGPRs without waiting for the load to finish.
 
 ## GCN / GFX6 hazards
 
@@ -237,8 +291,8 @@ is located at this offset.
 
 ### InstFwdPrefetchBug
 
-According to LLVM, the `s_inst_prefetch` instruction can cause a hang.
-There are no further details.
+According to LLVM, the `s_inst_prefetch` instruction can cause a hang on GFX10.
+Seems to be resolved on GFX10.3+. There are no further details.
 
 ### LdsMisalignedBug
 
@@ -289,6 +343,17 @@ Only `s_waitcnt_vscnt null, 0`. Needed even if the first instruction is a load.
 NSA MIMG instructions should be limited to 3 dwords before GFX10.3 to avoid
 stability issues: https://reviews.llvm.org/D103348
 
+## RDNA2 / GFX10.3 hazards
+
+### SALU EXEC write followed by NSA MIMG instruction
+
+Triggered-by:
+Potential stability issues can occur if an SALU instruction changes exec from 0
+to non-zero immediately before an NSA MIMG instruction with 4+ dwords.
+
+Mitigated-by: Any instruction, including `s_nop`.
+
+
 ## RDNA3 / GFX11 hazards
 
 ### VcmpxPermlaneHazard
@@ -315,7 +380,7 @@ Waiting for the VMEM/DS instruction to finish, a VALU or export instruction, or
 ### VALUTransUseHazard
 
 Triggered by:
-A VALU instrction reading a VGPR written by a transcendental VALU instruction without 6+ VALU or 2+
+A VALU instruction reading a VGPR written by a transcendental VALU instruction without 6+ VALU or 2+
 transcendental instructions in-between.
 
 Mitigated by:
@@ -334,7 +399,31 @@ A va_vdst=0 wait: `s_waitcnt_deptr 0x0fff`
 ### VALUMaskWriteHazard
 
 Triggered by:
-SALU writing then reading a SGPR that was previously used as a lane mask for a VALU.
+SALU or VALU writing then SALU or VALU reading a SGPR that was previously used as a lane mask for a
+VALU when using wave64.
 
 Mitigated by:
-A VALU instruction reading a SGPR or with literal, or a sa_sdst=0 wait: `s_waitcnt_depctr 0xfffe`
+A VALU instruction reading a non-exec SGPR before the SGPR write, or a wait after the
+write: `s_waitcnt_depctr 0xfffe` for SALU, `s_waitcnt_depctr 0xf1ff` for non-VCC VALU and
+`s_waitcnt_depctr 0xfffd` for VCC VALU.
+
+## RDNA4 / GFX12 hazards
+
+### VcmpxPermlaneHazard
+
+Same as GFX10
+
+### LdsDirectVALUHazard
+### LdsDirectVMEMHazard
+
+Same as GFX11
+
+### VALUReadSGPRHazard
+
+Triggered by:
+VALU reads an SGPR, then written by SALU cannot safely be read by SALU or VALU, or
+VALU reads an SGPR, then written by VALU cannot safely be read by VALU.
+
+Mitigated by:
+After the SALU write a sa_sdst=0 wait. After the VALU write a va_sdst=0 / va_vcc=0 wait.
+It does not reset the first step.

@@ -1,24 +1,6 @@
 /*
  * Copyright © 2017 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 #ifndef IRIS_SCREEN_H
 #define IRIS_SCREEN_H
@@ -29,6 +11,7 @@
 #include "util/slab.h"
 #include "util/u_screen.h"
 #include "intel/dev/intel_device_info.h"
+#include "intel/dev/virtio/intel_virtio.h"
 #include "intel/isl/isl.h"
 #include "iris_bufmgr.h"
 #include "iris_binder.h"
@@ -36,7 +19,7 @@
 #include "iris_resource.h"
 
 struct intel_l3_config;
-struct brw_vue_map;
+struct intel_vue_map;
 struct iris_vs_prog_key;
 struct iris_tcs_prog_key;
 struct iris_tes_prog_key;
@@ -44,6 +27,9 @@ struct iris_gs_prog_key;
 struct iris_fs_prog_key;
 struct iris_cs_prog_key;
 enum iris_program_cache_id;
+
+typedef struct nir_builder nir_builder;
+typedef struct nir_shader nir_shader;
 
 struct u_trace;
 
@@ -63,12 +49,21 @@ struct iris_vtable {
    void (*destroy_state)(struct iris_context *ice);
    void (*init_render_context)(struct iris_batch *batch);
    void (*init_compute_context)(struct iris_batch *batch);
+   void (*init_copy_context)(struct iris_batch *batch);
    void (*upload_render_state)(struct iris_context *ice,
                                struct iris_batch *batch,
                                const struct pipe_draw_info *draw,
                                unsigned drawid_offset,
                                const struct pipe_draw_indirect_info *indirect,
                                const struct pipe_draw_start_count_bias *sc);
+   void (*upload_indirect_render_state)(struct iris_context *ice,
+                                        const struct pipe_draw_info *draw,
+                                        const struct pipe_draw_indirect_info *indirect,
+                                        const struct pipe_draw_start_count_bias *sc);
+   void (*upload_indirect_shader_render_state)(struct iris_context *ice,
+                                               const struct pipe_draw_info *draw,
+                                               const struct pipe_draw_indirect_info *indirect,
+                                               const struct pipe_draw_start_count_bias *sc);
    void (*update_binder_address)(struct iris_batch *batch,
                                  struct iris_binder *binder);
    void (*upload_compute_state)(struct iris_context *ice,
@@ -114,25 +109,30 @@ struct iris_vtable {
                                      uint32_t offset_in_bytes,
                                      uint32_t report_id);
 
+   void (*rewrite_compute_walker_pc)(struct iris_batch *batch,
+                                     uint32_t *walker,
+                                     struct iris_bo *bo,
+                                     uint32_t offset);
+
    unsigned (*derived_program_state_size)(enum iris_program_cache_id id);
-   void (*store_derived_program_state)(const struct intel_device_info *devinfo,
+   void (*store_derived_program_state)(const struct iris_screen *screen,
                                        enum iris_program_cache_id cache_id,
                                        struct iris_compiled_shader *shader);
    uint32_t *(*create_so_decl_list)(const struct pipe_stream_output_info *sol,
-                                    const struct brw_vue_map *vue_map);
+                                    const struct intel_vue_map *vue_map);
    void (*populate_vs_key)(const struct iris_context *ice,
                            const struct shader_info *info,
-                           gl_shader_stage last_stage,
+                           mesa_shader_stage last_stage,
                            struct iris_vs_prog_key *key);
    void (*populate_tcs_key)(const struct iris_context *ice,
                             struct iris_tcs_prog_key *key);
    void (*populate_tes_key)(const struct iris_context *ice,
                             const struct shader_info *info,
-                            gl_shader_stage last_stage,
+                            mesa_shader_stage last_stage,
                             struct iris_tes_prog_key *key);
    void (*populate_gs_key)(const struct iris_context *ice,
                            const struct shader_info *info,
-                           gl_shader_stage last_stage,
+                           mesa_shader_stage last_stage,
                            struct iris_gs_prog_key *key);
    void (*populate_fs_key)(const struct iris_context *ice,
                            const struct shader_info *info,
@@ -141,6 +141,8 @@ struct iris_vtable {
                            struct iris_cs_prog_key *key);
    void (*lost_genx_state)(struct iris_context *ice, struct iris_batch *batch);
    void (*disable_rhwo_optimization)(struct iris_batch *batch, bool disable);
+
+   unsigned (*call_generation_shader)(struct iris_screen *screen, nir_builder *b);
 };
 
 struct iris_address {
@@ -183,6 +185,15 @@ struct iris_screen {
       bool sync_compile;
       bool limit_trig_input_range;
       float lower_depth_range_rate;
+      bool intel_enable_wa_14018912822;
+      bool intel_enable_wa_14024015672_msaa;
+      bool enable_tbimr;
+      bool enable_vf_distribution;
+      bool enable_te_distribution;
+      unsigned generated_indirect_threshold;
+      bool disable_threaded_context;
+      bool force_sampler_prefetch;
+      bool force_compute_surface_prefetch;
    } driconf;
 
    /** Does the kernel support various features (KERNEL_HAS_* bitfield)? */
@@ -202,7 +213,10 @@ struct iris_screen {
    const struct intel_device_info *devinfo;
    struct isl_device isl_dev;
    struct iris_bufmgr *bufmgr;
-   struct brw_compiler *compiler;
+   struct brw_compiler *brw;
+#ifdef INTEL_USE_ELK
+   struct elk_compiler *elk;
+#endif
    struct intel_perf_config *perf_cfg;
 
    const struct intel_l3_config *l3_config_3d;
@@ -227,6 +241,8 @@ struct iris_screen {
 
    /** Every screen on a bufmgr has an unique ID assigned by the bufmgr. */
    int id;
+
+   struct iris_bo *breakpoint_bo;
 };
 
 struct pipe_screen *

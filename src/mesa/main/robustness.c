@@ -27,8 +27,9 @@
 #include "get.h"
 #include "mtypes.h"
 #include "macros.h"
-#include "main/dispatch.h" /* for _gloffset_COUNT */
+#include "dispatch.h" /* for _gloffset_COUNT */
 #include "api_exec_decl.h"
+#include "glthread_marshal.h"
 
 static void GLAPIENTRY
 _context_lost_GetSynciv(GLsync sync, GLenum pname, GLsizei bufSize,
@@ -66,14 +67,14 @@ context_lost_nop_handler(void)
 void
 _mesa_set_context_lost_dispatch(struct gl_context *ctx)
 {
-   if (ctx->ContextLost == NULL) {
-      int numEntries = MAX2(_glapi_get_dispatch_table_size(), _gloffset_COUNT);
+   if (ctx->Dispatch.ContextLost == NULL) {
+      int numEntries = MAX2(_mesa_glapi_get_dispatch_table_size(), _gloffset_COUNT);
 
-      ctx->ContextLost = malloc(numEntries * sizeof(_glapi_proc));
-      if (!ctx->ContextLost)
+      ctx->Dispatch.ContextLost = malloc(numEntries * sizeof(_glapi_proc));
+      if (!ctx->Dispatch.ContextLost)
          return;
 
-      _glapi_proc *entry = (_glapi_proc *) ctx->ContextLost;
+      _glapi_proc *entry = (_glapi_proc *) ctx->Dispatch.ContextLost;
       unsigned i;
       for (i = 0; i < numEntries; i++)
          entry[i] = (_glapi_proc) context_lost_nop_handler;
@@ -96,14 +97,14 @@ _mesa_set_context_lost_dispatch(struct gl_context *ctx)
        *        + GetQueryObjectuiv with <pname> QUERY_RESULT_AVAILABLE
        *          ignores the other parameters and returns TRUE in <params>."
        */
-      SET_GetError(ctx->ContextLost, _mesa_GetError);
-      SET_GetGraphicsResetStatusARB(ctx->ContextLost, _mesa_GetGraphicsResetStatusARB);
-      SET_GetSynciv(ctx->ContextLost, _context_lost_GetSynciv);
-      SET_GetQueryObjectuiv(ctx->ContextLost, _context_lost_GetQueryObjectuiv);
+      SET_GetError(ctx->Dispatch.ContextLost, _mesa_GetError);
+      SET_GetGraphicsResetStatusARB(ctx->Dispatch.ContextLost, _mesa_GetGraphicsResetStatusARB);
+      SET_GetSynciv(ctx->Dispatch.ContextLost, _context_lost_GetSynciv);
+      SET_GetQueryObjectuiv(ctx->Dispatch.ContextLost, _context_lost_GetQueryObjectuiv);
    }
 
-   ctx->CurrentServerDispatch = ctx->ContextLost;
-   _glapi_set_dispatch(ctx->CurrentServerDispatch);
+   ctx->Dispatch.Current = ctx->Dispatch.ContextLost;
+   _mesa_set_dispatch(ctx, ctx->Dispatch.Current);
 }
 
 /**
@@ -123,45 +124,20 @@ _mesa_GetGraphicsResetStatusARB( void )
     *     events, and GetGraphicsResetStatusARB will always return NO_ERROR."
     */
    if (ctx->Const.ResetStrategy == GL_NO_RESET_NOTIFICATION_ARB) {
-      if (MESA_VERBOSE & VERBOSE_API)
-         _mesa_debug(ctx,
-                     "glGetGraphicsResetStatusARB always returns GL_NO_ERROR "
-                     "because reset notifictation was not requested at context "
-                     "creation.\n");
+      _mesa_perf_debug(ctx, MESA_DEBUG_SEVERITY_LOW,
+                       "glGetGraphicsResetStatusARB always returns GL_NO_ERROR "
+                       "because reset notifictation was not requested at context "
+                       "creation.\n");
 
       return GL_NO_ERROR;
    }
 
-   if (ctx->Driver.GetGraphicsResetStatus) {
-      /* Query the reset status of this context from the driver core.
-       */
+   /* Query the reset status of this context from the driver core. */
+   if (ctx->Driver.GetGraphicsResetStatus)
       status = ctx->Driver.GetGraphicsResetStatus(ctx);
-
-      simple_mtx_lock(&ctx->Shared->Mutex);
-
-      /* If this context has not been affected by a GPU reset, check to see if
-       * some other context in the share group has been affected by a reset.
-       * If another context saw a reset but this context did not, assume that
-       * this context was not guilty.
-       */
-      if (status != GL_NO_ERROR) {
-         ctx->Shared->ShareGroupReset = true;
-         ctx->Shared->DisjointOperation = true;
-      } else if (ctx->Shared->ShareGroupReset && !ctx->ShareGroupReset) {
-         status = GL_INNOCENT_CONTEXT_RESET_ARB;
-      }
-
-      ctx->ShareGroupReset = ctx->Shared->ShareGroupReset;
-      simple_mtx_unlock(&ctx->Shared->Mutex);
-   }
 
    if (status != GL_NO_ERROR)
       _mesa_set_context_lost_dispatch(ctx);
-
-   if (!ctx->Driver.GetGraphicsResetStatus && (MESA_VERBOSE & VERBOSE_API))
-      _mesa_debug(ctx,
-                  "glGetGraphicsResetStatusARB always returns GL_NO_ERROR "
-                  "because the driver doesn't track reset status.\n");
 
    return status;
 }

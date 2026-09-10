@@ -46,9 +46,6 @@ emit_vertex_bo(struct anv_cmd_buffer *cmd_buffer,
          .MOCS = anv_mocs(cmd_buffer->device, addr.bo,
                           ISL_SURF_USAGE_VERTEX_BUFFER_BIT),
          .NullVertexBuffer = size == 0,
-#if GFX_VER >= 12
-         .L3BypassDisable = true,
-#endif
          .BufferStartingAddress = addr,
          .BufferSize = size
       });
@@ -63,7 +60,9 @@ static void
 emit_base_vertex_instance_bo(struct anv_cmd_buffer *cmd_buffer,
                              struct anv_address addr)
 {
-   emit_vertex_bo(cmd_buffer, addr, addr.bo ? 8 : 0, ANV_SVGS_VB_INDEX);
+   emit_vertex_bo(cmd_buffer, addr,
+                  anv_address_is_null(addr) ? 0 : 8,
+                  ANV_SVGS_VB_INDEX);
 }
 
 static void
@@ -76,14 +75,13 @@ emit_base_vertex_instance(struct anv_cmd_buffer *cmd_buffer,
    }
 
    struct anv_state id_state =
-      anv_cmd_buffer_alloc_dynamic_state(cmd_buffer, 8, 4);
+      anv_cmd_buffer_alloc_temporary_state(cmd_buffer, 8, 4);
 
    ((uint32_t *)id_state.map)[0] = base_vertex;
    ((uint32_t *)id_state.map)[1] = base_instance;
 
    struct anv_address addr =
-      anv_state_pool_state_address(&cmd_buffer->device->dynamic_state_pool,
-                                    id_state);
+      anv_cmd_buffer_temporary_state_address(cmd_buffer, id_state);
 
    emit_base_vertex_instance_bo(cmd_buffer, addr);
 }
@@ -92,13 +90,12 @@ static void
 emit_draw_index(struct anv_cmd_buffer *cmd_buffer, uint32_t draw_index)
 {
    struct anv_state state =
-      anv_cmd_buffer_alloc_dynamic_state(cmd_buffer, 4, 4);
+      anv_cmd_buffer_alloc_temporary_state(cmd_buffer, 4, 4);
 
    ((uint32_t *)state.map)[0] = draw_index;
 
    struct anv_address addr =
-      anv_state_pool_state_address(&cmd_buffer->device->dynamic_state_pool,
-                                   state);
+      anv_cmd_buffer_temporary_state_address(cmd_buffer, state);
 
    emit_vertex_bo(cmd_buffer, addr, 4, ANV_DRAWID_VB_INDEX);
 }
@@ -109,10 +106,12 @@ update_dirty_vbs_for_gfx8_vb_flush(struct anv_cmd_buffer *cmd_buffer,
                                    uint32_t access_type)
 {
 #if GFX_VER == 9
-   struct anv_graphics_pipeline *pipeline = cmd_buffer->state.gfx.pipeline;
-   const struct brw_vs_prog_data *vs_prog_data = get_vs_prog_data(pipeline);
+   const struct vk_dynamic_graphics_state *dyn =
+      &cmd_buffer->vk.dynamic_graphics_state;
+   const struct anv_cmd_graphics_state *gfx = &cmd_buffer->state.gfx;
+   const struct brw_vs_prog_data *vs_prog_data = get_gfx_vs_prog_data(gfx);
 
-   uint64_t vb_used = pipeline->vb_used;
+   uint64_t vb_used = dyn->vi->bindings_valid;
    if (vs_prog_data->uses_firstvertex ||
        vs_prog_data->uses_baseinstance)
       vb_used |= 1ull << ANV_SVGS_VB_INDEX;
@@ -120,7 +119,7 @@ update_dirty_vbs_for_gfx8_vb_flush(struct anv_cmd_buffer *cmd_buffer,
       vb_used |= 1ull << ANV_DRAWID_VB_INDEX;
 
    genX(cmd_buffer_update_dirty_vbs_for_gfx8_vb_flush)(cmd_buffer,
-                                                       access_type == RANDOM,
+                                                       access_type,
                                                        vb_used);
 #endif
 }

@@ -1,24 +1,6 @@
 /*
  * Copyright (C) 2020 Collabora Ltd.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include "util/u_vbuf.h"
@@ -30,8 +12,8 @@ panfrost_analyze_sysvals(struct panfrost_compiled_shader *ss)
    unsigned dirty = 0;
    unsigned dirty_shader = PAN_DIRTY_STAGE_SHADER | PAN_DIRTY_STAGE_CONST;
 
-   for (unsigned i = 0; i < ss->info.sysvals.sysval_count; ++i) {
-      switch (PAN_SYSVAL_TYPE(ss->info.sysvals.sysvals[i])) {
+   for (unsigned i = 0; i < ss->sysvals.sysval_count; ++i) {
+      switch (PAN_SYSVAL_TYPE(ss->sysvals.sysvals[i])) {
       case PAN_SYSVAL_VIEWPORT_SCALE:
       case PAN_SYSVAL_VIEWPORT_OFFSET:
          dirty |= PAN_DIRTY_VIEWPORT;
@@ -54,6 +36,7 @@ panfrost_analyze_sysvals(struct panfrost_compiled_shader *ss)
          break;
 
       case PAN_SYSVAL_IMAGE_SIZE:
+      case PAN_SYSVAL_IMAGE_SAMPLES:
          dirty_shader |= PAN_DIRTY_STAGE_IMAGE;
          break;
 
@@ -62,6 +45,7 @@ panfrost_analyze_sysvals(struct panfrost_compiled_shader *ss)
       case PAN_SYSVAL_WORK_DIM:
       case PAN_SYSVAL_VERTEX_INSTANCE_OFFSETS:
       case PAN_SYSVAL_NUM_VERTICES:
+      case PAN_SYSVAL_PRINTF_BUFFER:
          dirty |= PAN_DIRTY_PARAMS;
          break;
 
@@ -69,13 +53,18 @@ panfrost_analyze_sysvals(struct panfrost_compiled_shader *ss)
          dirty |= PAN_DIRTY_DRAWID;
          break;
 
+      case PAN_SYSVAL_BLEND_CONSTANTS:
+         dirty |= PAN_DIRTY_BLEND;
+         break;
+
       case PAN_SYSVAL_SAMPLE_POSITIONS:
       case PAN_SYSVAL_MULTISAMPLED:
       case PAN_SYSVAL_RT_CONVERSION:
          /* Nothing beyond the batch itself */
          break;
+
       default:
-         unreachable("Invalid sysval");
+         UNREACHABLE("Invalid sysval");
       }
    }
 
@@ -88,7 +77,7 @@ panfrost_analyze_sysvals(struct panfrost_compiled_shader *ss)
  * good for the duration of the draw (transient), could last longer. Bounds are
  * not calculated.
  */
-mali_ptr
+uint64_t
 panfrost_get_index_buffer(struct panfrost_batch *batch,
                           const struct pipe_draw_info *info,
                           const struct pipe_draw_start_count_bias *draw)
@@ -98,12 +87,12 @@ panfrost_get_index_buffer(struct panfrost_batch *batch,
 
    if (!info->has_user_indices) {
       /* Only resources can be directly mapped */
-      panfrost_batch_read_rsrc(batch, rsrc, PIPE_SHADER_VERTEX);
-      return rsrc->image.data.bo->ptr.gpu + offset;
+      panfrost_batch_read_rsrc(batch, rsrc, MESA_SHADER_VERTEX);
+      return rsrc->plane.base + offset;
    } else {
       /* Otherwise, we need to upload to transient memory */
       const uint8_t *ibuf8 = (const uint8_t *)info->index.user;
-      struct panfrost_ptr T = pan_pool_alloc_aligned(
+      struct pan_ptr T = pan_pool_alloc_aligned(
          &batch->pool.base, draw->count * info->index_size, info->index_size);
 
       memcpy(T.cpu, ibuf8 + offset, draw->count * info->index_size);
@@ -117,7 +106,7 @@ panfrost_get_index_buffer(struct panfrost_batch *batch,
  * these operations together because there are natural optimizations which
  * require them to be together. */
 
-mali_ptr
+uint64_t
 panfrost_get_index_buffer_bounded(struct panfrost_batch *batch,
                                   const struct pipe_draw_info *info,
                                   const struct pipe_draw_start_count_bias *draw,
@@ -127,14 +116,21 @@ panfrost_get_index_buffer_bounded(struct panfrost_batch *batch,
    struct panfrost_context *ctx = batch->ctx;
    bool needs_indices = true;
 
+   /* Note: if index_bounds_valid is set but the bounds are wrong, page faults
+    * (at least on Mali-G52) can be triggered an underflow reading varyings.
+    * Providing invalid index bounds in GLES is implementation-defined
+    * behaviour. This should be fine for now but this needs to be revisited when
+    * wiring up robustness later.
+    */
    if (info->index_bounds_valid) {
       *min_index = info->min_index;
       *max_index = info->max_index;
       needs_indices = false;
    } else if (!info->has_user_indices) {
       /* Check the cache */
-      needs_indices = !panfrost_minmax_cache_get(
-         rsrc->index_cache, draw->start, draw->count, min_index, max_index);
+      needs_indices =
+         !pan_minmax_cache_get(rsrc->index_cache, info->index_size, draw->start,
+                               draw->count, min_index, max_index);
    }
 
    if (needs_indices) {
@@ -142,8 +138,8 @@ panfrost_get_index_buffer_bounded(struct panfrost_batch *batch,
       u_vbuf_get_minmax_index(&ctx->base, info, draw, min_index, max_index);
 
       if (!info->has_user_indices)
-         panfrost_minmax_cache_add(rsrc->index_cache, draw->start, draw->count,
-                                   *min_index, *max_index);
+         pan_minmax_cache_add(rsrc->index_cache, info->index_size, draw->start,
+                              draw->count, *min_index, *max_index);
    }
 
    return panfrost_get_index_buffer(batch, info, draw);
@@ -176,6 +172,42 @@ pan_assign_vertex_buffer(struct pan_vertex_buffer *buffers, unsigned *nr_bufs,
    return idx;
 }
 
+struct pan_ptr
+panfrost_emit_fullscreen_vertex_array(struct panfrost_batch *batch,
+                                      enum blitter_attrib_type type,
+                                      const struct blitter_attrib *attrib)
+{
+   struct pan_ptr array = { .cpu = NULL, .gpu = 0 };
+   struct panfrost_run_fullscreen_attrib *texcoords;
+
+   if (type != UTIL_BLITTER_ATTRIB_TEXCOORD_XY &&
+       type != UTIL_BLITTER_ATTRIB_TEXCOORD_XYZW)
+      return array;
+
+   array = pan_pool_alloc_aligned(&batch->pool.base,
+                                  PAN_RUN_FULLSCREEN_ARRAY_SIZE,
+                                  PAN_RUN_FULLSCREEN_ARRAY_ALIGN);
+   texcoords = (struct panfrost_run_fullscreen_attrib *)
+      ((uint8_t *)array.cpu + (PAN_RUN_FULLSCREEN_NUM_VERTICES *
+                               PAN_RUN_FULLSCREEN_ATTRIB_STRIDE));
+
+   /* The fullscreen quad is defined by 3 vertices. */
+   texcoords[0].x = attrib->texcoord.x1;
+   texcoords[0].y = attrib->texcoord.y1;
+   texcoords[0].z = attrib->texcoord.z;
+   texcoords[0].w = attrib->texcoord.w;
+   texcoords[1].x = attrib->texcoord.x2;
+   texcoords[1].y = attrib->texcoord.y1;
+   texcoords[1].z = attrib->texcoord.z;
+   texcoords[1].w = attrib->texcoord.w;
+   texcoords[2].x = attrib->texcoord.x1;
+   texcoords[2].y = attrib->texcoord.y2;
+   texcoords[2].z = attrib->texcoord.z;
+   texcoords[2].w = attrib->texcoord.w;
+
+   return array;
+}
+
 /*
  * Helper to add a PIPE_CLEAR_* to batch->draws and batch->resolve together,
  * meaning that we draw to a given target. Adding to only one mask does not
@@ -201,7 +233,7 @@ panfrost_set_batch_masks_blend(struct panfrost_batch *batch)
    struct panfrost_blend_state *blend = ctx->blend;
 
    for (unsigned i = 0; i < batch->key.nr_cbufs; ++i) {
-      if (blend->info[i].enabled && batch->key.cbufs[i])
+      if (blend->info[i].enabled && batch->key.cbufs[i].texture)
          panfrost_draw_target(batch, PIPE_CLEAR_COLOR0 << i);
    }
 }
@@ -229,7 +261,7 @@ panfrost_set_batch_masks_zs(struct panfrost_batch *batch)
 
 void
 panfrost_track_image_access(struct panfrost_batch *batch,
-                            enum pipe_shader_type stage,
+                            mesa_shader_stage stage,
                             struct pipe_image_view *image)
 {
    struct panfrost_resource *rsrc = pan_resource(image->resource);

@@ -15,69 +15,50 @@
 
 #include "util/sparse_array.h"
 
+#include "vn_descriptor.h"
 #include "vn_wsi.h"
-
-struct vn_physical_device_features {
-   VkPhysicalDeviceFeatures vulkan_1_0;
-   VkPhysicalDeviceVulkan11Features vulkan_1_1;
-   VkPhysicalDeviceVulkan12Features vulkan_1_2;
-   VkPhysicalDeviceVulkan13Features vulkan_1_3;
-
-   /* Vulkan 1.3: The extensions for the below structs were promoted, but some
-    * struct members were omitted from VkPhysicalDeviceVulkan13Features.
-    */
-   VkPhysicalDevice4444FormatsFeaturesEXT _4444_formats;
-   VkPhysicalDeviceExtendedDynamicStateFeaturesEXT extended_dynamic_state;
-   VkPhysicalDeviceExtendedDynamicState2FeaturesEXT extended_dynamic_state_2;
-   VkPhysicalDeviceTexelBufferAlignmentFeaturesEXT texel_buffer_alignment;
-   VkPhysicalDeviceYcbcr2Plane444FormatsFeaturesEXT ycbcr_2plane_444_formats;
-
-   /* EXT */
-   VkPhysicalDeviceConditionalRenderingFeaturesEXT conditional_rendering;
-   VkPhysicalDeviceCustomBorderColorFeaturesEXT custom_border_color;
-   VkPhysicalDeviceDepthClipControlFeaturesEXT depth_clip_control;
-   VkPhysicalDeviceDepthClipEnableFeaturesEXT depth_clip_enable;
-   VkPhysicalDeviceImageViewMinLodFeaturesEXT image_view_min_lod;
-   VkPhysicalDeviceIndexTypeUint8FeaturesEXT index_type_uint8;
-   VkPhysicalDeviceLineRasterizationFeaturesEXT line_rasterization;
-   VkPhysicalDeviceMultiDrawFeaturesEXT multi_draw;
-   VkPhysicalDeviceMutableDescriptorTypeFeaturesEXT mutable_descriptor_type;
-   VkPhysicalDevicePrimitiveTopologyListRestartFeaturesEXT
-      primitive_topology_list_restart;
-   VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT
-      primitives_generated_query;
-   VkPhysicalDeviceProvokingVertexFeaturesEXT provoking_vertex;
-   VkPhysicalDeviceRobustness2FeaturesEXT robustness_2;
-   VkPhysicalDeviceTransformFeedbackFeaturesEXT transform_feedback;
-   VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT vertex_attribute_divisor;
-};
-
-struct vn_physical_device_properties {
-   VkPhysicalDeviceProperties vulkan_1_0;
-   VkPhysicalDeviceVulkan11Properties vulkan_1_1;
-   VkPhysicalDeviceVulkan12Properties vulkan_1_2;
-   VkPhysicalDeviceVulkan13Properties vulkan_1_3;
-
-   /* KHR */
-   VkPhysicalDevicePushDescriptorPropertiesKHR push_descriptor;
-
-   /* EXT */
-   VkPhysicalDeviceConservativeRasterizationPropertiesEXT
-      conservative_rasterization;
-   VkPhysicalDeviceCustomBorderColorPropertiesEXT custom_border_color;
-   VkPhysicalDeviceLineRasterizationPropertiesEXT line_rasterization;
-   VkPhysicalDeviceMultiDrawPropertiesEXT multi_draw;
-   VkPhysicalDevicePCIBusInfoPropertiesEXT pci_bus_info;
-   VkPhysicalDeviceProvokingVertexPropertiesEXT provoking_vertex;
-   VkPhysicalDeviceRobustness2PropertiesEXT robustness_2;
-   VkPhysicalDeviceTransformFeedbackPropertiesEXT transform_feedback;
-   VkPhysicalDeviceVertexAttributeDivisorPropertiesEXT
-      vertex_attribute_divisor;
-};
 
 struct vn_format_properties_entry {
    atomic_bool valid;
-   VkFormatProperties properties;
+   VkFormatProperties props;
+   VkFormatProperties3 props3;
+   VkBool32 srpq;
+};
+
+struct vn_image_format_properties {
+   VkImageFormatProperties2 format;
+   VkResult cached_result;
+
+   VkExternalImageFormatProperties ext_image;
+   VkHostImageCopyDevicePerformanceQuery host_copy;
+   VkImageCompressionPropertiesEXT compression;
+   VkSamplerYcbcrConversionImageFormatProperties ycbcr_conversion;
+   VkFilterCubicImageViewImageFormatPropertiesEXT filter_cubic;
+};
+
+struct vn_image_format_cache_entry {
+   struct vn_image_format_properties properties;
+   uint8_t key[BLAKE3_KEY_LEN];
+   struct list_head head;
+};
+
+struct vn_image_format_properties_cache {
+   struct hash_table *ht;
+   struct list_head lru;
+   simple_mtx_t mutex;
+
+   struct {
+      uint32_t cache_hit_count;
+      uint32_t cache_miss_count;
+      uint32_t cache_skip_count;
+   } debug;
+};
+
+struct vn_layered_api_properties {
+   VkPhysicalDeviceLayeredApiPropertiesKHR api;
+   VkPhysicalDeviceLayeredApiVulkanPropertiesKHR vk;
+   VkPhysicalDeviceDriverProperties driver;
+   VkPhysicalDeviceIDProperties id;
 };
 
 struct vn_physical_device {
@@ -93,6 +74,9 @@ struct vn_physical_device {
     */
    uint32_t renderer_version;
 
+   /* For maintenance7 layered api properties. */
+   struct vn_layered_api_properties layered_properties;
+
    /* Between the driver and the app, base.base.supported_extensions is what
     * we advertise.
     *
@@ -102,22 +86,39 @@ struct vn_physical_device {
    struct vk_device_extension_table renderer_extensions;
    uint32_t *extension_spec_versions;
 
-   struct vn_physical_device_features features;
-   struct vn_physical_device_properties properties;
+   /* passthrough ray tracing support */
+   bool ray_tracing;
 
-   VkQueueFamilyProperties2 *queue_family_properties;
+   /* Venus feedback encounters cacheline overflush issue on Intel JSL, and
+    * has to workaround by further aligning up the feedback buffer alignment.
+    */
+   uint32_t wa_min_fb_align;
+
+   VkDriverId renderer_driver_id;
+   uint32_t renderer_driver_version;
+
+   /* Static storage so that host copy properties query can be done once. */
+   VkImageLayout copy_src_layouts[64];
+   VkImageLayout copy_dst_layouts[64];
+
+   VkQueueFamilyProperties2 *qfp;
+   VkQueueFamilyGlobalPriorityProperties *qfgpp;
+   VkQueueFamilyOwnershipTransferPropertiesKHR *qfotp;
+   VkQueueFamilyOptimalImageTransferGranularityPropertiesKHR *qfoitgp;
    uint32_t queue_family_count;
+   bool sparse_binding_disabled;
+   /* Track the queue family index to emulate a second queue. -1 means no
+    * emulation is needed. To be noted that the emulation is a workaround for
+    * Android 14+ UI framework and it does not handle wait-before-signal.
+    */
+   int emulate_second_queue;
 
-   VkPhysicalDeviceMemoryProperties2 memory_properties;
+   VkPhysicalDeviceMemoryProperties memory_properties;
 
    struct {
       VkExternalMemoryHandleTypeFlagBits renderer_handle_type;
       VkExternalMemoryHandleTypeFlags supported_handle_types;
    } external_memory;
-
-   /* syncFdFencing allows driver to query renderer sync_fd features */
-   VkExternalFenceFeatureFlags renderer_sync_fd_fence_features;
-   VkExternalSemaphoreFeatureFlags renderer_sync_fd_semaphore_features;
 
    VkExternalFenceHandleTypeFlags external_fence_handles;
    VkExternalSemaphoreHandleTypeFlags external_binary_semaphore_handles;
@@ -125,15 +126,36 @@ struct vn_physical_device {
 
    struct wsi_device wsi_device;
 
-   simple_mtx_t format_update_mutex;
+   simple_mtx_t mutex;
    struct util_sparse_array format_properties;
+
+   struct vn_image_format_properties_cache image_format_cache;
+
+   bool descriptor_sizes_initialized;
+   VkDeviceSize descriptor_sizes[VN_NUM_DESCRIPTOR_TYPES];
 };
 VK_DEFINE_HANDLE_CASTS(vn_physical_device,
-                       base.base.base,
+                       base.vk.base,
                        VkPhysicalDevice,
                        VK_OBJECT_TYPE_PHYSICAL_DEVICE)
 
 void
 vn_physical_device_fini(struct vn_physical_device *physical_dev);
+
+static inline bool
+vn_queue_family_can_feedback(struct vn_physical_device *physical_dev,
+                             uint32_t queue_family_index)
+{
+   /* Feedback requires transfer capability, so we must skip feedback cmd pool
+    * initialization on incompatible queue families. Meanwhile, rely on the
+    * pool_handle for all validity check needed.
+    */
+   assert(queue_family_index < physical_dev->queue_family_count);
+   const struct VkQueueFamilyProperties2 *props =
+      &physical_dev->qfp[queue_family_index];
+   const VkQueueFlags transfer_flags =
+      VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT;
+   return props->queueFamilyProperties.queueFlags & transfer_flags;
+}
 
 #endif /* VN_PHYSICAL_DEVICE_H */

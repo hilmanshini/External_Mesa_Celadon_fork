@@ -10,7 +10,7 @@
 
 #include "freedreno_pm4.h"
 
-#include "tu_drm.h"
+#include "tu_knl.h"
 
 /* For breadcrumbs we may open a network socket based on the envvar,
  * it's not something that should be enabled by default.
@@ -62,14 +62,26 @@ struct tu_cs_entry
 struct tu_cs_memory {
    uint32_t *map;
    uint64_t iova;
+   bool writeable;
 };
 
 struct tu_draw_state {
-   uint64_t iova : 48;
-   uint32_t size : 16;
+   uint64_t iova;
+   uint16_t size;
+   bool writeable;
+};
+
+struct tu_bo_array {
+   struct tu_bo **bos;
+   uint32_t bo_count;
+   uint32_t bo_capacity;
+   uint32_t *start;
 };
 
 #define TU_COND_EXEC_STACK_SIZE 4
+
+struct tu_pkt;
+struct tu_crb;
 
 struct tu_cs
 {
@@ -81,18 +93,21 @@ struct tu_cs
 
    struct tu_device *device;
    enum tu_cs_mode mode;
+   bool writeable;
    uint32_t next_bo_size;
+   VkResult status;
 
    struct tu_cs_entry *entries;
    uint32_t entry_count;
    uint32_t entry_capacity;
 
-   struct tu_bo **bos;
-   uint32_t bo_count;
-   uint32_t bo_capacity;
+   struct tu_bo_array read_only, read_write;
 
    /* Optional BO that this CS is sub-allocated from for TU_CS_MODE_SUB_STREAM */
    struct tu_bo *refcount_bo;
+
+   /* iova that this CS starts with in TU_CS_MODE_EXTERNAL */
+   uint64_t external_iova;
 
    /* state for cond_exec_start/cond_exec_end */
    uint32_t cond_stack_depth;
@@ -100,6 +115,10 @@ struct tu_cs
    uint32_t *cond_dwords[TU_COND_EXEC_STACK_SIZE];
 
    uint32_t breadcrumb_emit_after;
+
+   tu_pkt *pkt;
+
+   tu_crb crb(uint32_t nregs);
 };
 
 void
@@ -116,7 +135,8 @@ tu_cs_init(struct tu_cs *cs,
 
 void
 tu_cs_init_external(struct tu_cs *cs, struct tu_device *device,
-                    uint32_t *start, uint32_t *end);
+                    uint32_t *start, uint32_t *end, uint64_t iova,
+                    bool writeable);
 
 void
 tu_cs_init_suballoc(struct tu_cs *cs, struct tu_device *device,
@@ -131,8 +151,19 @@ tu_cs_begin(struct tu_cs *cs);
 void
 tu_cs_end(struct tu_cs *cs);
 
+void
+tu_cs_set_writeable(struct tu_cs *cs, bool writeable);
+
 VkResult
-tu_cs_begin_sub_stream(struct tu_cs *cs, uint32_t size, struct tu_cs *sub_cs);
+tu_cs_begin_sub_stream_aligned(struct tu_cs *cs, uint32_t count,
+                               uint32_t size, struct tu_cs *sub_cs);
+
+static inline VkResult
+tu_cs_begin_sub_stream(struct tu_cs *cs, uint32_t size, struct tu_cs *sub_cs)
+{
+   return tu_cs_begin_sub_stream_aligned(cs, size, 1, sub_cs);
+}
+
 
 VkResult
 tu_cs_alloc(struct tu_cs *cs,
@@ -147,29 +178,58 @@ static inline struct tu_draw_state
 tu_cs_end_draw_state(struct tu_cs *cs, struct tu_cs *sub_cs)
 {
    struct tu_cs_entry entry = tu_cs_end_sub_stream(cs, sub_cs);
+   if (!entry.bo)
+      return (struct tu_draw_state) {};
    return (struct tu_draw_state) {
       .iova = entry.bo->iova + entry.offset,
       .size = entry.size / sizeof(uint32_t),
+      .writeable = sub_cs->writeable,
    };
 }
 
 VkResult
 tu_cs_reserve_space(struct tu_cs *cs, uint32_t reserved_size);
 
+/* Write sink for OOM state: tu_cs_emit writes here harmlessly instead of
+ * needing a per-dword status branch that would prevent vectorization.
+ * Sized to the PM4 maximum (14-bit count field + header = 16384 dwords) so
+ * no single tu_cs_reserve call can overflow it.
+ */
+#define TU_CS_FAIL_SINK_SIZE 16384
+extern uint32_t tu_cs_fail_sink[TU_CS_FAIL_SINK_SIZE];
+
+static inline void
+tu_cs_fail(struct tu_cs *cs, VkResult result)
+{
+   cs->status = result;
+   cs->cur = tu_cs_fail_sink;
+   cs->reserved_end = tu_cs_fail_sink + ARRAY_SIZE(tu_cs_fail_sink);
+}
+
+uint64_t
+tu_cs_get_cur_iova(const struct tu_cs *cs);
+
 static inline struct tu_draw_state
 tu_cs_draw_state(struct tu_cs *sub_cs, struct tu_cs *cs, uint32_t size)
 {
    struct tu_cs_memory memory;
 
-   /* TODO: clean this up */
-   tu_cs_alloc(sub_cs, size, 1, &memory);
-   tu_cs_init_external(cs, sub_cs->device, memory.map, memory.map + size);
+   VkResult result = tu_cs_alloc(sub_cs, size, 1, &memory);
+   if (result != VK_SUCCESS) {
+      /* Freshly declared, nothing owned yet so safe to zero. */
+      memset(cs, 0, sizeof(*cs));
+      tu_cs_fail(cs, result);
+      return (struct tu_draw_state) {};
+   }
+   tu_cs_init_external(cs, sub_cs->device, memory.map, memory.map + size,
+                       memory.iova, memory.writeable);
    tu_cs_begin(cs);
    tu_cs_reserve_space(cs, size);
 
    return (struct tu_draw_state) {
       .iova = memory.iova,
       .size = size,
+      .writeable = sub_cs->writeable,
    };
 }
 
@@ -275,6 +335,11 @@ tu_cs_get_space(const struct tu_cs *cs)
 static inline void
 tu_cs_reserve(struct tu_cs *cs, uint32_t reserved_size)
 {
+   if (unlikely(cs->status != VK_SUCCESS)) {
+      tu_cs_fail(cs, cs->status);
+      return;
+   }
+
    if (cs->mode != TU_CS_MODE_GROW) {
       assert(tu_cs_get_space(cs) >= reserved_size);
       assert(cs->reserved_end == cs->end);
@@ -287,9 +352,13 @@ tu_cs_reserve(struct tu_cs *cs, uint32_t reserved_size)
       return;
    }
 
-   ASSERTED VkResult result = tu_cs_reserve_space(cs, reserved_size);
-   /* TODO: set this error in tu_cs and use it */
-   assert(result == VK_SUCCESS);
+   tu_cs_reserve_space(cs, reserved_size);
+}
+
+static inline VkResult
+tu_cs_get_status(const struct tu_cs *cs)
+{
+   return cs->status;
 }
 
 /**
@@ -298,6 +367,7 @@ tu_cs_reserve(struct tu_cs *cs, uint32_t reserved_size)
 static inline void
 tu_cs_emit_pkt4(struct tu_cs *cs, uint16_t regindx, uint16_t cnt)
 {
+   assert(!cs->pkt); /* No mixing with the packet builders.*/
    tu_cs_reserve(cs, cnt + 1);
    tu_cs_emit(cs, pm4_pkt4_hdr(regindx, cnt));
 }
@@ -308,6 +378,7 @@ tu_cs_emit_pkt4(struct tu_cs *cs, uint16_t regindx, uint16_t cnt)
 static inline void
 tu_cs_emit_pkt7(struct tu_cs *cs, uint8_t opcode, uint16_t cnt)
 {
+   assert(!cs->pkt); /* No mixing with the packet builders.*/
 #if TU_BREADCRUMBS_ENABLED
    tu_cs_emit_sync_breadcrumb(cs, opcode, cnt + 1);
 #endif
@@ -403,11 +474,53 @@ tu_cs_emit_debug_msg(struct tu_cs *cs, const char *fmt, ...);
 
 typedef struct tu_cs *tu_debug_scope;
 
-__attribute__((format(printf, 2, 3))) void
-tu_cs_trace_start(void *cs, const char *fmt, ...);
+__attribute__((format(printf, 3, 4))) void
+tu_cs_trace_start(struct u_trace_context *utctx,
+                  void *cs,
+                  const char *fmt,
+                  ...);
 
-__attribute__((format(printf, 2, 3))) void
-tu_cs_trace_end(void *cs, const char *fmt, ...);
+__attribute__((format(printf, 3, 4))) void
+tu_cs_trace_end(struct u_trace_context *utctx, void *cs, const char *fmt, ...);
+
+__attribute__((format(printf, 3, 4))) void
+tu_cs_trace_singular(struct u_trace_context *utctx, void *cs, const char *fmt, ...);
+
+struct tu_cs_patchable_state {
+   uint32_t *nop_header;
+   uint32_t dwords;
+   uint32_t enable_patch;
+   uint32_t disable_patch;
+   uint32_t *_end;
+};
+
+/* Create a region that can be enabled/disabled by updating CP_NOP header. */
+static struct tu_cs_patchable_state
+tu_cs_patchable_start(struct tu_cs *cs, uint32_t reserved_size)
+{
+   tu_cs_reserve(cs, reserved_size);
+   uint32_t *nop_header = cs->cur;
+   tu_cs_emit_pkt7(cs, CP_NOP, 0);
+   return (struct tu_cs_patchable_state) {
+      .nop_header = nop_header,
+      .dwords = 0,
+      .enable_patch = pm4_pkt7_hdr(CP_NOP, 0),
+      .disable_patch = 0,
+      ._end = cs->end,
+   };
+}
+
+static void
+tu_cs_patchable_end(struct tu_cs *cs,
+                    bool enabled_by_default,
+                    struct tu_cs_patchable_state *state)
+{
+   assert(cs->end == state->_end);
+   state->dwords = cs->cur - state->nop_header - 1;
+   state->disable_patch = pm4_pkt7_hdr(CP_NOP, state->dwords);
+   if (!enabled_by_default)
+      *state->nop_header = state->disable_patch;
+}
 
 /* Helpers for bracketing a large sequence of commands of unknown size inside
  * a CP_COND_REG_EXEC packet.
@@ -415,8 +528,11 @@ tu_cs_trace_end(void *cs, const char *fmt, ...);
 static inline void
 tu_cond_exec_start(struct tu_cs *cs, uint32_t cond_flags)
 {
-   assert(cs->mode == TU_CS_MODE_GROW);
    assert(cs->cond_stack_depth < TU_COND_EXEC_STACK_SIZE);
+
+   ASSERTED enum compare_mode mode =
+      (enum compare_mode) pkt_field_get(CP_COND_REG_EXEC_0_MODE, cond_flags);
+   assert(mode == PRED_TEST || mode == RENDER_MODE || mode == THREAD_MODE);
 
    tu_cs_emit_pkt7(cs, CP_COND_REG_EXEC, 2);
    tu_cs_emit(cs, cond_flags);
@@ -425,7 +541,7 @@ tu_cond_exec_start(struct tu_cs *cs, uint32_t cond_flags)
    cs->cond_dwords[cs->cond_stack_depth] = cs->cur;
 
    /* Emit dummy DWORD field here */
-   tu_cs_emit(cs, CP_COND_REG_EXEC_1_DWORDS(0));
+   tu_cs_emit(cs, RENDER_MODE_CP_COND_REG_EXEC_1_DWORDS(0));
 
    cs->cond_stack_depth++;
 }
@@ -442,9 +558,76 @@ tu_cond_exec_end(struct tu_cs *cs)
 
    cs->cond_flags[cs->cond_stack_depth] = 0;
    /* Subtract one here to account for the DWORD field itself. */
-   *cs->cond_dwords[cs->cond_stack_depth] =
-      cs->cur - cs->cond_dwords[cs->cond_stack_depth] - 1;
+   uint32_t cond_len = cs->cur - cs->cond_dwords[cs->cond_stack_depth] - 1;
+   if (cond_len) {
+      *cs->cond_dwords[cs->cond_stack_depth] = cond_len;
+   } else {
+      /* rewind the CS to drop the empty cond reg packet. */
+      cs->cur = cs->cur - 3;
+   }
 }
+
+static inline void
+tu7_thread_control(struct tu_cs *cs, enum cp_thread thread)
+{
+   tu_cs_emit_pkt7(cs, CP_THREAD_CONTROL, 1);
+   tu_cs_emit(cs, CP_THREAD_CONTROL_0_THREAD(thread));
+}
+
+static inline void
+tu7_set_pred_mask(struct tu_cs *cs, uint32_t mask, uint32_t val)
+{
+   tu_cs_emit_pkt7(cs, CP_REG_TEST, 3);
+   tu_cs_emit(cs, A6XX_CP_REG_TEST_0_PRED_UPDATE |
+                  A6XX_CP_REG_TEST_0_SKIP_WAIT_FOR_ME);
+   tu_cs_emit(cs, mask);
+   tu_cs_emit(cs, val);
+}
+
+static inline void
+tu7_set_pred_bit(struct tu_cs *cs, enum tu_predicate_bit bit, bool val)
+{
+   tu7_set_pred_mask(cs, 1u << bit, val ? (1u << bit) : 0);
+}
+
+static inline void
+tu7_write_onchip_timestamp(struct tu_cs *cs, enum tu_onchip_addr onchip_addr)
+{
+   tu_cs_emit_pkt7(cs, CP_EVENT_WRITE7, 2);
+   tu_cs_emit(cs, CP_EVENT_WRITE7_0_WRITE_DST(EV_DST_ONCHIP) |
+                  CP_EVENT_WRITE7_0_WRITE_SRC(EV_WRITE_TIMESTAMP_SUM) |
+                  CP_EVENT_WRITE7_0_EVENT(DUMMY_EVENT) |
+                  CP_EVENT_WRITE7_0_WRITE_ENABLED);
+   tu_cs_emit(cs, onchip_addr);
+}
+
+static inline void
+tu7_wait_onchip_timestamp(struct tu_cs *cs, enum tu_onchip_addr onchip_addr)
+{
+   tu_cs_emit_pkt7(cs, CP_WAIT_TIMESTAMP, 3);
+   tu_cs_emit(cs, CP_WAIT_TIMESTAMP_0_WAIT_DST(TS_WAIT_ONCHIP) |
+                  CP_WAIT_TIMESTAMP_0_WAIT_VALUE_SRC(TS_WAIT_GE_TIMESTAMP_SUM));
+   tu_cs_emit_qw(cs, onchip_addr);
+}
+
+static inline void
+tu7_wait_onchip_val(struct tu_cs *cs, enum tu_onchip_addr onchip_addr,
+                    uint32_t val)
+{
+   tu_cs_emit_pkt7(cs, CP_WAIT_REG_MEM, 6);
+   tu_cs_emit(cs, CP_WAIT_REG_MEM_0_FUNCTION(WRITE_EQ) |
+                  CP_WAIT_REG_MEM_0_POLL(POLL_ON_CHIP));
+   tu_cs_emit_qw(cs, onchip_addr);
+   tu_cs_emit(cs, CP_WAIT_REG_MEM_3_REF(val));
+   tu_cs_emit(cs, CP_WAIT_REG_MEM_4_MASK(~0));
+   tu_cs_emit(cs, CP_WAIT_REG_MEM_5_DELAY_LOOP_CYCLES(0));
+}
+
+uint64_t
+tu_cs_emit_data_nop(struct tu_cs *cs,
+                    const uint32_t *data,
+                    uint32_t size,
+                    uint32_t align);
 
 /* Temporary struct for tracking a register state to be written, used by
  * a6xx-pack.h and tu_cs_emit_regs()
@@ -453,17 +636,12 @@ struct tu_reg_value {
    uint32_t reg;
    uint64_t value;
    bool is_address;
-   struct tu_bo *bo;
-   bool bo_write;
-   uint32_t bo_offset;
-   uint32_t bo_shift;
-   uint32_t bo_low;
 };
 
 #define fd_reg_pair tu_reg_value
-#define __bo_type struct tu_bo *
 
 #include "a6xx-pack.xml.h"
+#include "adreno-pm4-pack.xml.h"
 
 #define __assert_eq(a, b)                                               \
    do {                                                                 \
@@ -477,19 +655,9 @@ struct tu_reg_value {
    do {                                                         \
       if (i < ARRAY_SIZE(regs) && regs[i].reg > 0) {            \
          __assert_eq(regs[0].reg + i, regs[i].reg);             \
-         if (regs[i].bo) {                                      \
-            uint64_t v = regs[i].bo->iova + regs[i].bo_offset;  \
-            v >>= regs[i].bo_shift;                             \
-            v <<= regs[i].bo_low;                               \
-            v |= regs[i].value;                                 \
-                                                                \
-            *p++ = v;                                           \
-            *p++ = v >> 32;                                     \
-         } else {                                               \
-            *p++ = regs[i].value;                               \
-            if (regs[i].is_address)                             \
-               *p++ = regs[i].value >> 32;                      \
-         }                                                      \
+         *p++ = regs[i].value;                                  \
+         if (regs[i].is_address)                                \
+            *p++ = regs[i].value >> 32;                         \
       }                                                         \
    } while (0)
 
@@ -533,5 +701,152 @@ struct tu_reg_value {
    __ONE_REG(15, regs);                                 \
    (cs)->cur = p;                                         \
    } while (0)
+
+/**
+ * Helper base class for any pkt building.
+ */
+struct tu_pkt {
+ protected:
+   tu_pkt(tu_cs *cs, enum adreno_pm4_type3_packets pkt, unsigned ndwords)
+       : cs(cs), pkt(pkt)
+   {
+      tu_cs_reserve(cs, ndwords + 1);
+      start = cs->cur;
+      cs->cur++; /* Leave a slot for the packet header when we're done. */
+      assert(!cs->pkt);
+#if !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpragmas"
+#pragma GCC diagnostic ignored "-Wdangling-pointer="
+#endif
+      /* Safe because destructor calls flush() which clears the potentially
+       * dangling pointer:
+       */
+      cs->pkt = this;
+#if !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
+   }
+
+   ~tu_pkt()
+   {
+      flush();
+   }
+
+   void append(uint32_t value)
+   {
+      tu_cs_emit(cs, value);
+   }
+
+   void append(const uint32_t *dwords, uint32_t sizedwords)
+   {
+      tu_cs_emit_array(cs, dwords, sizedwords);
+   }
+
+ public:
+   void flush()
+   {
+      bool skip_empty = (pkt == CP_CONTEXT_REG_BUNCH);
+
+      if (!cs) {
+         /* Skip double flushing, such as an early flush and then going out of
+          * scope later.
+          */
+         return;
+      }
+
+      assert(start);
+      assert(cs->pkt == this);
+
+      unsigned cnt = cs->cur - start - 1;
+
+      if (skip_empty && !cnt) {
+         /* rewind the start pointer to the start of the packet. */
+         cs->cur = start;
+      } else {
+         *start = pm4_pkt7_hdr(pkt, cnt);
+      }
+      cs->pkt = NULL;
+      cs = NULL;
+   }
+
+ private:
+   tu_cs *cs;
+   enum adreno_pm4_type3_packets pkt;
+   uint32_t *start;
+};
+
+/**
+ * A builder for CP_CONTEXT_REG_BUNCH.  This packet can write an arbitrary
+ * sequence of registers (payload consists of pairs of offset,value).  It should
+ * be as fast as a pkt4 packet writing a consecutive sequence of registers,
+ * without the constraint of the registers being sequential, making it easier to
+ * use when cmdstream emit involves if/else/loops.  And should be less brittle
+ * if registers shift around between generations.  This builder intentionally
+ * encourages use of tu_reg_value.
+ *
+ * For TU_CS_MODE_GROW command streams (cmd->cs, cmd->draw_cs), you have to pass
+ * the maximum number of regs you might emit in the CONTEXT_REG_BUNCH.  For
+ * external/sub-stream CSes, you don't need to bother, and overflow of the
+ * preallocated space will be caught by tu_cs_emit().
+ */
+struct tu_crb : public tu_pkt {
+ public:
+   /* Constructor to use with tu_cs: */
+   tu_crb(tu_cs *cs, unsigned nregs)
+       : tu_pkt(cs, CP_CONTEXT_REG_BUNCH, nregs * 2)
+   {
+      assert(nregs != 0 || cs->mode != TU_CS_MODE_GROW);
+   }
+
+   tu_crb(tu_cs *cs): tu_pkt(cs, CP_CONTEXT_REG_BUNCH, 0)
+   {
+      assert(cs->mode != TU_CS_MODE_GROW);
+   }
+
+   /* Append a <reg32> to CRB: */
+   tu_crb &add(struct tu_reg_value reg)
+   {
+      append(reg.reg);
+      append(reg.value);
+      return *this;
+   }
+
+   /* Append a <reg64> to CRB: */
+   tu_crb &add(struct tu_reg_value reg_lo, struct tu_reg_value reg_hi)
+   {
+      __assert_eq(reg_hi.reg, 0);
+      uint64_t val = reg_lo.value;
+      append(reg_lo.reg);
+      append(val);
+      append(reg_lo.reg + 1);
+      append(val >> 32);
+      return *this;
+   }
+
+   /* for with_crb() */
+   bool first = true;
+
+private:
+   /* Disallow copy constructor to prevent mistakes with using tu_crb instead
+    * of tu_crb& as function param:
+    */
+   tu_crb(const tu_crb &);
+};
+
+
+#define with_crb(...) \
+   for (tu_crb crb(__VA_ARGS__); crb.first; crb.first = false)
+
+template <chip CHIP>
+static inline fd_reg_pair
+tu_scratch_reg(int idx, uint32_t val = 0)
+{
+   if (CHIP >= A8XX) {
+      return CP_SCRATCH_GLOBAL_REG(CHIP, idx, val);
+   } else {
+      return CP_SCRATCH_REG(CHIP, idx, val);
+   }
+}
 
 #endif /* TU_CS_H */

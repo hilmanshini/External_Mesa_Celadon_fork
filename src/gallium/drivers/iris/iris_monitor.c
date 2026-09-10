@@ -1,23 +1,6 @@
 /*
  * Copyright © 2019 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include "iris_monitor.h"
@@ -62,7 +45,8 @@ iris_get_monitor_info(struct pipe_screen *pscreen, unsigned index,
    intel_perf_query_result_clear(&results);
 
    info->group_id = counter_info->location.group_idx;
-   info->name = counter->name;
+   info->name = INTEL_DEBUG(DEBUG_PERF_SYMBOL_NAMES) ?
+      counter->symbol_name : counter->name;
    info->query_type = PIPE_QUERY_DRIVER_SPECIFIC + index;
 
    if (counter->type == INTEL_PERF_COUNTER_TYPE_THROUGHPUT)
@@ -170,7 +154,7 @@ iris_init_monitor_ctx(struct iris_context *ice)
                          ice,
                          screen->bufmgr,
                          screen->devinfo,
-                         ice->batches[IRIS_BATCH_RENDER].ctx_id,
+                         ice->batches[IRIS_BATCH_RENDER].i915.ctx_id,
                          screen->fd);
 }
 
@@ -330,7 +314,7 @@ iris_get_monitor_result(struct pipe_context *ctx,
          break;
       }
       default:
-         unreachable("unexpected counter data type");
+         UNREACHABLE("unexpected counter data type");
       }
    }
    return true;

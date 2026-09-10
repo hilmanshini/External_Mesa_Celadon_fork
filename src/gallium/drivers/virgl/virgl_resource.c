@@ -20,6 +20,7 @@
  * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
  * USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
+#include "util/u_drm.h"
 #include "util/format/u_format.h"
 #include "util/u_inlines.h"
 #include "util/u_memory.h"
@@ -29,6 +30,10 @@
 #include "virgl_screen.h"
 #include "virgl_staging_mgr.h"
 #include "virgl_encode.h" // for declaration of virgl_encode_copy_transfer
+
+#if !defined(_WIN32)
+#include "drm-uapi/drm_fourcc.h"
+#endif
 
 /* A (soft) limit for the amount of memory we want to allow for queued staging
  * resources. This is used to decide when we should force a flush, in order to
@@ -154,7 +159,8 @@ static bool virgl_res_needs_readback(struct virgl_context *vctx,
 
 static enum virgl_transfer_map_type
 virgl_resource_transfer_prepare(struct virgl_context *vctx,
-                                struct virgl_transfer *xfer)
+                                struct virgl_transfer *xfer,
+                                bool is_blob)
 {
    struct virgl_screen *vs = virgl_screen(vctx->base.screen);
    struct virgl_winsys *vws = vs->vws;
@@ -201,7 +207,7 @@ virgl_resource_transfer_prepare(struct virgl_context *vctx,
    /* When the resource is busy but its content can be discarded, we can
     * replace its HW resource or use a staging buffer to avoid waiting.
     */
-   if (wait &&
+   if (wait && !is_blob &&
        (xfer->base.usage & (PIPE_MAP_DISCARD_RANGE |
                             PIPE_MAP_DISCARD_WHOLE_RESOURCE)) &&
        likely(!(virgl_debug & VIRGL_DEBUG_XFER))) {
@@ -281,9 +287,11 @@ virgl_resource_transfer_prepare(struct virgl_context *vctx,
        * trackers.  It should be waited for in all cases, including when
        * PIPE_MAP_UNSYNCHRONIZED is set.
        */
-      vws->resource_wait(vws, res->hw_res);
-      vws->transfer_get(vws, res->hw_res, &xfer->base.box, xfer->base.stride,
-                        xfer->l_stride, xfer->offset, xfer->base.level);
+      if (!is_blob) {
+         vws->resource_wait(vws, res->hw_res);
+         vws->transfer_get(vws, res->hw_res, &xfer->base.box, xfer->base.stride,
+                           xfer->l_stride, xfer->offset, xfer->base.level);
+      }
       /* transfer_get puts the resource into a maybe_busy state, so we will have
        * to wait another time if we want to use that resource. */
       wait = true;
@@ -306,12 +314,12 @@ virgl_resource_transfer_prepare(struct virgl_context *vctx,
 static unsigned
 virgl_transfer_map_size(struct virgl_transfer *vtransfer,
                         unsigned *out_stride,
-                        unsigned *out_layer_stride)
+                        uintptr_t *out_layer_stride)
 {
    struct pipe_resource *pres = vtransfer->base.resource;
    struct pipe_box *box = &vtransfer->base.box;
    unsigned stride;
-   unsigned layer_stride;
+   uintptr_t layer_stride;
    unsigned size;
 
    assert(out_stride);
@@ -346,8 +354,8 @@ virgl_staging_map(struct virgl_context *vctx,
    unsigned size;
    unsigned align_offset;
    unsigned stride;
-   unsigned layer_stride;
-   void *map_addr;
+   uintptr_t layer_stride;
+   uint8_t *map_addr;
    bool alloc_succeeded;
 
    assert(vctx->supports_staging);
@@ -509,10 +517,12 @@ virgl_resource_transfer_map(struct pipe_context *ctx,
    if (resource->flags & PIPE_RESOURCE_FLAG_MAP_COHERENT)
       usage |= PIPE_MAP_COHERENT;
 
+   bool is_blob = usage & (PIPE_MAP_COHERENT | PIPE_MAP_PERSISTENT);
+
    trans = virgl_resource_create_transfer(vctx, resource,
                                           &vres->metadata, level, usage, box);
 
-   map_type = virgl_resource_transfer_prepare(vctx, trans);
+   map_type = virgl_resource_transfer_prepare(vctx, trans, is_blob);
    switch (map_type) {
    case VIRGL_TRANSFER_MAP_REALLOC:
       if (!virgl_resource_realloc(vctx, vres)) {
@@ -524,7 +534,7 @@ virgl_resource_transfer_map(struct pipe_context *ctx,
    case VIRGL_TRANSFER_MAP_HW_RES:
       trans->hw_res_map = vws->resource_map(vws, vres->hw_res);
       if (trans->hw_res_map)
-         map_addr = trans->hw_res_map + trans->offset;
+         map_addr = (uint8_t *)trans->hw_res_map + trans->offset;
       else
          map_addr = NULL;
       break;
@@ -632,6 +642,93 @@ static void virgl_resource_layout(struct pipe_resource *pt,
       metadata->total_size = 0;
 }
 
+static void virgl_resource_free_gbm_layout(struct virgl_resource *res)
+{
+   if (!res->metadata.gbm.res)
+      return;
+
+   res->metadata.gbm.ctx->destroy(res->metadata.gbm.ctx);
+   pipe_resource_reference((struct pipe_resource **)&res->metadata.gbm.res, NULL);
+}
+
+static void virgl_resource_sync_gbm_layout(struct virgl_resource *res)
+{
+   struct virgl_screen *vs = virgl_screen(res->b.screen);
+
+   simple_mtx_lock(&res->metadata.gbm.lock);
+   if (res->metadata.gbm.res) {
+      vs->vws->resource_wait(vs->vws, res->metadata.gbm.res->hw_res);
+
+      pipe_buffer_read(res->metadata.gbm.ctx,
+                       &res->metadata.gbm.res->b, 0,
+                       sizeof(res->metadata.gbm.layout),
+                       &res->metadata.gbm.layout);
+
+      virgl_resource_free_gbm_layout(res);
+   }
+   simple_mtx_unlock(&res->metadata.gbm.lock);
+}
+
+static void
+virgl_resource_async_query_gbm_layout(struct pipe_screen *screen,
+                                      struct pipe_resource *resource,
+                                      uint32_t bind)
+{
+   struct virgl_resource *res = virgl_resource(resource);
+   struct virgl_screen *vs = virgl_screen(screen);
+   struct virgl_resource *out_res;
+   struct virgl_context *vctx;
+   struct pipe_context *ctx;
+
+   if (!(bind & PIPE_BIND_SHARED))
+      return;
+
+   if (!(vs->caps.caps.v2.capability_bits_v2 & VIRGL_CAP_V2_QUERY_FORMAT_MODIFIER))
+      return;
+
+   out_res = (struct virgl_resource *)
+      pipe_buffer_create(&vs->base, PIPE_BIND_CUSTOM, PIPE_USAGE_STAGING,
+                         sizeof(res->metadata.gbm.layout));
+   if (!out_res)
+      return;
+
+   ctx = screen->context_create(screen, NULL, 0);
+   vctx = virgl_context(ctx);
+
+   virgl_encoder_get_layout(vctx, out_res, res);
+   ctx->flush(ctx, NULL, 0);
+
+   /*
+    * Async query must be completed by virgl_resource_sync_gbm_layout().
+    * Returned layout will be zeroed if resource isn't backed by GBM buffer.
+    */
+   res->metadata.gbm.res = out_res;
+   res->metadata.gbm.ctx = ctx;
+}
+
+static size_t virgl_resource_shared_tex_size(struct virgl_resource *res)
+{
+   size_t aligned_stride = align(res->metadata.stride[0], 1024);
+   struct virgl_resource_metadata metadata = {};
+   struct pipe_resource pres = res->b;
+
+   /*
+    * Size of a shared buffer is validated by WSI. WSI retrieves BO size
+    * from resource's dmabuf with lseek(). When shared buffer is backed
+    * by a GBM BO on host, WSI validation may fail for a classic resource
+    * because we will tell WSI to use stride of the host's GBM BO that won't
+    * match guest BO stride. Mitigate this problem by using stride aligned to
+    * 1024 bytes for estimated buffer size, which is a max possible alignment
+    * that GPUs are using today, and rounding height to a common 64x64
+    * block size.
+    */
+   pres.height0 = align(pres.height0, 64);
+
+   virgl_resource_layout(&pres, &metadata, 0, aligned_stride, 0, 0);
+
+   return metadata.total_size;
+}
+
 static struct pipe_resource *virgl_resource_create_front(struct pipe_screen *screen,
                                                          const struct pipe_resource *templ,
                                                          const void *map_front_private)
@@ -647,6 +744,7 @@ static struct pipe_resource *virgl_resource_create_front(struct pipe_screen *scr
    vbind = pipe_to_virgl_bind(vs, templ->bind);
    vflags = pipe_to_virgl_flags(vs, templ->flags);
    virgl_resource_layout(&res->b, &res->metadata, 0, 0, 0, 0);
+   simple_mtx_init(&res->metadata.gbm.lock, mtx_plain);
 
    if ((vs->caps.caps.v2.capability_bits & VIRGL_CAP_APP_TWEAK_SUPPORT) &&
        vs->tweak_gles_emulate_bgra &&
@@ -664,6 +762,8 @@ static struct pipe_resource *virgl_resource_create_front(struct pipe_screen *scr
 
    if (res->use_staging)
       alloc_size = 1;
+   else if (templ->bind & PIPE_BIND_SHARED)
+      alloc_size = virgl_resource_shared_tex_size(res);
    else
       alloc_size = res->metadata.total_size;
    
@@ -690,6 +790,7 @@ static struct pipe_resource *virgl_resource_create_front(struct pipe_screen *scr
       virgl_buffer_init(res);
    } else {
       virgl_texture_init(res);
+      virgl_resource_async_query_gbm_layout(screen, &res->b, templ->bind);
    }
 
    return &res->b;
@@ -702,6 +803,43 @@ static struct pipe_resource *virgl_resource_create(struct pipe_screen *screen,
    return virgl_resource_create_front(screen, templ, NULL);
 }
 
+#if !defined(_WIN32)
+static struct pipe_resource *
+virgl_resource_create_with_modifiers(struct pipe_screen *screen,
+                                     const struct pipe_resource *templ,
+                                     const uint64_t *modifiers,
+                                     int count)
+{
+   struct virgl_screen *vscreen = virgl_screen(screen);
+   uint32_t vformat = pipe_to_virgl_format(templ->format);
+   uint64_t mod = DRM_FORMAT_MOD_LINEAR;
+   struct pipe_resource vtempl = *templ;
+
+   if (vtempl.bind & PIPE_BIND_SHARED) {
+      virgl_screen_sync_format_modifier(vscreen);
+
+      for (int i = 0; i < vscreen->gbm.list.num; i++) {
+         if (vscreen->gbm.list.formats[i].virgl_format == vformat) {
+            if (drm_find_modifier(vscreen->gbm.list.formats[i].modifier,
+                                  modifiers, count))
+               mod = vscreen->gbm.list.formats[i].modifier;
+            break;
+         }
+      }
+
+      if (mod == DRM_FORMAT_MOD_LINEAR)
+         vtempl.bind |= PIPE_BIND_LINEAR;
+   }
+
+   if (!drm_find_modifier(mod, modifiers, count)) {
+      mesa_loge("unsupported modifier requested\n");
+      return NULL;
+   }
+
+   return virgl_resource_create_front(screen, &vtempl, NULL);
+}
+#endif
+
 static struct pipe_resource *virgl_resource_from_handle(struct pipe_screen *screen,
                                                         const struct pipe_resource *templ,
                                                         struct winsys_handle *whandle,
@@ -712,21 +850,28 @@ static struct pipe_resource *virgl_resource_from_handle(struct pipe_screen *scre
    uint32_t storage_size;
 
    struct virgl_screen *vs = virgl_screen(screen);
-   if (templ->target == PIPE_BUFFER)
+   if (templ && templ->target == PIPE_BUFFER)
       return NULL;
 
    struct virgl_resource *res = CALLOC_STRUCT(virgl_resource);
-   res->b = *templ;
+   if (templ)
+      res->b = *templ;
    res->b.screen = &vs->base;
    pipe_reference_init(&res->b.reference, 1);
 
    plane = winsys_stride = plane_offset = modifier = 0;
    res->hw_res = vs->vws->resource_create_from_handle(vs->vws, whandle,
+                                                      &res->b,
                                                       &plane,
                                                       &winsys_stride,
                                                       &plane_offset,
                                                       &modifier,
                                                       &res->blob_mem);
+
+   if (!res->hw_res) {
+      FREE(res);
+      return NULL;
+   }
 
    /* do not use winsys returns for guest storage info of classic resource */
    if (!res->blob_mem) {
@@ -737,10 +882,6 @@ static struct pipe_resource *virgl_resource_from_handle(struct pipe_screen *scre
 
    virgl_resource_layout(&res->b, &res->metadata, plane, winsys_stride,
                          plane_offset, modifier);
-   if (!res->hw_res) {
-      FREE(res);
-      return NULL;
-   }
 
    /*
    *  If the overall resource is larger than a single page in size, we can
@@ -757,7 +898,8 @@ static struct pipe_resource *virgl_resource_from_handle(struct pipe_screen *scre
 
    /* assign blob resource a type in case it was created untyped */
    if (res->blob_mem && plane == 0 &&
-       (vs->caps.caps.v2.capability_bits_v2 & VIRGL_CAP_V2_UNTYPED_RESOURCE)) {
+       (vs->caps.caps.v2.host_feature_check_version >= 18 ||
+	(vs->caps.caps.v2.capability_bits_v2 & VIRGL_CAP_V2_UNTYPED_RESOURCE))) {
       uint32_t plane_strides[VIRGL_MAX_PLANE_COUNT];
       uint32_t plane_offsets[VIRGL_MAX_PLANE_COUNT];
       uint32_t plane_count = 0;
@@ -799,8 +941,58 @@ static struct pipe_resource *virgl_resource_from_handle(struct pipe_screen *scre
    }
 
    virgl_texture_init(res);
+   virgl_resource_async_query_gbm_layout(screen, &res->b, PIPE_BIND_SHARED);
 
    return &res->b;
+}
+
+static bool
+virgl_resource_get_param(struct pipe_screen *screen,
+                         struct pipe_context *context,
+                         struct pipe_resource *resource,
+                         unsigned plane,
+                         unsigned layer,
+                         unsigned level,
+                         enum pipe_resource_param param,
+                         unsigned handle_usage,
+                         uint64_t *value)
+{
+   struct virgl_resource *res = virgl_resource(resource);
+
+   switch(param) {
+   case PIPE_RESOURCE_PARAM_MODIFIER:
+      virgl_resource_sync_gbm_layout(res);
+
+      if (res->metadata.gbm.layout.planes[0].stride)
+         *value = res->metadata.gbm.layout.modifier;
+      else
+         *value = res->metadata.modifier;
+      return true;
+   case PIPE_RESOURCE_PARAM_NPLANES:
+      *value = util_resource_num(resource);
+      return true;
+    case PIPE_RESOURCE_PARAM_DISJOINT_PLANES:
+        *value = true;
+        return true;
+   case PIPE_RESOURCE_PARAM_STRIDE:
+      virgl_resource_sync_gbm_layout(res);
+
+      if (res->metadata.gbm.layout.planes[0].stride)
+         *value = res->metadata.gbm.layout.planes[plane].stride;
+      else
+         return false;
+      return true;
+   case PIPE_RESOURCE_PARAM_OFFSET:
+      virgl_resource_sync_gbm_layout(res);
+
+      if (res->metadata.gbm.layout.planes[0].stride)
+         *value = res->metadata.gbm.layout.planes[plane].offset;
+      else
+         return false;
+      return true;
+   default:
+      return false;
+   }
 }
 
 void virgl_init_screen_resource_functions(struct pipe_screen *screen)
@@ -810,6 +1002,10 @@ void virgl_init_screen_resource_functions(struct pipe_screen *screen)
     screen->resource_from_handle = virgl_resource_from_handle;
     screen->resource_get_handle = virgl_resource_get_handle;
     screen->resource_destroy = virgl_resource_destroy;
+    screen->resource_get_param = virgl_resource_get_param;
+#if !defined(_WIN32)
+    screen->resource_create_with_modifiers = virgl_resource_create_with_modifiers;
+#endif
 }
 
 static void virgl_buffer_subdata(struct pipe_context *pipe,
@@ -931,6 +1127,7 @@ void virgl_resource_destroy(struct pipe_screen *screen,
       util_range_destroy(&res->valid_buffer_range);
 
    vs->vws->resource_reference(vs->vws, &res->hw_res, NULL);
+   virgl_resource_free_gbm_layout(res);
    FREE(res);
 }
 
@@ -942,13 +1139,19 @@ bool virgl_resource_get_handle(struct pipe_screen *screen,
 {
    struct virgl_screen *vs = virgl_screen(screen);
    struct virgl_resource *res = virgl_resource(resource);
+   int stride;
 
    if (res->b.target == PIPE_BUFFER)
       return false;
 
-   return vs->vws->resource_get_handle(vs->vws, res->hw_res,
-                                       res->metadata.stride[0],
-                                       whandle);
+   virgl_resource_sync_gbm_layout(res);
+
+   if (res->metadata.gbm.layout.planes[0].stride)
+      stride = res->metadata.gbm.layout.planes[0].stride;
+   else
+      stride = res->metadata.stride[0];
+
+   return vs->vws->resource_get_handle(vs->vws, res->hw_res, stride, whandle);
 }
 
 void virgl_resource_dirty(struct virgl_resource *res, uint32_t level)

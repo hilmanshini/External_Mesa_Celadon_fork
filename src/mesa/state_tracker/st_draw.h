@@ -48,8 +48,9 @@ struct draw_context *st_get_draw_context(struct st_context *st);
 
 void
 st_feedback_draw_vbo(struct gl_context *ctx,
-                     struct pipe_draw_info *info,
+                     const struct pipe_draw_info *info,
                      unsigned drawid_offset,
+                     const struct pipe_draw_indirect_info *indirect,
                      const struct pipe_draw_start_count_bias *draws,
                      unsigned num_draws);
 
@@ -73,6 +74,16 @@ pointer_to_offset(const void *ptr)
    return (unsigned) (((GLsizeiptr) ptr) & 0xffffffffUL);
 }
 
+void
+st_prepare_draw(struct gl_context *ctx, const st_state_bitset state_mask);
+
+void
+st_draw_gallium(struct gl_context *ctx,
+                const struct pipe_draw_info *info,
+                unsigned drawid_offset,
+                const struct pipe_draw_indirect_info *indirect,
+                const struct pipe_draw_start_count_bias *draws,
+                unsigned num_draws);
 
 bool
 st_draw_quad(struct st_context *st,
@@ -82,11 +93,6 @@ st_draw_quad(struct st_context *st,
              unsigned num_instances);
 
 void
-st_draw_transform_feedback(struct gl_context *ctx, GLenum mode,
-                           unsigned num_instances, unsigned stream,
-                           struct gl_transform_feedback_object *tfb_vertcount);
-
-void
 st_indirect_draw_vbo(struct gl_context *ctx,
                      GLenum mode, GLenum index_type,
                      GLintptr indirect_offset,
@@ -94,7 +100,8 @@ st_indirect_draw_vbo(struct gl_context *ctx,
                      GLsizei draw_count, GLsizei stride);
 
 bool
-st_draw_hw_select_prepare_common(struct gl_context *ctx);
+st_draw_hw_select_prepare_common(struct gl_context *ctx,
+                                 struct pipe_resource **releasebuf);
 bool
 st_draw_hw_select_prepare_mode(struct gl_context *ctx, struct pipe_draw_info *info);
 void

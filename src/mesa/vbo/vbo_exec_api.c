@@ -40,7 +40,7 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "main/light.h"
 #include "main/api_arrayelt.h"
 #include "main/draw_validate.h"
-#include "main/dispatch.h"
+#include "dispatch.h"
 #include "util/bitscan.h"
 #include "util/u_memory.h"
 #include "api_exec_decl.h"
@@ -49,10 +49,6 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 /** ID/name for immediate-mode VBO */
 #define IMM_BUFFER_NAME 0xaabbccdd
-
-
-static void
-vbo_reset_all_attr(struct vbo_exec_context *exec);
 
 
 /**
@@ -230,6 +226,11 @@ vbo_exec_copy_to_current(struct vbo_exec_context *exec)
          vbo_set_vertex_format(&vbo->current[i].Format,
                                exec->vtx.attr[i].size >> dmul_shift,
                                exec->vtx.attr[i].type);
+         /* The format changed. We need to update gallium vertex elements.
+          * Material attributes don't need this because they don't have formats.
+          */
+         if (i <= VBO_ATTRIB_EDGEFLAG)
+            ctx->NewState |= _NEW_CURRENT_ATTRIB;
       }
    }
 
@@ -259,7 +260,6 @@ vbo_exec_wrap_upgrade_vertex(struct vbo_exec_context *exec,
    const GLuint old_vtx_size_no_pos = exec->vtx.vertex_size_no_pos;
    const GLuint old_vtx_size = exec->vtx.vertex_size; /* floats per vertex */
    const GLuint oldSize = exec->vtx.attr[attr].size;
-   GLuint i;
 
    assert(attr < VBO_ATTRIB_MAX);
 
@@ -289,7 +289,7 @@ vbo_exec_wrap_upgrade_vertex(struct vbo_exec_context *exec,
    if (!_mesa_inside_begin_end(ctx) &&
        !oldSize && lastcount > 8 && exec->vtx.vertex_size) {
       vbo_exec_copy_to_current(exec);
-      vbo_reset_all_attr(exec);
+      vbo_reset_all_attr(ctx);
    }
 
    /* Fix up sizes:
@@ -372,7 +372,7 @@ vbo_exec_wrap_upgrade_vertex(struct vbo_exec_context *exec,
 
       assert(exec->vtx.buffer_ptr == exec->vtx.buffer_map);
 
-      for (i = 0 ; i < exec->vtx.copied.nr ; i++) {
+      for (GLuint i = 0 ; i < exec->vtx.copied.nr ; i++) {
          GLbitfield64 enabled = exec->vtx.enabled;
          while (enabled) {
             const int j = u_bit_scan64(&enabled);
@@ -522,7 +522,7 @@ do {                                                                    \
       unsigned vertex_size_no_pos = exec->vtx.vertex_size_no_pos;       \
                                                                         \
       /* Copy over attributes from exec. */                             \
-      for (unsigned i = 0; i < vertex_size_no_pos; i++)                 \
+      for (unsigned vi = 0; vi < vertex_size_no_pos; vi++)              \
          *dst++ = *src++;                                               \
                                                                         \
       /* Store the position, which is always last and can have 32 or */ \
@@ -598,10 +598,10 @@ _mesa_Materialfv(GLenum face, GLenum pname, const GLfloat *params)
       updateMats = ALL_MATERIAL_BITS;
    }
 
-   if (ctx->API == API_OPENGL_COMPAT && face == GL_FRONT) {
+   if (_mesa_is_desktop_gl_compat(ctx) && face == GL_FRONT) {
       updateMats &= FRONT_MATERIAL_BITS;
    }
-   else if (ctx->API == API_OPENGL_COMPAT && face == GL_BACK) {
+   else if (_mesa_is_desktop_gl_compat(ctx) && face == GL_BACK) {
       updateMats &= BACK_MATERIAL_BITS;
    }
    else if (face != GL_FRONT_AND_BACK) {
@@ -647,7 +647,7 @@ _mesa_Materialfv(GLenum face, GLenum pname, const GLfloat *params)
          MAT_ATTR(VBO_ATTRIB_MAT_BACK_SHININESS, 1, params);
       break;
    case GL_COLOR_INDEXES:
-      if (ctx->API != API_OPENGL_COMPAT) {
+      if (!_mesa_is_desktop_gl_compat(ctx)) {
          _mesa_error(ctx, GL_INVALID_ENUM, "glMaterialfv(pname)");
          return;
       }
@@ -684,27 +684,26 @@ vbo_exec_FlushVertices_internal(struct vbo_exec_context *exec, unsigned flags)
    struct gl_context *ctx = gl_context_from_vbo_exec(exec);
 
    if (flags & FLUSH_STORED_VERTICES) {
+      /* Update the flag before entering the flush to prevent re-entering. */
+      ctx->Driver.NeedFlush = 0;
+
       if (exec->vtx.vert_count) {
          vbo_exec_vtx_flush(exec);
       }
 
       if (exec->vtx.vertex_size) {
          vbo_exec_copy_to_current(exec);
-         vbo_reset_all_attr(exec);
+         vbo_reset_all_attr(ctx);
       }
-
-      /* All done. */
-      ctx->Driver.NeedFlush = 0;
    } else {
       assert(flags == FLUSH_UPDATE_CURRENT);
+      /* Only FLUSH_UPDATE_CURRENT is done. */
+      ctx->Driver.NeedFlush = ~FLUSH_UPDATE_CURRENT;
 
       /* Note that the vertex size is unchanged.
        * (vbo_reset_all_attr isn't called)
        */
       vbo_exec_copy_to_current(exec);
-
-      /* Only FLUSH_UPDATE_CURRENT is done. */
-      ctx->Driver.NeedFlush = ~FLUSH_UPDATE_CURRENT;
    }
 }
 
@@ -851,20 +850,20 @@ _mesa_Begin(GLenum mode)
 
    ctx->Driver.CurrentExecPrimitive = mode;
 
-   ctx->Exec = _mesa_hw_select_enabled(ctx) ?
-      ctx->HWSelectModeBeginEnd : ctx->BeginEnd;
+   ctx->Dispatch.Exec = _mesa_hw_select_enabled(ctx) ?
+      ctx->Dispatch.HWSelectModeBeginEnd : ctx->Dispatch.BeginEnd;
 
    /* We may have been called from a display list, in which case we should
     * leave dlist.c's dispatch table in place.
     */
    if (ctx->GLThread.enabled) {
-      if (ctx->CurrentServerDispatch == ctx->OutsideBeginEnd)
-         ctx->CurrentServerDispatch = ctx->Exec;
-   } else if (ctx->CurrentClientDispatch == ctx->OutsideBeginEnd) {
-      ctx->CurrentClientDispatch = ctx->CurrentServerDispatch = ctx->Exec;
-      _glapi_set_dispatch(ctx->CurrentClientDispatch);
+      if (ctx->Dispatch.Current == ctx->Dispatch.OutsideBeginEnd)
+         ctx->Dispatch.Current = ctx->Dispatch.Exec;
+   } else if (ctx->GLApi == ctx->Dispatch.OutsideBeginEnd) {
+      ctx->GLApi = ctx->Dispatch.Current = ctx->Dispatch.Exec;
+      _mesa_set_dispatch(ctx, ctx->GLApi);
    } else {
-      assert(ctx->CurrentClientDispatch == ctx->Save);
+      assert(ctx->GLApi == ctx->Dispatch.Save);
    }
 }
 
@@ -915,17 +914,17 @@ _mesa_End(void)
       return;
    }
 
-   ctx->Exec = ctx->OutsideBeginEnd;
+   ctx->Dispatch.Exec = ctx->Dispatch.OutsideBeginEnd;
 
    if (ctx->GLThread.enabled) {
-      if (ctx->CurrentServerDispatch == ctx->BeginEnd ||
-          ctx->CurrentServerDispatch == ctx->HWSelectModeBeginEnd) {
-         ctx->CurrentServerDispatch = ctx->Exec;
+      if (ctx->Dispatch.Current == ctx->Dispatch.BeginEnd ||
+          ctx->Dispatch.Current == ctx->Dispatch.HWSelectModeBeginEnd) {
+         ctx->Dispatch.Current = ctx->Dispatch.Exec;
       }
-   } else if (ctx->CurrentClientDispatch == ctx->BeginEnd ||
-              ctx->CurrentClientDispatch == ctx->HWSelectModeBeginEnd) {
-      ctx->CurrentClientDispatch = ctx->CurrentServerDispatch = ctx->Exec;
-      _glapi_set_dispatch(ctx->CurrentClientDispatch);
+   } else if (ctx->GLApi == ctx->Dispatch.BeginEnd ||
+              ctx->GLApi == ctx->Dispatch.HWSelectModeBeginEnd) {
+      ctx->GLApi = ctx->Dispatch.Current = ctx->Dispatch.Exec;
+      _mesa_set_dispatch(ctx, ctx->GLApi);
    }
 
    if (exec->vtx.prim_count > 0) {
@@ -946,8 +945,10 @@ _mesa_End(void)
       }
 
       /* Special handling for GL_LINE_LOOP */
+      bool driver_supports_lineloop =
+         ctx->Const.DriverSupportedPrimMask & BITFIELD_BIT(MESA_PRIM_LINE_LOOP);
       if (exec->vtx.mode[last] == GL_LINE_LOOP &&
-          exec->vtx.markers[last].begin == 0) {
+          (exec->vtx.markers[last].begin == 0 || !driver_supports_lineloop)) {
          /* We're finishing drawing a line loop.  Append 0th vertex onto
           * end of vertex buffer so we can draw it as a line strip.
           */
@@ -959,7 +960,9 @@ _mesa_End(void)
          /* copy 0th vertex to end of buffer */
          memcpy(dst, src, exec->vtx.vertex_size * sizeof(fi_type));
 
-         last_draw->start++;  /* skip vertex0 */
+         if (exec->vtx.markers[last].begin == 0)
+            last_draw->start++; /* skip vertex0 */
+
          /* note that the count stays unchanged */
          exec->vtx.mode[last] = GL_LINE_STRIP;
 
@@ -968,6 +971,9 @@ _mesa_End(void)
           */
          exec->vtx.vert_count++;
          exec->vtx.buffer_ptr += exec->vtx.vertex_size;
+
+         if (!driver_supports_lineloop)
+            last_draw->count++;
       }
 
       try_vbo_merge(exec);
@@ -1083,19 +1089,21 @@ vbo_init_dispatch_begin_end(struct gl_context *ctx)
 #define NAME(x) _mesa_##x
 #define NAME_ES(x) _es_##x
 
-   struct _glapi_table *tab = ctx->OutsideBeginEnd;
+   struct _glapi_table *tab = ctx->Dispatch.OutsideBeginEnd;
    #include "api_beginend_init.h"
 
-   if (ctx->BeginEnd) {
-      tab = ctx->BeginEnd;
+   if (ctx->Dispatch.BeginEnd) {
+      tab = ctx->Dispatch.BeginEnd;
       #include "api_beginend_init.h"
    }
 }
 
 
-static void
-vbo_reset_all_attr(struct vbo_exec_context *exec)
+void
+vbo_reset_all_attr(struct gl_context *ctx)
 {
+   struct vbo_exec_context *exec = &vbo_context(ctx)->exec;
+
    while (exec->vtx.enabled) {
       const int i = u_bit_scan64(&exec->vtx.enabled);
 
@@ -1117,8 +1125,8 @@ vbo_exec_vtx_init(struct vbo_exec_context *exec)
 
    exec->vtx.bufferobj = _mesa_bufferobj_alloc(ctx, IMM_BUFFER_NAME);
 
-   exec->vtx.enabled = u_bit_consecutive64(0, VBO_ATTRIB_MAX); /* reset all */
-   vbo_reset_all_attr(exec);
+   exec->vtx.enabled = BITFIELD64_MASK(VBO_ATTRIB_MAX); /* reset all */
+   vbo_reset_all_attr(ctx);
 
    exec->vtx.info.instance_count = 1;
    exec->vtx.info.max_index = ~0;
@@ -1252,11 +1260,11 @@ _es_Materialf(GLenum face, GLenum pname, GLfloat param)
 void
 vbo_init_dispatch_hw_select_begin_end(struct gl_context *ctx)
 {
-   int numEntries = MAX2(_gloffset_COUNT, _glapi_get_dispatch_table_size());
-   memcpy(ctx->HWSelectModeBeginEnd, ctx->BeginEnd, numEntries * sizeof(_glapi_proc));
+   int numEntries = MAX2(_gloffset_COUNT, _mesa_glapi_get_dispatch_table_size());
+   memcpy(ctx->Dispatch.HWSelectModeBeginEnd, ctx->Dispatch.BeginEnd, numEntries * sizeof(_glapi_proc));
 
 #undef NAME
 #define NAME(x) _hw_select_##x
-   struct _glapi_table *tab = ctx->HWSelectModeBeginEnd;
+   struct _glapi_table *tab = ctx->Dispatch.HWSelectModeBeginEnd;
    #include "api_hw_select_init.h"
 }

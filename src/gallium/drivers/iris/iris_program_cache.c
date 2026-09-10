@@ -1,26 +1,7 @@
 /*
  * Copyright © 2017 Intel Corporation
+ * SPDX-License-Identifier: MIT
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
-
-/**
  * @file iris_program_cache.c
  *
  * The in-memory program cache.  This is basically a hash table mapping
@@ -34,16 +15,51 @@
 #include "pipe/p_state.h"
 #include "pipe/p_context.h"
 #include "pipe/p_screen.h"
+#include "util/ralloc.h"
 #include "util/u_atomic.h"
 #include "util/u_upload_mgr.h"
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_builder.h"
-#include "intel/common/intel_disasm.h"
-#include "intel/compiler/brw_compiler.h"
-#include "intel/compiler/brw_eu.h"
-#include "intel/compiler/brw_nir.h"
+#include "compiler/gen/gen.h"
+#include "compiler/shader_enums.h"
+#include "intel/compiler/brw/brw_compiler.h"
+#include "intel/compiler/brw/brw_nir.h"
+#ifdef INTEL_USE_ELK
+#include "intel/compiler/elk/elk_compiler.h"
+#include "intel/compiler/elk/elk_nir.h"
+#endif
 #include "iris_context.h"
 #include "iris_resource.h"
+
+static int
+gen_dump_shader_with_lineno(FILE *out,
+                            const struct intel_device_info *devinfo,
+                            uint32_t stage,
+                            uint32_t src_hash,
+                            const void *assembly,
+                            int max_size,
+                            uint64_t address_base)
+{
+   const int size = gen_find_shader_size(devinfo, assembly, 0, max_size);
+   if (size <= 0)
+      return size;
+
+   fprintf(out, "\nDumping shader asm for %s (src_hash 0x%x):\n\n",
+           _mesa_shader_stage_to_abbrev(stage), src_hash);
+
+   gen_print_params print = {
+      .devinfo = devinfo,
+      .fp = out,
+      .flags = GEN_PRINT_BYTE_OFFSETS,
+      .raw_bytes = assembly,
+      .raw_bytes_size = size,
+      .validate = true,
+      .address_base = address_base,
+   };
+   gen_print(&print);
+
+   return size;
+}
 
 struct keybox {
    uint16_t size;
@@ -110,6 +126,7 @@ iris_delete_shader_variant(struct iris_compiled_shader *shader)
 struct iris_compiled_shader *
 iris_create_shader_variant(const struct iris_screen *screen,
                            void *mem_ctx,
+                           mesa_shader_stage stage,
                            enum iris_program_cache_id cache_id,
                            uint32_t key_size,
                            const void *key)
@@ -143,6 +160,8 @@ iris_create_shader_variant(const struct iris_screen *screen,
       memcpy(&shader->key, key, key_size);
    }
 
+   shader->stage = stage;
+
    return shader;
 }
 
@@ -157,40 +176,67 @@ iris_upload_shader(struct iris_screen *screen,
                    const void *key,
                    const void *assembly)
 {
-   const struct intel_device_info *devinfo = screen->devinfo;
-
-   u_upload_alloc(uploader, 0, shader->prog_data->program_size, 64,
+   u_upload_alloc_ref(uploader, 0, shader->program_size, 64,
                   &shader->assembly.offset, &shader->assembly.res,
                   &shader->map);
-   memcpy(shader->map, assembly, shader->prog_data->program_size);
+   memcpy(shader->map, assembly, shader->program_size);
 
    struct iris_resource *res = (void *) shader->assembly.res;
    uint64_t shader_data_addr = res->bo->address +
                                shader->assembly.offset +
-                               shader->prog_data->const_data_offset;
+                               shader->const_data_offset;
 
-   struct brw_shader_reloc_value reloc_values[] = {
+   struct intel_shader_reloc_value reloc_values[] = {
       {
-         .id = BRW_SHADER_RELOC_CONST_DATA_ADDR_LOW,
+         .id = INTEL_SHADER_RELOC_CONST_DATA_ADDR_LOW,
          .value = shader_data_addr,
       },
       {
-         .id = BRW_SHADER_RELOC_CONST_DATA_ADDR_HIGH,
+         .id = INTEL_SHADER_RELOC_CONST_DATA_ADDR_HIGH,
          .value = shader_data_addr >> 32,
       },
    };
-   brw_write_shader_relocs(&screen->compiler->isa, shader->map,
-                           shader->prog_data, reloc_values,
-                           ARRAY_SIZE(reloc_values));
+   if (screen->brw) {
+      brw_write_shader_relocs(&screen->brw->isa, shader->map,
+                              shader->brw_prog_data, reloc_values,
+                              ARRAY_SIZE(reloc_values));
+   } else {
+#ifdef INTEL_USE_ELK
+      elk_write_shader_relocs(&screen->elk->isa, shader->map,
+                              shader->elk_prog_data, reloc_values,
+                              ARRAY_SIZE(reloc_values));
+#else
+      UNREACHABLE("no elk support");
+#endif
+   }
 
    /* Store the 3DSTATE shader packets and other derived state. */
-   screen->vtbl.store_derived_program_state(devinfo, cache_id, shader);
+   screen->vtbl.store_derived_program_state(screen, cache_id, shader);
 
    util_queue_fence_signal(&shader->ready);
 
    if (!ish) {
       struct keybox *keybox = make_keybox(shader, cache_id, key, key_size);
       _mesa_hash_table_insert(driver_shaders, keybox, shader);
+   }
+
+   if (INTEL_DEBUG(DEBUG_SHADERS_LINENO) && screen->brw) {
+      if (!intel_shader_dump_filter ||
+          (intel_shader_dump_filter && ish && intel_shader_dump_filter == ish->source_hash)) {
+         int start = 0;
+         /* dump each simd variant of shader */
+         while (start < shader->brw_prog_data->program_size) {
+            const uint8_t *variant = (const uint8_t *)assembly + start;
+            const int size = gen_dump_shader_with_lineno(
+               stderr, screen->brw->isa.devinfo, shader->stage,
+               ish ? ish->source_hash : 0, variant,
+               (int)(shader->brw_prog_data->program_size - start),
+               res->bo->address + shader->assembly.offset + start);
+            if (size <= 0)
+               break;
+            start += align64(size, 64);
+         }
+      }
    }
 }
 
@@ -211,7 +257,11 @@ iris_blorp_lookup_shader(struct blorp_batch *blorp_batch,
    struct iris_bo *bo = iris_resource_bo(shader->assembly.res);
    *kernel_out =
       iris_bo_offset_from_base_address(bo) + shader->assembly.offset;
-   *((void **) prog_data_out) = shader->prog_data;
+   *((void **) prog_data_out) =
+#ifdef INTEL_USE_ELK
+      batch->screen->elk ? (void *)shader->elk_prog_data :
+#endif
+      (void *)shader->brw_prog_data;
 
    iris_use_pinned_bo(batch, bo, false, IRIS_DOMAIN_NONE);
 
@@ -222,7 +272,7 @@ bool
 iris_blorp_upload_shader(struct blorp_batch *blorp_batch, uint32_t stage,
                          const void *key, uint32_t key_size,
                          const void *kernel, UNUSED uint32_t kernel_size,
-                         const struct brw_stage_prog_data *prog_data_templ,
+                         const void *prog_data_templ,
                          UNUSED uint32_t prog_data_size,
                          uint32_t *kernel_out, void *prog_data_out)
 {
@@ -231,17 +281,28 @@ iris_blorp_upload_shader(struct blorp_batch *blorp_batch, uint32_t stage,
    struct iris_batch *batch = blorp_batch->driver_batch;
    struct iris_screen *screen = batch->screen;
 
-   void *prog_data = ralloc_size(NULL, prog_data_size);
-   memcpy(prog_data, prog_data_templ, prog_data_size);
-
    struct iris_binding_table bt;
    memset(&bt, 0, sizeof(bt));
 
    struct iris_compiled_shader *shader =
-      iris_create_shader_variant(screen, ice->shaders.cache, IRIS_CACHE_BLORP,
-                                 key_size, key);
+      iris_create_shader_variant(screen, ice->shaders.cache, stage,
+                                 IRIS_CACHE_BLORP, key_size, key);
 
-   iris_finalize_program(shader, prog_data, NULL, NULL, 0, 0, 0, &bt);
+   void *prog_data = ralloc_size(NULL, prog_data_size);
+   memcpy(prog_data, prog_data_templ, prog_data_size);
+
+   if (screen->brw) {
+      iris_apply_brw_prog_data(shader, prog_data, NULL);
+   } else {
+#ifdef INTEL_USE_ELK
+      assert(screen->elk);
+      iris_apply_elk_prog_data(shader, prog_data);
+#else
+      UNREACHABLE("no elk support");
+#endif
+   }
+
+   iris_finalize_program(shader, NULL, NULL, 0, 0, &bt);
 
    iris_upload_shader(screen, NULL, shader, ice->shaders.cache,
                       ice->shaders.uploader_driver,
@@ -250,7 +311,11 @@ iris_blorp_upload_shader(struct blorp_batch *blorp_batch, uint32_t stage,
    struct iris_bo *bo = iris_resource_bo(shader->assembly.res);
    *kernel_out =
       iris_bo_offset_from_base_address(bo) + shader->assembly.offset;
-   *((void **) prog_data_out) = shader->prog_data;
+   *((void **) prog_data_out) =
+#ifdef INTEL_USE_ELK
+      screen->elk ? (void *)shader->elk_prog_data :
+#endif
+      (void*)shader->brw_prog_data;
 
    iris_use_pinned_bo(batch, bo, false, IRIS_DOMAIN_NONE);
 
@@ -264,11 +329,13 @@ iris_init_program_cache(struct iris_context *ice)
       _mesa_hash_table_create(ice, keybox_hash, keybox_equals);
 
    ice->shaders.uploader_driver =
-      u_upload_create(&ice->ctx, 16384, PIPE_BIND_CUSTOM, PIPE_USAGE_IMMUTABLE,
+      u_upload_create(&ice->ctx, 64 * 1024,
+                      PIPE_BIND_CUSTOM, PIPE_USAGE_IMMUTABLE,
                       IRIS_RESOURCE_FLAG_SHADER_MEMZONE |
                       IRIS_RESOURCE_FLAG_DEVICE_MEM);
    ice->shaders.uploader_unsync =
-      u_upload_create(&ice->ctx, 16384, PIPE_BIND_CUSTOM, PIPE_USAGE_IMMUTABLE,
+      u_upload_create(&ice->ctx, 64 * 1024,
+                      PIPE_BIND_CUSTOM, PIPE_USAGE_IMMUTABLE,
                       IRIS_RESOURCE_FLAG_SHADER_MEMZONE |
                       IRIS_RESOURCE_FLAG_DEVICE_MEM);
 }
@@ -290,4 +357,174 @@ iris_destroy_program_cache(struct iris_context *ice)
    u_upload_destroy(ice->shaders.uploader_unsync);
 
    ralloc_free(ice->shaders.cache);
+}
+
+void
+iris_ensure_indirect_generation_shader(struct iris_batch *batch)
+{
+   struct iris_context *ice = batch->ice;
+   if (ice->draw.generation.shader)
+      return;
+
+   struct iris_screen *screen = (struct iris_screen *)ice->ctx.screen;
+   const struct {
+      char name[40];
+   } key = {
+      .name = "iris-generation-shader",
+   };
+   ice->draw.generation.shader =
+      iris_find_cached_shader(ice, IRIS_CACHE_BLORP, sizeof(key), &key);
+   if (ice->draw.generation.shader != NULL)
+      return;
+
+   const nir_shader_compiler_options *nir_options =
+#ifdef INTEL_USE_ELK
+      screen->elk ? screen->elk->nir_options[MESA_SHADER_COMPUTE] :
+#endif
+      &screen->brw->nir_options[MESA_SHADER_COMPUTE];
+
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT,
+                                                  nir_options,
+                                                  "iris-indirect-generate");
+
+   uint32_t uniform_size =
+      screen->vtbl.call_generation_shader(screen, &b);
+   uniform_size = align(uniform_size, REG_SIZE);
+
+   nir_shader *nir = b.shader;
+
+   NIR_PASS(_, nir, nir_lower_vars_to_ssa);
+   NIR_PASS(_, nir, nir_opt_cse);
+   NIR_PASS(_, nir, nir_opt_gcm, true, true);
+
+   nir_opt_peephole_select_options peephole_select_options = {
+      .limit = 1,
+   };
+   NIR_PASS(_, nir, nir_opt_peephole_select, &peephole_select_options);
+
+   NIR_PASS(_, nir, nir_lower_variable_initializers, ~0);
+
+   NIR_PASS(_, nir, nir_split_var_copies);
+   NIR_PASS(_, nir, nir_split_per_member_structs);
+
+   if (screen->brw) {
+      struct brw_nir_compiler_opts opts = {};
+      brw_preprocess_nir(screen->brw, nir, &opts);
+   } else {
+#ifdef INTEL_USE_ELK
+      assert(screen->elk);
+      struct elk_nir_compiler_opts opts = {};
+      elk_preprocess_nir(screen->elk, nir, &opts);
+#else
+      UNREACHABLE("no elk support");
+#endif
+   }
+
+   NIR_PASS(_, nir, nir_propagate_invariant, false);
+
+   NIR_PASS(_, nir, nir_lower_input_attachments,
+              &(nir_input_attachment_options) { });
+
+   /* Reset sizes before gathering information */
+   nir->global_mem_size = 0;
+   nir->scratch_size = 0;
+   nir->info.shared_size = 0;
+   nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+
+   NIR_PASS(_, nir, nir_opt_copy_prop);
+   NIR_PASS(_, nir, nir_opt_constant_folding);
+   NIR_PASS(_, nir, nir_opt_dce);
+
+   /* Do vectorizing here. For some reason when trying to do it in the back
+    * this just isn't working.
+    */
+   struct brw_nir_vectorize_mem_cb_data cb_data = {
+      .devinfo = screen->devinfo,
+   };
+   nir_load_store_vectorize_options options = {
+      .modes = nir_var_mem_ubo | nir_var_mem_ssbo | nir_var_mem_global,
+      .callback = brw_nir_should_vectorize_mem,
+      .cb_data = &cb_data,
+      .robust_modes = (nir_variable_mode)0,
+   };
+   NIR_PASS(_, nir, nir_opt_load_store_vectorize, &options);
+
+   nir->num_uniforms = uniform_size;
+
+   struct iris_compiled_shader *shader =
+      iris_create_shader_variant(screen, ice->shaders.cache,
+                                 MESA_SHADER_FRAGMENT,
+                                 IRIS_CACHE_BLORP,
+                                 sizeof(key), &key);
+
+   const unsigned *program;
+   if (screen->brw) {
+      union brw_any_prog_key prog_key;
+      memset(&prog_key, 0, sizeof(prog_key));
+
+      struct brw_fs_prog_data *prog_data = ralloc_size(NULL, sizeof(*prog_data));
+      memset(prog_data, 0, sizeof(*prog_data));
+      prog_data->base.push_sizes[0] = uniform_size;
+
+      struct genisa_stats stats[3];
+      struct brw_compile_fs_params params = {
+         .base = {
+            .nir = nir,
+            .key = &prog_key.fs.base,
+            .prog_data = (struct brw_stage_prog_data *)prog_data,
+            .log_data = &ice->dbg,
+            .debug_flag = DEBUG_WM,
+            .stats = stats,
+            .mem_ctx = nir,
+         },
+      };
+      program = brw_compile(screen->brw, &params.base);
+      assert(program);
+      iris_apply_brw_prog_data(shader, &prog_data->base, NULL);
+   } else {
+#ifdef INTEL_USE_ELK
+      union elk_any_prog_key prog_key;
+      memset(&prog_key, 0, sizeof(prog_key));
+
+      struct elk_fs_prog_data *prog_data = ralloc_size(NULL, sizeof(*prog_data));
+      memset(prog_data, 0, sizeof(*prog_data));
+      prog_data->base.nr_params = nir->num_uniforms / 4;
+
+      elk_nir_analyze_ubo_ranges(screen->elk, nir, prog_data->base.ubo_ranges);
+
+      struct elk_compile_stats stats[3];
+      struct elk_compile_fs_params params = {
+         .base = {
+            .nir = nir,
+            .log_data = &ice->dbg,
+            .debug_flag = DEBUG_WM,
+            .stats = stats,
+            .mem_ctx = nir,
+         },
+         .key = &prog_key.fs,
+         .prog_data = prog_data,
+      };
+      program = elk_compile_fs(screen->elk, &params);
+      assert(program);
+      iris_apply_elk_prog_data(shader, &prog_data->base);
+#else
+      UNREACHABLE("no elk support");
+#endif
+   }
+
+   struct iris_binding_table bt;
+   memset(&bt, 0, sizeof(bt));
+
+   iris_finalize_program(shader, NULL, NULL, 0, 0, &bt);
+
+   iris_upload_shader(screen, NULL, shader, ice->shaders.cache,
+                      ice->shaders.uploader_driver,
+                      IRIS_CACHE_BLORP, sizeof(key), &key, program);
+
+   ralloc_free(nir);
+
+   struct iris_bo *bo = iris_resource_bo(shader->assembly.res);
+   iris_use_pinned_bo(batch, bo, false, IRIS_DOMAIN_NONE);
+
+   ice->draw.generation.shader = shader;
 }

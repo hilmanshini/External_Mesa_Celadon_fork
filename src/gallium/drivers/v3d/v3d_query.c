@@ -22,6 +22,8 @@
  */
 
 #include "v3d_query.h"
+#include "broadcom/common/v3d_submit_util.h"
+#include "util/ralloc.h"
 
 int
 v3d_get_driver_query_group_info(struct pipe_screen *pscreen, unsigned index,
@@ -29,7 +31,20 @@ v3d_get_driver_query_group_info(struct pipe_screen *pscreen, unsigned index,
 {
         struct v3d_screen *screen = v3d_screen(pscreen);
 
-        return v3d_get_driver_query_group_info_perfcnt(screen, index, info);
+        if (!screen->has_perfmon)
+                return 0;
+
+        if (!info)
+                return 1;
+
+        if (index > 0)
+                return 0;
+
+        info->name = "V3D counters";
+        info->max_active_queries = DRM_V3D_MAX_PERF_COUNTERS;
+        info->num_queries = screen->perfcnt->max_perfcnt;
+
+        return 1;
 }
 
 int
@@ -37,8 +52,27 @@ v3d_get_driver_query_info(struct pipe_screen *pscreen, unsigned index,
                           struct pipe_driver_query_info *info)
 {
         struct v3d_screen *screen = v3d_screen(pscreen);
+        struct v3d_perfcntr_desc *desc;
 
-        return v3d_get_driver_query_info_perfcnt(screen, index, info);
+        if (!screen->has_perfmon)
+                return 0;
+
+        if (!info)
+                return screen->perfcnt->max_perfcnt;
+
+        desc = v3d_perfcntrs_get_by_index(screen->perfcnt, index);
+        if (!desc)
+                return 0;
+
+        info->name = desc->name;
+        info->group_id = 0;
+        info->query_type = PIPE_QUERY_DRIVER_SPECIFIC + index;
+        info->result_type = PIPE_DRIVER_QUERY_RESULT_TYPE_CUMULATIVE;
+        info->type = PIPE_DRIVER_QUERY_TYPE_UINT64;
+        info->max_value.u64 = 0;
+        info->flags = PIPE_DRIVER_QUERY_FLAG_BATCH;
+
+        return 1;
 }
 
 static struct pipe_query *
@@ -53,9 +87,9 @@ static struct pipe_query *
 v3d_create_batch_query(struct pipe_context *pctx, unsigned num_queries,
                        unsigned *query_types)
 {
-        return v3d_create_batch_query_perfcnt(v3d_context(pctx),
-                                              num_queries,
-                                              query_types);
+        struct v3d_context *v3d = v3d_context(pctx);
+
+        return v3d_create_batch_query_pipe(v3d, num_queries, query_types);
 }
 
 static void
@@ -105,6 +139,103 @@ v3d_set_active_query_state(struct pipe_context *pctx, bool enable)
         v3d->dirty |= V3D_DIRTY_STREAMOUT;
 }
 
+static void
+v3d_render_condition(struct pipe_context *pipe,
+                     struct pipe_query *query,
+                     bool condition,
+                     enum pipe_render_cond_flag mode)
+{
+        struct v3d_context *v3d = v3d_context(pipe);
+
+        v3d->cond_query = query;
+        v3d->cond_cond = condition;
+        v3d->cond_mode = mode;
+}
+
+/* helpers for multisync common code */
+static void *
+multisync_zalloc(void *mem_ctx, size_t size)
+{
+        struct v3d_context *v3d = mem_ctx;
+        return rzalloc_size(v3d, size);
+}
+
+static void
+multisync_free(void *mem_ctx, void *ptr)
+{
+        ralloc_free(ptr);
+}
+
+static bool
+multisync_set(struct v3d_context *v3d, struct v3d_multisync *ms,
+              struct v3d_submit_sync_info *sync_info,
+              struct drm_v3d_extension *next, enum v3d_queue wait_stage)
+{
+        assert(ms);
+        ms->ops.zalloc = multisync_zalloc;
+        ms->ops.free = multisync_free;
+        ms->ops.mem_ctx = NULL;
+
+        bool ret = v3d_multisync_init(ms, wait_stage,
+                                      sync_info->waits,
+                                      sync_info->wait_count,
+                                      sync_info->signals,
+                                      sync_info->signal_count,
+                                      next);
+
+        if (!ret)
+                mesa_loge("Multisync Set Failed");
+
+        return ret;
+}
+
+uint64_t
+v3d_get_timestamp(struct pipe_context *pctx)
+{
+        /* Calling glGetInteger64v with GL_TIMESTAMP will return the GPU
+         * timestamp when all previously given commands have issued, but not
+         * necessarily completed
+         */
+        v3d_flush(pctx);
+
+        /* Use os_time_get_nano as all of our timestamps come from the CPU clock */
+        return os_time_get_nano();
+}
+
+int
+v3d_submit_timestamp_query(struct pipe_context *pctx, struct v3d_bo *bo,
+                           uint32_t sync, uint32_t offset)
+{
+        struct v3d_context *v3d = v3d_context(pctx);
+        struct v3d_screen *screen = v3d->screen;
+
+        /* check for multisync support */
+        assert(screen->has_multisync);
+
+        /* check for a valid bo to store the timestamp result */
+        assert(bo);
+
+        /* check for a valid syncobj */
+        assert(sync);
+
+        struct v3d_submit_sync_info sync_info = {
+           .wait_count = 1,
+           .waits = &v3d->out_sync,
+           .signal_count = 1,
+           .signals = &v3d->out_sync,
+        };
+
+        struct v3d_multisync ms = {0};
+
+        if (!multisync_set(v3d, &ms, &sync_info, NULL, V3D_CPU))
+           return -ENOMEM;
+
+        int ret = v3d_submit_timestamp_query_ioctl(screen->fd, bo->handle,
+                                                   &offset, &sync, 1, &ms.ext.base);
+        v3d_multisync_free(&ms);
+        return ret;
+}
+
 void
 v3d_query_init(struct pipe_context *pctx)
 {
@@ -115,4 +246,6 @@ v3d_query_init(struct pipe_context *pctx)
         pctx->end_query = v3d_end_query;
         pctx->get_query_result = v3d_get_query_result;
         pctx->set_active_query_state = v3d_set_active_query_state;
+        pctx->render_condition = v3d_render_condition;
+        pctx->get_timestamp = v3d_get_timestamp;
 }

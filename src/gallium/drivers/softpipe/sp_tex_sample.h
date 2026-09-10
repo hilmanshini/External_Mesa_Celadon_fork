@@ -113,9 +113,9 @@ struct sp_sampler_view
    unsigned xpot;
    unsigned ypot;
 
-   boolean need_swizzle;
-   boolean pot2d;
-   boolean need_cube_convert;
+   bool need_swizzle;
+   bool pot2d;
+   bool need_cube_convert;
 
    /* these are different per shader type */
    struct softpipe_tex_tile_cache *cache;
@@ -134,8 +134,8 @@ struct sp_filter_funcs {
 struct sp_sampler {
    struct pipe_sampler_state base;
 
-   boolean min_mag_equal_repeat_linear;
-   boolean min_mag_equal;
+   bool min_mag_equal_repeat_linear;
+   bool min_mag_equal;
    unsigned min_img_filter;
 
    wrap_nearest_func nearest_texcoord_s;
@@ -163,11 +163,11 @@ struct sp_tgsi_sampler
 
 compute_lambda_func
 softpipe_get_lambda_func(const struct pipe_sampler_view *view,
-                         enum pipe_shader_type shader);
+                         mesa_shader_stage shader);
 
 compute_lambda_from_grad_func
 softpipe_get_lambda_from_grad_func(const struct pipe_sampler_view *view,
-                                   enum pipe_shader_type shader);
+                                   mesa_shader_stage shader);
 
 void *
 softpipe_create_sampler_state(struct pipe_context *pipe,

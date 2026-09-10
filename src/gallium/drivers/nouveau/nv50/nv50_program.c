@@ -21,6 +21,7 @@
  */
 
 #include "pipe/p_defines.h"
+#include "pipe/p_shader_tokens.h"
 
 #include "compiler/nir/nir.h"
 
@@ -64,14 +65,14 @@ nv50_vertprog_assign_slots(struct nv50_ir_prog_info_out *info)
 
    for (i = 0; i < info->numSysVals; ++i) {
       switch (info->sv[i].sn) {
-      case TGSI_SEMANTIC_INSTANCEID:
+      case SYSTEM_VALUE_INSTANCE_ID:
          prog->vp.attrs[2] |= NV50_3D_VP_GP_BUILTIN_ATTR_EN_INSTANCE_ID;
          continue;
-      case TGSI_SEMANTIC_VERTEXID:
+      case SYSTEM_VALUE_VERTEX_ID:
          prog->vp.attrs[2] |= NV50_3D_VP_GP_BUILTIN_ATTR_EN_VERTEX_ID;
          prog->vp.attrs[2] |= NV50_3D_VP_GP_BUILTIN_ATTR_EN_VERTEX_ID_DRAW_ARRAYS_ADD_START;
          continue;
-      case TGSI_SEMANTIC_PRIMID:
+      case SYSTEM_VALUE_PRIMITIVE_ID:
          prog->vp.attrs[2] |= NV50_3D_VP_GP_BUILTIN_ATTR_EN_PRIMITIVE_ID;
          break;
       default:
@@ -255,13 +256,13 @@ static int
 nv50_program_assign_varying_slots(struct nv50_ir_prog_info_out *info)
 {
    switch (info->type) {
-   case PIPE_SHADER_VERTEX:
+   case MESA_SHADER_VERTEX:
       return nv50_vertprog_assign_slots(info);
-   case PIPE_SHADER_GEOMETRY:
+   case MESA_SHADER_GEOMETRY:
       return nv50_vertprog_assign_slots(info);
-   case PIPE_SHADER_FRAGMENT:
+   case MESA_SHADER_FRAGMENT:
       return nv50_fragprog_assign_slots(info);
-   case PIPE_SHADER_COMPUTE:
+   case MESA_SHADER_COMPUTE:
       return 0;
    default:
       return -1;
@@ -331,7 +332,7 @@ nv50_program_translate(struct nv50_program *prog, uint16_t chipset,
    struct nv50_ir_prog_info *info;
    struct nv50_ir_prog_info_out info_out = {};
    int i, ret;
-   const uint8_t map_undef = (prog->type == PIPE_SHADER_VERTEX) ? 0x40 : 0x80;
+   const uint8_t map_undef = (prog->type == MESA_SHADER_VERTEX) ? 0x40 : 0x80;
 
    info = CALLOC_STRUCT(nv50_ir_prog_info);
    if (!info)
@@ -340,19 +341,7 @@ nv50_program_translate(struct nv50_program *prog, uint16_t chipset,
    info->type = prog->type;
    info->target = chipset;
 
-   info->bin.sourceRep = prog->pipe.type;
-   switch (prog->pipe.type) {
-   case PIPE_SHADER_IR_TGSI:
-      info->bin.source = (void *)prog->pipe.tokens;
-      break;
-   case PIPE_SHADER_IR_NIR:
-      info->bin.source = (void *)nir_shader_clone(NULL, prog->pipe.ir.nir);
-      break;
-   default:
-      assert(!"unsupported IR!");
-      free(info);
-      return false;
-   }
+   info->bin.nir = nir_shader_clone(NULL, prog->nir);
 
    info->bin.smemSize = prog->cp.smem_size;
    info->io.auxCBSlot = 15;
@@ -381,17 +370,17 @@ nv50_program_translate(struct nv50_program *prog, uint16_t chipset,
    prog->gp.has_layer = 0;
    prog->gp.has_viewport = 0;
 
-   if (prog->type == PIPE_SHADER_COMPUTE)
+   if (prog->type == MESA_SHADER_COMPUTE)
       info->prop.cp.inputOffset = 0x14;
 
    info_out.driverPriv = prog;
 
 #ifndef NDEBUG
-   info->optLevel = debug_get_num_option("NV50_PROG_OPTIMIZE", 3);
+   info->optLevel = debug_get_num_option("NV50_PROG_OPTIMIZE", 4);
    info->dbgFlags = debug_get_num_option("NV50_PROG_DEBUG", 0);
    info->omitLineNum = debug_get_num_option("NV50_PROG_DEBUG_OMIT_LINENUM", 0);
 #else
-   info->optLevel = 3;
+   info->optLevel = 4;
 #endif
 
    ret = nv50_ir_generate_code(info, &info_out);
@@ -417,7 +406,7 @@ nv50_program_translate(struct nv50_program *prog, uint16_t chipset,
    for (i = 0; i < info_out.io.cullDistances; ++i)
       prog->vp.clip_mode |= 1 << ((info_out.io.clipDistances + i) * 4);
 
-   if (prog->type == PIPE_SHADER_FRAGMENT) {
+   if (prog->type == MESA_SHADER_FRAGMENT) {
       if (info_out.prop.fp.writesDepth) {
          prog->fp.flags[0] |= NV50_3D_FP_CONTROL_EXPORTS_Z;
          prog->fp.flags[1] = 0x11;
@@ -425,23 +414,23 @@ nv50_program_translate(struct nv50_program *prog, uint16_t chipset,
       if (info_out.prop.fp.usesDiscard)
          prog->fp.flags[0] |= NV50_3D_FP_CONTROL_USES_KIL;
    } else
-   if (prog->type == PIPE_SHADER_GEOMETRY) {
+   if (prog->type == MESA_SHADER_GEOMETRY) {
       switch (info_out.prop.gp.outputPrim) {
-      case PIPE_PRIM_LINE_STRIP:
+      case MESA_PRIM_LINE_STRIP:
          prog->gp.prim_type = NV50_3D_GP_OUTPUT_PRIMITIVE_TYPE_LINE_STRIP;
          break;
-      case PIPE_PRIM_TRIANGLE_STRIP:
+      case MESA_PRIM_TRIANGLE_STRIP:
          prog->gp.prim_type = NV50_3D_GP_OUTPUT_PRIMITIVE_TYPE_TRIANGLE_STRIP;
          break;
-      case PIPE_PRIM_POINTS:
+      case MESA_PRIM_POINTS:
       default:
-         assert(info_out.prop.gp.outputPrim == PIPE_PRIM_POINTS);
+         assert(info_out.prop.gp.outputPrim == MESA_PRIM_POINTS);
          prog->gp.prim_type = NV50_3D_GP_OUTPUT_PRIMITIVE_TYPE_POINTS;
          break;
       }
       prog->gp.vert_count = CLAMP(info_out.prop.gp.maxVertices, 1, 1024);
    } else
-   if (prog->type == PIPE_SHADER_COMPUTE) {
+   if (prog->type == MESA_SHADER_COMPUTE) {
       for (i = 0; i < NV50_MAX_GLOBALS; i++) {
          prog->cp.gmem[i] = (struct nv50_gmem_state){
             .valid = info_out.prop.cp.gmem[i].valid,
@@ -451,9 +440,9 @@ nv50_program_translate(struct nv50_program *prog, uint16_t chipset,
       }
    }
 
-   if (prog->pipe.stream_output.num_outputs)
+   if (prog->stream_output.num_outputs)
       prog->so = nv50_program_create_strmout_state(&info_out,
-                                                   &prog->pipe.stream_output);
+                                                   &prog->stream_output);
 
    util_debug_message(debug, SHADER_INFO,
                       "type: %d, local: %d, shared: %d, gpr: %d, inst: %d, loops: %d, bytes: %d",
@@ -462,8 +451,7 @@ nv50_program_translate(struct nv50_program *prog, uint16_t chipset,
                       info_out.bin.codeSize);
 
 out:
-   if (info->bin.sourceRep == PIPE_SHADER_IR_NIR)
-      ralloc_free((void *)info->bin.source);
+   ralloc_free(info->bin.nir);
    FREE(info);
    return !ret;
 }
@@ -477,10 +465,10 @@ nv50_program_upload_code(struct nv50_context *nv50, struct nv50_program *prog)
    uint8_t prog_type;
 
    switch (prog->type) {
-   case PIPE_SHADER_VERTEX:   heap = nv50->screen->vp_code_heap; break;
-   case PIPE_SHADER_GEOMETRY: heap = nv50->screen->gp_code_heap; break;
-   case PIPE_SHADER_FRAGMENT: heap = nv50->screen->fp_code_heap; break;
-   case PIPE_SHADER_COMPUTE:  heap = nv50->screen->fp_code_heap; break;
+   case MESA_SHADER_VERTEX:   heap = nv50->screen->vp_code_heap; break;
+   case MESA_SHADER_GEOMETRY: heap = nv50->screen->gp_code_heap; break;
+   case MESA_SHADER_FRAGMENT: heap = nv50->screen->fp_code_heap; break;
+   case MESA_SHADER_COMPUTE:  heap = nv50->screen->fp_code_heap; break;
    default:
       assert(!"invalid program type");
       return false;
@@ -505,7 +493,7 @@ nv50_program_upload_code(struct nv50_context *nv50, struct nv50_program *prog)
       }
    }
 
-   if (prog->type == PIPE_SHADER_COMPUTE) {
+   if (prog->type == MESA_SHADER_COMPUTE) {
       /* CP code must be uploaded in FP code segment. */
       prog_type = NV50_SHADER_STAGE_FRAGMENT;
    } else {
@@ -543,8 +531,8 @@ nv50_program_upload_code(struct nv50_context *nv50, struct nv50_program *prog)
 void
 nv50_program_destroy(struct nv50_context *nv50, struct nv50_program *p)
 {
-   const struct pipe_shader_state pipe = p->pipe;
-   const ubyte type = p->type;
+   struct nir_shader *nir = p->nir;
+   const uint8_t type = p->type;
 
    if (p->mem) {
       if (nv50)
@@ -560,6 +548,6 @@ nv50_program_destroy(struct nv50_context *nv50, struct nv50_program *p)
 
    memset(p, 0, sizeof(*p));
 
-   p->pipe = pipe;
+   p->nir = nir;
    p->type = type;
 }

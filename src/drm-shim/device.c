@@ -84,7 +84,7 @@ drm_shim_device_init(void)
 
    shim_device.offset_map = _mesa_hash_table_u64_create(NULL);
 
-   mtx_init(&shim_device.mem_lock, mtx_plain);
+   mtx_init(&shim_device.lock, mtx_plain);
 
    shim_device.mem_fd = memfd_create("shim mem", MFD_CLOEXEC);
    assert(shim_device.mem_fd != -1);
@@ -103,7 +103,7 @@ drm_shim_device_init(void)
     * with EINVAL.
     */
 
-   shim_page_size = sysconf(_SC_PAGE_SIZE);
+   shim_page_size = sysconf(_SC_PAGESIZE);
 
    util_vma_heap_init(&shim_device.mem_heap, shim_page_size,
                       SHIM_MEM_SIZE - shim_page_size);
@@ -137,7 +137,9 @@ void drm_shim_fd_register(int fd, struct shim_fd *shim_fd)
    else
       p_atomic_inc(&shim_fd->refcount);
 
+   mtx_lock(&shim_device.lock);
    _mesa_hash_table_insert(shim_device.fd_map, (void *)(uintptr_t)(fd + 1), shim_fd);
+   mtx_unlock(&shim_device.lock);
 }
 
 static void handle_delete_fxn(struct hash_entry *entry)
@@ -147,12 +149,19 @@ static void handle_delete_fxn(struct hash_entry *entry)
 
 void drm_shim_fd_unregister(int fd)
 {
+   if (fd == -1)
+      return;
+
+   mtx_lock(&shim_device.lock);
    struct hash_entry *entry =
          _mesa_hash_table_search(shim_device.fd_map, (void *)(uintptr_t)(fd + 1));
-   if (!entry)
+   if (!entry) {
+      mtx_unlock(&shim_device.lock);
       return;
+   }
    struct shim_fd *shim_fd = entry->data;
    _mesa_hash_table_remove(shim_device.fd_map, entry);
+   mtx_unlock(&shim_device.lock);
 
    if (!p_atomic_dec_zero(&shim_fd->refcount))
       return;
@@ -164,15 +173,17 @@ void drm_shim_fd_unregister(int fd)
 struct shim_fd *
 drm_shim_fd_lookup(int fd)
 {
-   if (fd == -1)
+   if (!drm_shim_inited() || fd == -1)
       return NULL;
 
+   mtx_lock(&shim_device.lock);
    struct hash_entry *entry =
       _mesa_hash_table_search(shim_device.fd_map, (void *)(uintptr_t)(fd + 1));
 
-   if (!entry)
-      return NULL;
-   return entry->data;
+   struct shim_fd *result = entry ? entry->data : NULL;
+   mtx_unlock(&shim_device.lock);
+
+   return result;
 }
 
 /* ioctl used by drmGetVersion() */
@@ -221,6 +232,7 @@ drm_shim_ioctl_get_cap(int fd, unsigned long request, void *arg)
    case DRM_CAP_PRIME:
    case DRM_CAP_SYNCOBJ:
    case DRM_CAP_SYNCOBJ_TIMELINE:
+   case DRM_CAP_ADDFB2_MODIFIERS:
       gc->value = 1;
       return 0;
 
@@ -281,6 +293,11 @@ ioctl_fn_t core_ioctls[] = {
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD)] = drm_shim_ioctl_stub,
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE)] = drm_shim_ioctl_stub,
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_WAIT)] = drm_shim_ioctl_stub,
+   [_IOC_NR(DRM_IOCTL_SYNCOBJ_TRANSFER)] = drm_shim_ioctl_stub,
+   [_IOC_NR(DRM_IOCTL_SYNCOBJ_RESET)] = drm_shim_ioctl_stub,
+   [_IOC_NR(DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL)] = drm_shim_ioctl_stub,
+   [_IOC_NR(DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT)] = drm_shim_ioctl_stub,
+   [_IOC_NR(DRM_IOCTL_SYNCOBJ_QUERY)] = drm_shim_ioctl_stub,
 };
 
 /**
@@ -309,8 +326,8 @@ drm_shim_ioctl(int fd, unsigned long request, void *arg)
 
    if (nr >= DRM_COMMAND_BASE && nr < DRM_COMMAND_END) {
       fprintf(stderr,
-              "DRM_SHIM: unhandled driver DRM ioctl %d (0x%08lx)\n",
-              nr - DRM_COMMAND_BASE, request);
+              "DRM_SHIM: unhandled driver DRM ioctl %d (0x%x) (0x%08lx)\n",
+              nr - DRM_COMMAND_BASE, nr - DRM_COMMAND_BASE, request);
    } else {
       fprintf(stderr,
               "DRM_SHIM: unhandled core DRM ioctl 0x%X (0x%08lx)\n",
@@ -324,9 +341,9 @@ int
 drm_shim_bo_init(struct shim_bo *bo, size_t size)
 {
 
-   mtx_lock(&shim_device.mem_lock);
+   mtx_lock(&shim_device.lock);
    bo->mem_addr = util_vma_heap_alloc(&shim_device.mem_heap, size, shim_page_size);
-   mtx_unlock(&shim_device.mem_lock);
+   mtx_unlock(&shim_device.lock);
 
    if (!bo->mem_addr)
       return -ENOMEM;
@@ -369,9 +386,9 @@ drm_shim_bo_put(struct shim_bo *bo)
    if (shim_device.driver_bo_free)
       shim_device.driver_bo_free(bo);
 
-   mtx_lock(&shim_device.mem_lock);
+   mtx_lock(&shim_device.lock);
    util_vma_heap_free(&shim_device.mem_heap, bo->mem_addr, bo->size);
-   mtx_unlock(&shim_device.mem_lock);
+   mtx_unlock(&shim_device.lock);
    free(bo);
 }
 
@@ -401,12 +418,21 @@ drm_shim_bo_get_handle(struct shim_fd *shim_fd, struct shim_bo *bo)
 uint64_t
 drm_shim_bo_get_mmap_offset(struct shim_fd *shim_fd, struct shim_bo *bo)
 {
-   mtx_lock(&shim_device.mem_lock);
+   mtx_lock(&shim_device.lock);
    _mesa_hash_table_u64_insert(shim_device.offset_map, bo->mem_addr, bo);
-   mtx_unlock(&shim_device.mem_lock);
+   mtx_unlock(&shim_device.lock);
 
    /* reuse the buffer address as the mmap offset: */
    return bo->mem_addr;
+}
+
+void
+drm_shim_init_iomem_region(off64_t offset, size_t size,
+                           void *(*mmap_handler)(size_t, int, int, off64_t))
+{
+   shim_device.iomem_region.mmap = mmap_handler;
+   shim_device.iomem_region.start = offset;
+   shim_device.iomem_region.size = size;
 }
 
 /* For mmap() on the DRM fd, look up the BO from the "offset" and map the BO's
@@ -416,9 +442,15 @@ void *
 drm_shim_mmap(struct shim_fd *shim_fd, size_t length, int prot, int flags,
               int fd, off64_t offset)
 {
-   mtx_lock(&shim_device.mem_lock);
+   if (shim_device.iomem_region.mmap &&
+       offset >= shim_device.iomem_region.start &&
+       offset + length <= shim_device.iomem_region.start + shim_device.iomem_region.size) {
+      return shim_device.iomem_region.mmap(length, prot, flags, offset);
+   }
+
+   mtx_lock(&shim_device.lock);
    struct shim_bo *bo = _mesa_hash_table_u64_search(shim_device.offset_map, offset);
-   mtx_unlock(&shim_device.mem_lock);
+   mtx_unlock(&shim_device.lock);
 
    if (!bo)
       return MAP_FAILED;

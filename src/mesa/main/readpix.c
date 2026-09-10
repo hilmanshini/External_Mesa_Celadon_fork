@@ -23,6 +23,7 @@
  */
 
 #include "util/glheader.h"
+#include "util/perf/cpu_trace.h"
 
 #include "blend.h"
 #include "bufferobj.h"
@@ -106,10 +107,19 @@ _mesa_get_readpixels_transfer_ops(const struct gl_context *ctx,
       return 0;
    }
 
+   /* If on OpenGL ES with GL_EXT_render_snorm, negative values should
+    * not be clamped.
+    */
+   bool gles_snorm =
+      _mesa_has_EXT_render_snorm(ctx) &&
+      _mesa_get_format_datatype(texFormat) == GL_SIGNED_NORMALIZED;
+
    if (uses_blit) {
       /* For blit-based ReadPixels packing, the clamping is done automatically
-       * unless the type is float. */
+       * unless the type is float. Disable clamping when on ES using snorm.
+       */
       if (_mesa_get_clamp_read_color(ctx, ctx->ReadBuffer) &&
+          !gles_snorm &&
           (type == GL_FLOAT || type == GL_HALF_FLOAT ||
            type == GL_UNSIGNED_INT_10F_11F_11F_REV)) {
          transferOps |= IMAGE_CLAMP_BIT;
@@ -117,15 +127,19 @@ _mesa_get_readpixels_transfer_ops(const struct gl_context *ctx,
    }
    else {
       /* For CPU-based ReadPixels packing, the clamping must always be done
-       * for non-float types, */
-      if (_mesa_get_clamp_read_color(ctx, ctx->ReadBuffer) ||
-          (type != GL_FLOAT && type != GL_HALF_FLOAT &&
-           type != GL_UNSIGNED_INT_10F_11F_11F_REV)) {
+       * for non-float types, except on ES when using snorm types.
+       */
+      if ((_mesa_get_clamp_read_color(ctx, ctx->ReadBuffer) ||
+           (type != GL_FLOAT && type != GL_HALF_FLOAT &&
+            type != GL_UNSIGNED_INT_10F_11F_11F_REV)) && !gles_snorm) {
          transferOps |= IMAGE_CLAMP_BIT;
       }
 
-      /* For SNORM formats we only clamp if `type` is signed and clamp is `true` */
+      /* For SNORM formats we only clamp if `type` is signed and clamp is `true`
+       * and when not on ES using snorm types.
+       */
       if (!_mesa_get_clamp_read_color(ctx, ctx->ReadBuffer) &&
+          !gles_snorm &&
           _mesa_get_format_datatype(texFormat) == GL_SIGNED_NORMALIZED &&
           (type == GL_BYTE || type == GL_SHORT || type == GL_INT)) {
          transferOps &= ~IMAGE_CLAMP_BIT;
@@ -256,7 +270,7 @@ readpixels_memcpy(struct gl_context *ctx,
 
    /* memcpy*/
    if (dstStride == stride && dstStride == bytesPerRow) {
-      memcpy(dst, map, bytesPerRow * height);
+      memcpy(dst, map, (size_t)bytesPerRow * height);
    } else {
       for (j = 0; j < height; j++) {
          memcpy(dst, map, bytesPerRow);
@@ -547,7 +561,7 @@ read_rgba_pixels( struct gl_context *ctx,
          rgba = dst;
       } else {
          need_convert = true;
-         rgba = malloc(height * rgba_stride);
+         rgba = malloc((size_t)height * rgba_stride);
          if (!rgba) {
             _mesa_error(ctx, GL_OUT_OF_MEMORY, "glReadPixels");
             goto done_unmap;
@@ -561,8 +575,10 @@ read_rgba_pixels( struct gl_context *ctx,
                            needs_rebase ? rebase_swizzle : NULL);
 
       /* Handle transfer ops if necessary */
-      if (transferOps)
-         _mesa_apply_rgba_transfer_ops(ctx, transferOps, width * height, rgba);
+      if (transferOps) {
+         _mesa_apply_rgba_transfer_ops(ctx, transferOps,
+                                       (size_t)width * height, rgba);
+      }
 
       /* If we had to rebase, we have already taken care of that */
       needs_rebase = false;
@@ -603,14 +619,14 @@ read_rgba_pixels( struct gl_context *ctx,
       luminance_stride = width * sizeof(GLfloat);
       if (format == GL_LUMINANCE_ALPHA)
          luminance_stride *= 2;
-      luminance_bytes = height * luminance_stride;
+      luminance_bytes = (size_t)height * luminance_stride;
       luminance = malloc(luminance_bytes);
       if (!luminance) {
          _mesa_error(ctx, GL_OUT_OF_MEMORY, "glReadPixels");
          free(rgba);
          goto done_unmap;
       }
-      _mesa_pack_luminance_from_rgba_float(width * height, src,
+      _mesa_pack_luminance_from_rgba_float((size_t)width * height, src,
                                            luminance, format, transferOps);
 
       /* Convert from Luminance float to dst (this will hadle type conversion
@@ -622,7 +638,7 @@ read_rgba_pixels( struct gl_context *ctx,
                            width, height, NULL);
       free(luminance);
    } else {
-      _mesa_pack_luminance_from_rgba_integer(width * height, src, !src_is_uint,
+      _mesa_pack_luminance_from_rgba_integer((size_t)width * height, src, !src_is_uint,
                                              dst, format, type);
    }
 
@@ -968,15 +984,6 @@ read_pixels_es3_error_check(struct gl_context *ctx, GLenum format, GLenum type,
                return GL_NO_ERROR;
          }
       }
-      if (type == GL_UNSIGNED_BYTE) {
-         switch (internalFormat) {
-         case GL_R8_SNORM:
-         case GL_RG8_SNORM:
-         case GL_RGBA8_SNORM:
-            if (_mesa_has_EXT_render_snorm(ctx))
-               return GL_NO_ERROR;
-         }
-      }
       break;
    case GL_BGRA:
       /* GL_EXT_read_format_bgra */
@@ -1042,16 +1049,11 @@ read_pixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format,
    struct gl_renderbuffer *rb;
    struct gl_pixelstore_attrib clippedPacking;
 
+   MESA_TRACE_FUNC();
+
    GET_CURRENT_CONTEXT(ctx);
 
    FLUSH_VERTICES(ctx, 0, 0);
-
-   if (MESA_VERBOSE & VERBOSE_API)
-      _mesa_debug(ctx, "glReadPixels(%d, %d, %s, %s, %p)\n",
-                  width, height,
-                  _mesa_enum_to_string(format),
-                  _mesa_enum_to_string(type),
-                  pixels);
 
    if (!no_error && (width < 0 || height < 0)) {
       _mesa_error( ctx, GL_INVALID_VALUE,
@@ -1087,7 +1089,7 @@ read_pixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format,
        * combination is, and Mesa can handle anything valid.  Just work instead.
        */
       if (_mesa_is_gles(ctx)) {
-         if (ctx->API == API_OPENGLES2 &&
+         if (_mesa_is_gles2(ctx) &&
              _mesa_is_color_format(format) &&
              _mesa_get_color_read_format(ctx, NULL, "glReadPixels") == format &&
              _mesa_get_color_read_type(ctx, NULL, "glReadPixels") == type) {
@@ -1119,8 +1121,25 @@ read_pixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format,
          return;
       }
 
+      /**
+       * From the GL_EXT_multisampled_render_to_texture spec:
+       *
+       * Similarly, for ReadPixels:
+       * "An INVALID_OPERATION error is generated if the value of READ_-
+       *  FRAMEBUFFER_BINDING (see section 9) is non-zero, the read framebuffer
+       *  is framebuffer complete, and the value of SAMPLE_BUFFERS for the read
+       *  framebuffer is one."
+       *
+       * These errors do not apply to textures and renderbuffers that have
+       * associated multisample data specified by the mechanisms described in
+       * this extension, i.e., the above operations are allowed even when
+       * SAMPLE_BUFFERS is non-zero for renderbuffers created via Renderbuffer-
+       * StorageMultisampleEXT or textures attached via FramebufferTexture2D-
+       * MultisampleEXT.
+       */
       if (_mesa_is_user_fbo(ctx->ReadBuffer) &&
-          ctx->ReadBuffer->Visual.samples > 0) {
+          ctx->ReadBuffer->Visual.samples > 0 &&
+          !_mesa_has_rtt_samples(ctx->ReadBuffer)) {
          _mesa_error(ctx, GL_INVALID_OPERATION, "glReadPixels(multisample FBO)");
          return;
       }
@@ -1134,14 +1153,28 @@ read_pixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format,
        * integer-valued or both non-integer-valued.
        */
       if (ctx->Extensions.EXT_texture_integer && _mesa_is_color_format(format)) {
-         const struct gl_renderbuffer *rb = ctx->ReadBuffer->_ColorReadBuffer;
-         const GLboolean srcInteger = _mesa_is_format_integer_color(rb->Format);
+         const struct gl_renderbuffer *crb = ctx->ReadBuffer->_ColorReadBuffer;
+         const GLboolean srcInteger = _mesa_is_format_integer_color(crb->Format);
          const GLboolean dstInteger = _mesa_is_enum_format_integer(format);
          if (dstInteger != srcInteger) {
             _mesa_error(ctx, GL_INVALID_OPERATION,
                         "glReadPixels(integer / non-integer format mismatch");
             return;
          }
+      }
+
+      /**
+       * OVR_multiview
+
+         INVALID_FRAMEBUFFER_OPERATION is generated by commands that read from the
+         framebuffer such as BlitFramebuffer, ReadPixels, CopyTexImage*, and
+         CopyTexSubImage*, if the number of views in the current read framebuffer
+         is greater than 1.
+       */
+      if (rb->rtt_numviews > 1) {
+         _mesa_error(ctx, GL_INVALID_FRAMEBUFFER_OPERATION,
+                     "glReadPixels(NumViews > 1 on read framebuffer)");
+         return;
       }
    }
 

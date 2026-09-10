@@ -24,6 +24,7 @@
 #include "vk_sync_binary.h"
 
 #include "vk_util.h"
+#include "util/os_time.h"
 
 static struct vk_sync_binary *
 to_vk_sync_binary(struct vk_sync *sync)
@@ -44,7 +45,6 @@ vk_sync_binary_init(struct vk_device *device,
       container_of(binary->sync.type, struct vk_sync_binary_type, sync);
 
    assert(!(sync->flags & VK_SYNC_IS_TIMELINE));
-   assert(!(sync->flags & VK_SYNC_IS_SHAREABLE));
 
    binary->next_point = (initial_value == 0);
 
@@ -91,6 +91,9 @@ vk_sync_binary_wait_many(struct vk_device *device,
                          enum vk_sync_wait_flags wait_flags,
                          uint64_t abs_timeout_ns)
 {
+   if (wait_count == 0)
+      return VK_SUCCESS;
+
    STACK_ARRAY(struct vk_sync_wait, timeline_waits, wait_count);
 
    for (uint32_t i = 0; i < wait_count; i++) {
@@ -108,6 +111,29 @@ vk_sync_binary_wait_many(struct vk_device *device,
 
    STACK_ARRAY_FINISH(timeline_waits);
 
+   return result;
+}
+
+static VkResult
+vk_sync_binary_import_sync_file(struct vk_device *device,
+                                struct vk_sync *sync,
+                                int fd)
+{
+   /* FD == -1 case handled by vk_sync_import_sync_file() */
+   return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+}
+
+static VkResult
+vk_sync_binary_export_sync_file(struct vk_device *device,
+                                struct vk_sync *sync,
+                                int *pFd)
+{
+   VkResult result;
+   struct vk_sync_binary *binary = to_vk_sync_binary(sync);
+
+   result = vk_sync_wait(device, &binary->timeline, binary->next_point, 0,
+                         OS_TIMEOUT_INFINITE);
+   *pFd = -1;
    return result;
 }
 
@@ -132,6 +158,8 @@ vk_sync_binary_get_type(const struct vk_sync_type *timeline_type)
          .reset = vk_sync_binary_reset,
          .signal = vk_sync_binary_signal,
          .wait_many = vk_sync_binary_wait_many,
+         .import_sync_file = vk_sync_binary_import_sync_file,
+         .export_sync_file = vk_sync_binary_export_sync_file,
       },
       .timeline_type = timeline_type,
    };

@@ -1,38 +1,18 @@
-/**********************************************************
- * Copyright 2014-2022 VMware, Inc.  All rights reserved.
- *
- * Permission is hereby granted, free of charge, to any person
- * obtaining a copy of this software and associated documentation
- * files (the "Software"), to deal in the Software without
- * restriction, including without limitation the rights to use, copy,
- * modify, merge, publish, distribute, sublicense, and/or sell copies
- * of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be
- * included in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- *
- **********************************************************/
+/*
+ * Copyright (c) 2014-2024 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc.
+ * and/or its subsidiaries.
+ * SPDX-License-Identifier: MIT
+ */
 
 #include "util/u_inlines.h"
 #include "util/u_memory.h"
 #include "util/u_bitmask.h"
 #include "util/u_simple_shaders.h"
-#include "tgsi/tgsi_ureg.h"
 #include "tgsi/tgsi_point_sprite.h"
 #include "tgsi/tgsi_dynamic_indexing.h"
 #include "tgsi/tgsi_vpos.h"
 #include "tgsi/tgsi_dump.h"
-#include "tgsi/tgsi_info.h"
 
 #include "svga_context.h"
 #include "svga_shader.h"
@@ -66,14 +46,14 @@ insert_at_head(struct svga_shader *head, struct svga_shader *shader)
  */
 static void
 bind_shader(struct svga_context *svga,
-            const enum pipe_shader_type shader_type,
+            const mesa_shader_stage shader_type,
             struct svga_shader *shader)
 {
    switch (shader_type) {
-   case PIPE_SHADER_VERTEX:
+   case MESA_SHADER_VERTEX:
       svga->pipe.bind_vs_state(&svga->pipe, shader);
       break;
-   case PIPE_SHADER_FRAGMENT:
+   case MESA_SHADER_FRAGMENT:
       /**
        * Avoid pipe->bind_fs_state call because it goes through aapoint
        * layer. We loose linked list of all transformed shaders if aapoint
@@ -81,13 +61,13 @@ bind_shader(struct svga_context *svga,
        */
       svga_bind_fs_state(&svga->pipe, shader);
       break;
-   case PIPE_SHADER_GEOMETRY:
+   case MESA_SHADER_GEOMETRY:
       svga->pipe.bind_gs_state(&svga->pipe, shader);
       break;
-   case PIPE_SHADER_TESS_CTRL:
+   case MESA_SHADER_TESS_CTRL:
       svga->pipe.bind_tcs_state(&svga->pipe, shader);
       break;
-   case PIPE_SHADER_TESS_EVAL:
+   case MESA_SHADER_TESS_EVAL:
       svga->pipe.bind_tes_state(&svga->pipe, shader);
       break;
    default:
@@ -102,24 +82,24 @@ bind_shader(struct svga_context *svga,
  */
 static void *
 create_shader(struct svga_context *svga,
-              const enum pipe_shader_type shader_type,
+              const mesa_shader_stage shader_type,
               struct pipe_shader_state *state)
 {
    switch (shader_type) {
-   case PIPE_SHADER_VERTEX:
+   case MESA_SHADER_VERTEX:
       return svga->pipe.create_vs_state(&svga->pipe, state);
-   case PIPE_SHADER_FRAGMENT:
+   case MESA_SHADER_FRAGMENT:
       /**
        * Avoid pipe->create_fs_state call because it goes through aapoint
        * layer. We loose linked list of all transformed shaders if aapoint
        * is used.
        */
       return svga_create_fs_state(&svga->pipe, state);
-   case PIPE_SHADER_GEOMETRY:
+   case MESA_SHADER_GEOMETRY:
       return svga->pipe.create_gs_state(&svga->pipe, state);
-   case PIPE_SHADER_TESS_CTRL:
+   case MESA_SHADER_TESS_CTRL:
       return svga->pipe.create_tcs_state(&svga->pipe, state);
-   case PIPE_SHADER_TESS_EVAL:
+   case MESA_SHADER_TESS_EVAL:
       return svga->pipe.create_tes_state(&svga->pipe, state);
    default:
       return NULL;
@@ -132,7 +112,7 @@ write_vpos(struct svga_context *svga,
            struct svga_shader *shader)
 {
    struct svga_token_key key;
-   boolean use_existing = FALSE;
+   bool use_existing = false;
    struct svga_shader *transform_shader;
    const struct tgsi_shader_info *info = &shader->tgsi_info;
 
@@ -143,7 +123,7 @@ write_vpos(struct svga_context *svga,
    if (shader->next) {
       transform_shader = svga_search_shader_token_key(shader->next, &key);
       if (transform_shader) {
-         use_existing = TRUE;
+         use_existing = true;
       }
    }
 
@@ -179,7 +159,7 @@ transform_dynamic_indexing(struct svga_context *svga,
                            struct svga_shader *shader)
 {
    struct svga_token_key key;
-   boolean use_existing = FALSE;
+   bool use_existing = false;
    struct svga_shader *transform_shader;
    const struct tgsi_shader_info *info = &shader->tgsi_info;
 
@@ -190,7 +170,7 @@ transform_dynamic_indexing(struct svga_context *svga,
    if (shader->next) {
       transform_shader = svga_search_shader_token_key(shader->next, &key);
       if (transform_shader) {
-         use_existing = TRUE;
+         use_existing = true;
       }
    }
 
@@ -212,8 +192,7 @@ transform_dynamic_indexing(struct svga_context *svga,
    }
    transform_shader->token_key = key;
    bind_shader(svga, info->processor, transform_shader);
-   if (new_tokens)
-      FREE(new_tokens);
+   FREE(new_tokens);
 }
 
 
@@ -243,7 +222,7 @@ emulate_point_sprite(struct svga_context *svga,
    int aa_point_coord_index = -1;
    struct pipe_screen *screen = svga->pipe.screen;
    bool has_texcoord_semantic =
-      screen->get_param(screen, PIPE_CAP_TGSI_TEXCOORD);
+      screen->caps.tgsi_texcoord;
 
    assert(tokens != NULL);
 
@@ -289,7 +268,7 @@ emulate_point_sprite(struct svga_context *svga,
                                          key.gs.sprite_coord_enable,
                                          key.gs.sprite_origin_upper_left,
                                          key.gs.point_pos_stream_out,
-					 has_texcoord_semantic,
+                                         has_texcoord_semantic,
                                          key.gs.aa_point ?
                                             &aa_point_coord_index : NULL);
 
@@ -334,7 +313,7 @@ emulate_point_sprite(struct svga_context *svga,
          return NULL;
       }
 
-      gs->wide_point = TRUE;
+      gs->wide_point = true;
       gs->aa_point_coord_index = aa_point_coord_index;
       gs->base.token_key = key;
       gs->base.parent = &orig_gs->base;
@@ -408,7 +387,7 @@ add_point_sprite_shader(struct svga_context *svga)
 }
 
 
-static boolean
+static bool
 has_dynamic_indexing(const struct tgsi_shader_info *info)
 {
    return (info->dim_indirect_files & (1u << TGSI_FILE_CONSTANT)) ||
@@ -451,7 +430,7 @@ update_tgsi_transform(struct svga_context *svga, uint64_t dirty)
       transform_dynamic_indexing(svga, &tes->base);
    }
 
-   if (svga->curr.reduced_prim == PIPE_PRIM_POINTS) {
+   if (svga->curr.reduced_prim == MESA_PRIM_POINTS) {
       /* If the current prim type is POINTS and the current geometry shader
        * emits wide points, transform the shader to emulate wide points using
        * quads. NOTE: we don't do emulation of wide points in GS when

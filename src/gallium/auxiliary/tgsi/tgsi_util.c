@@ -39,17 +39,6 @@ union pointer_hack
    uint64_t uint64;
 };
 
-void *
-tgsi_align_128bit(void *unaligned)
-{
-   union pointer_hack ph;
-
-   ph.uint64 = 0;
-   ph.pointer = unaligned;
-   ph.uint64 = (ph.uint64 + 15) & ~15;
-   return ph.pointer;
-}
-
 unsigned
 tgsi_util_get_src_register_swizzle(const struct tgsi_src_register *reg,
                                    unsigned component)
@@ -76,30 +65,6 @@ tgsi_util_get_full_src_register_swizzle(
    unsigned component)
 {
    return tgsi_util_get_src_register_swizzle(&reg->Register, component);
-}
-
-
-void
-tgsi_util_set_src_register_swizzle(struct tgsi_src_register *reg,
-                                   unsigned swizzle,
-                                   unsigned component)
-{
-   switch (component) {
-   case 0:
-      reg->SwizzleX = swizzle;
-      break;
-   case 1:
-      reg->SwizzleY = swizzle;
-      break;
-   case 2:
-      reg->SwizzleZ = swizzle;
-      break;
-   case 3:
-      reg->SwizzleW = swizzle;
-      break;
-   default:
-      assert(0);
-   }
 }
 
 
@@ -145,8 +110,6 @@ tgsi_util_get_src_usage_mask(enum tgsi_opcode opcode,
 
    case TGSI_OPCODE_DP2:
    case TGSI_OPCODE_PK2H:
-   case TGSI_OPCODE_PK2US:
-   case TGSI_OPCODE_DFRACEXP:
    case TGSI_OPCODE_F2D:
    case TGSI_OPCODE_I2D:
    case TGSI_OPCODE_U2D:
@@ -175,8 +138,6 @@ tgsi_util_get_src_usage_mask(enum tgsi_opcode opcode,
    case TGSI_OPCODE_DSLT:
    case TGSI_OPCODE_DSGE:
    case TGSI_OPCODE_DP4:
-   case TGSI_OPCODE_PK4B:
-   case TGSI_OPCODE_PK4UB:
    case TGSI_OPCODE_D2F:
    case TGSI_OPCODE_D2I:
    case TGSI_OPCODE_D2U:
@@ -191,23 +152,6 @@ tgsi_util_get_src_usage_mask(enum tgsi_opcode opcode,
    case TGSI_OPCODE_I64SGE:
    case TGSI_OPCODE_I642F:
       read_mask = TGSI_WRITEMASK_XYZW;
-      break;
-
-   case TGSI_OPCODE_LIT:
-      read_mask = write_mask & TGSI_WRITEMASK_YZ ?
-                     TGSI_WRITEMASK_XY | TGSI_WRITEMASK_W : 0;
-      break;
-
-   case TGSI_OPCODE_EXP:
-   case TGSI_OPCODE_LOG:
-      read_mask = write_mask & TGSI_WRITEMASK_XYZ ? TGSI_WRITEMASK_X : 0;
-      break;
-
-   case TGSI_OPCODE_DST:
-      if (src_idx == 0)
-         read_mask = TGSI_WRITEMASK_YZ;
-      else
-         read_mask = TGSI_WRITEMASK_YW;
       break;
 
    case TGSI_OPCODE_DLDEXP:
@@ -232,8 +176,6 @@ tgsi_util_get_src_usage_mask(enum tgsi_opcode opcode,
       break;
 
    case TGSI_OPCODE_TEX:
-   case TGSI_OPCODE_TEX_LZ:
-   case TGSI_OPCODE_TXF_LZ:
    case TGSI_OPCODE_TXF:
    case TGSI_OPCODE_TXB:
    case TGSI_OPCODE_TXL:
@@ -387,24 +329,6 @@ tgsi_util_get_inst_usage_mask(const struct tgsi_full_instruction *inst,
 }
 
 /**
- * Convert a tgsi_ind_register into a tgsi_src_register
- */
-struct tgsi_src_register
-tgsi_util_get_src_from_ind(const struct tgsi_ind_register *reg)
-{
-   struct tgsi_src_register src = { 0 };
-
-   src.File = reg->File;
-   src.Index = reg->Index;
-   src.SwizzleX = reg->Swizzle;
-   src.SwizzleY = reg->Swizzle;
-   src.SwizzleZ = reg->Swizzle;
-   src.SwizzleW = reg->Swizzle;
-
-   return src;
-}
-
-/**
  * Return the dimension of the texture coordinates (layer included for array
  * textures), as well as the location of the shadow reference value or the
  * sample index.
@@ -508,8 +432,8 @@ tgsi_is_shadow_target(enum tgsi_texture_type target)
    case TGSI_TEXTURE_SHADOW2D_ARRAY:
    case TGSI_TEXTURE_SHADOWCUBE:
    case TGSI_TEXTURE_SHADOWCUBE_ARRAY:
-      return TRUE;
+      return true;
    default:
-      return FALSE;
+      return false;
    }
 }
