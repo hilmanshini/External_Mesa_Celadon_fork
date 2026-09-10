@@ -83,7 +83,7 @@ MESA3D_GLES_BINS := \
     $($(M_TARGET_PREFIX)MESA3D_LIBGLESV2_BIN) \
 
 MESON_GEN_NINJA := \
-	cd $(MESON_OUT_DIR) && PATH=/usr/bin:/usr/local/bin:$$PATH meson ./build     \
+	cd $(MESON_OUT_DIR) && PATH=/tmp/mesa-compiler/bin:/usr/bin:/usr/local/bin:$$PATH meson ./build     \
 	--cross-file $(call relative-to-absolute,$(MESON_GEN_DIR))/aosp_cross        \
 	--buildtype=release                                                          \
 	-Dplatforms=android                                                          \
@@ -97,6 +97,9 @@ MESON_GEN_NINJA := \
 	-Damdgpu-virtio=$(if $(filter true,$(BOARD_MESA3D_AMDGPU_VIRTIO)),true,false)\
 	-Dcpp_rtti=false                                                             \
 	-Dlmsensors=disabled                                                         \
+	-Dallow-fallback-for=libdrm                                                  \
+	-Dmesa-clc=system -Dprecomp-compiler=system                                  \
+	-Dspirv-tools=disabled                                                       \
 	-Dandroid-libbacktrace=disabled                                              \
 	$(BOARD_MESA3D_MESON_ARGS)                                                   \
 
